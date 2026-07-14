@@ -1,0 +1,50 @@
+#!/bin/sh
+# DIR-842 R1 (RTL8197F) — default first-boot bring-up for the OpenWrt port.
+#
+# Brings up a LAN bridge on eth0 and a working 5 GHz AP on the on-board
+# RTL8822BE (rtw88 over PCIe — this is the chip's primary band; 2.4 GHz on it
+# is a weak secondary path). The RTL8822BE efuse is BLANK on this board, so a
+# kernel patch (mac80211 patches/realtek/04-) assigns a random MAC if none is
+# set; here we also pin a stable locally-administered MAC for a deterministic
+# BSSID. Real gateway config (WAN, real SSID/PSK, firewall zones) belongs in
+# the private profile overlay (dir842-profile), layered at build time via
+# PROFILE=. There is no managed WAN port yet (see docs/ASSESSMENT.md), so the
+# default wan interface is removed to avoid netifd errors.
+
+# --- LAN: br-lan over eth0, 192.168.0.1/24 (D-Link stock LAN subnet) ---
+uci -q batch <<'EOF'
+set network.lan.type='bridge'
+set network.lan.ifname='eth0'
+set network.lan.proto='static'
+set network.lan.ipaddr='192.168.0.1'
+set network.lan.netmask='255.255.255.0'
+delete network.lan.ip6assign
+delete network.wan
+delete network.wan6
+commit network
+EOF
+
+# --- 5 GHz AP on the PCIe RTL8822BE (rtw88); 2x2 VHT80. hwmode 11a = 5 GHz on
+#     this 4.14-era netifd. country BR unlocks the UNII-1 channels for beaconing
+#     (world/'00' marks them no-IR). macaddr set because the efuse is blank. ---
+uci -q batch <<'EOF'
+delete wireless
+set wireless.radio0='wifi-device'
+set wireless.radio0.type='mac80211'
+set wireless.radio0.hwmode='11a'
+set wireless.radio0.channel='36'
+set wireless.radio0.htmode='VHT80'
+set wireless.radio0.country='BR'
+set wireless.radio0.disabled='0'
+set wireless.default_radio0='wifi-iface'
+set wireless.default_radio0.device='radio0'
+set wireless.default_radio0.network='lan'
+set wireless.default_radio0.mode='ap'
+set wireless.default_radio0.ssid='DIR842-OpenWrt'
+set wireless.default_radio0.encryption='psk2'
+set wireless.default_radio0.key='dir842wifi'
+set wireless.default_radio0.macaddr='02:11:22:33:44:56'
+commit wireless
+EOF
+
+exit 0

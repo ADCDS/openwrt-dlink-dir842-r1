@@ -1,0 +1,18 @@
+--- a/drivers/net/wireless/realtek/rtw88/rtw8822b.c
++++ b/drivers/net/wireless/realtek/rtw88/rtw8822b.c
+@@ -34,6 +34,15 @@
+ 	map = (struct rtw8822b_efuse *)log_map;
+ 
+ 	efuse->rfe_option = map->rfe_option;
++	if (efuse->rfe_option == 0xff) {
++		/* Some boards (e.g. D-Link DIR-842) ship a blank RTL8822BE efuse
++		 * (all 0xff); rtw88 only supports RFE types {2,3,5}. Default to 2
++		 * (standard 2T2R front-end) so chip init proceeds, mirroring the
++		 * crystal_cap/pa_type/lna_type 0xff fallbacks that
++		 * rtw_chip_efuse_info_setup() already applies. */
++		pr_info("rtw88: blank efuse (rfe=0xff), defaulting rfe_option=2\n");
++		efuse->rfe_option = 2;
++	}
+ 	efuse->rf_board_option = map->rf_board_option;
+ 	efuse->crystal_cap = map->xtal_k;
+ 	efuse->pa_type_2g = map->pa_type;

@@ -1,0 +1,170 @@
+// SPDX-License-Identifier: GPL-2.0
+/dts-v1/;
+
+/ {
+	#address-cells = <1>;
+	#size-cells = <1>;
+	compatible = "realtek,rtl8197f-soc";
+
+	cpus {
+		cpu@0 {
+			compatible = "mips,mips24KEc";
+		};
+	};
+
+	cpuintc: cpuintc {
+		#address-cells = <0>;
+		#interrupt-cells = <1>;
+		interrupt-controller;
+		compatible = "mti,cpu-interrupt-controller";
+	};
+
+	soc {
+		compatible = "simple-bus";
+		ranges = <0x0 0x18000000 0x10000>;
+
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		sysc: system-controller@0 {
+			compatible = "realtek,rtl819x-sysc";
+			reg = <0x0 0x1000>;
+		};
+
+		memc: memory-controller@1000 {
+			compatible = "realtek,rtl819x-memc";
+			reg = <0x1000 0x100>;
+		};		
+
+		intc: intc@3000 {
+			compatible = "realtek,rtl819x-intc";
+			reg = <0x3000 0x100>;
+
+			interrupt-controller;
+			#interrupt-cells = <1>;
+
+			interrupt-parent = <&cpuintc>;
+			interrupts = <2>;
+		};
+
+		gpio0: gpio-controller@3500 {
+			compatible = "realtek,rtl8197f-gpio";
+			reg = <0x3500 0x1c>;
+			gpio-controller;
+			#gpio-cells = <2>;
+			status = "disabled";
+		};
+
+		gpio1: gpio-controller@351C {
+			compatible = "realtek,rtl8197f-gpio";
+			reg = <0x351C 0x1c>;
+			gpio-controller;
+			#gpio-cells = <2>;
+			status = "disabled";
+		};
+	};
+
+	serial0: serial@18147000 {
+		compatible = "realtek,rtl8197f-uart", "snps,dw-apb-uart";
+		reg = <0x18147000 0x100>;
+
+		interrupt-parent = <&intc>;
+		interrupts = <9>;
+
+		reg-io-width = <4>;
+		reg-shift = <2>;
+		clock-frequency = <100000000>;
+	};
+
+	spi0: spi@18143000 {
+		compatible = "realtek,sheipa-spi";
+		reg = <0x18143000 0x1000
+			   0x10000000 0x2000000>;
+
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		clock-frequency = <100000000>;
+
+		status = "disabled";
+	};
+
+	ethernet: ethernet@18010000 {
+		compatible = "realtek,rtl8197f-eth", "realtek,rtl819x-eth";
+		reg = <0x18010000 0x100>;
+
+		/*
+		 * The switch-core CPU-port NIC line (GISR bit 15 / BSP_SW_IE)
+		 * is routed by the SoC IRR to MIPS CPU interrupt IP4.
+		 */
+		interrupt-parent = <&cpuintc>;
+		interrupts = <4>;
+	};
+
+	/*
+	 * PCIe reference clock for the pci-realtek RC PHY MDIO setup. The driver
+	 * picks the 40 MHz vs 25 MHz PHY register sequence off clk_get_rate().
+	 * DIR-842: the SoC bootstrap register proves the crystal is 25 MHz —
+	 * boot log "BOOTSTRAP = 8197f001 0 40258ec0 80000800", so sr_r32(0x08) =
+	 * 0x40258ec0, and REALTEK_SR_BS_40MHZ = BIT(24) is CLEAR (0x40258ec0 &
+	 * 0x01000000 == 0) => 25 MHz, NOT 40 MHz. The first M5 boot had this at
+	 * 40 MHz, so the driver programmed the PHY with 40 MHz coefficients for a
+	 * 25 MHz reference and the link never trained ("PCIe link is down").
+	 */
+	pcie_clk: pcie_clk {
+		#clock-cells = <0>;
+		compatible = "fixed-clock";
+		clock-frequency = <25000000>;
+	};
+
+	/*
+	 * RTL8197F PCIe root complexes. The controller sits at the same 0x18b0_xxxx
+	 * base as the RTL819x family (vendor SDK: PCIE_PHY0 0xb8b0_1008), so the
+	 * pci-realtek "realtek,rtl8196b-pci" driver binds. pcie0 carries the on-board
+	 * RTL8822BE (5 GHz). Interrupts 5/6 to cpuintc mirror RTL819X.dtsi.
+	 */
+	pcie0: pcie-controller@18b00000 {
+		compatible = "realtek,rtl8196b-pci";
+		#address-cells = <3>;
+		#size-cells = <2>;
+		bus-range = <0 255>;
+		reg = <0x18b00000 0x1000>,	/* RC CFG */
+		      <0x18b01000 0x1000>,	/* RC CFG EXT */
+		      <0x18b10000 0x1000>,	/* DEV CFG0 (EP) */
+		      <0x18b11000 0x1000>;	/* DEV CFG1 (EP) */
+		reg-names = "rc_cfg_base", "rc_ext_base", "dev_cfg0_base", "dev_cfg1_base";
+		ranges = <0x02000000 0 0x00000000 0x19000000 0 0x01000000	/* pci memory */
+			  0x01000000 0 0x00000000 0x18c00000 0 0x00200000>;	/* io space */
+		interrupt-parent = <&cpuintc>;
+		interrupts = <5>;
+		clocks = <&pcie_clk>;
+		status = "okay";
+	};
+
+	pcie1: pcie-controller@18b20000 {
+		compatible = "realtek,rtl8196b-pci";
+		#address-cells = <3>;
+		#size-cells = <2>;
+		bus-range = <0 255>;
+		reg = <0x18b20000 0x1000>,
+		      <0x18b21000 0x1000>,
+		      <0x18b30000 0x1000>,
+		      <0x18b31000 0x1000>;
+		reg-names = "rc_cfg_base", "rc_ext_base", "dev_cfg0_base", "dev_cfg1_base";
+		ranges = <0x02000000 0 0x00000000 0x1a000000 0 0x01000000
+			  0x01000000 0 0x00000000 0x18e00000 0 0x00200000>;
+		interrupt-parent = <&cpuintc>;
+		interrupts = <6>;
+		clocks = <&pcie_clk>;
+		/*
+		 * DISABLED: the RTL8197F reference design (DIR-842) has a single
+		 * PCIe RC and one 5 GHz radio, which sits on pcie0 (matches RE172,
+		 * the only fork board that enables PCIe). 0x18b20000 is unverified
+		 * silicon - if it's a dead region, the pci-realtek check_link read
+		 * would hard-stall the CPU bus (no bus-error exception on this
+		 * fabric), the same failure that hung the first M5 boot on pcie0.
+		 * Do NOT probe it. Re-enable only if the card is proven to be here.
+		 */
+		status = "disabled";
+	};
+};

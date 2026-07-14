@@ -1,0 +1,5 @@
+# build.sh clones OpenWrt here
+/openwrt/
+# built images ship as GitHub releases, not in-repo
+images/*.bin
+images/*.itb

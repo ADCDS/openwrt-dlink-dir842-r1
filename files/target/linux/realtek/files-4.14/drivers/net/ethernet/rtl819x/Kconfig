@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: GPL-2.0
+config NET_RTL819X
+	tristate "Realtek RTL8197F (RTL819x) switch-core Ethernet"
+	depends on SOC_RTL8197F || COMPILE_TEST
+	select PHYLIB
+	default SOC_RTL8197F
+	help
+	  Ethernet MAC driver for the built-in switch-core CPU port of the
+	  Realtek RTL8197F (RTL819x family) SoC.  This drives the CPU-port
+	  descriptor DMA engine (swNic) that moves frames between the CPU and
+	  the on-chip Ethernet switch.
+
+	  Say Y here (built-in) to get networking on RTL8197F boards.

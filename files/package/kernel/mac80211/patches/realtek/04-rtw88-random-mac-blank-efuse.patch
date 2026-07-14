@@ -1,0 +1,24 @@
+--- a/drivers/net/wireless/realtek/rtw88/main.c
++++ b/drivers/net/wireless/realtek/rtw88/main.c
+@@ -16,6 +16,7 @@
+ #include "debug.h"
+ #include "bf.h"
+ #include <linux/module.h>
++#include <linux/etherdevice.h>
+ 
+ unsigned int rtw_fw_lps_deep_mode;
+ EXPORT_SYMBOL(rtw_fw_lps_deep_mode);
+@@ -1548,6 +1549,13 @@
+ 	hw->wiphy->max_sched_scan_ssids = rtwdev->chip->max_sched_scan_ssids;
+ #endif
+ 	rtw_set_supported_band(hw, rtwdev->chip);
++	if (!is_valid_ether_addr(rtwdev->efuse.addr)) {
++		/* blank/invalid efuse MAC (e.g. all-0xff on boards that keep no
++		 * per-device efuse) would refuse to bring the interface up */
++		eth_random_addr(rtwdev->efuse.addr);
++		rtw_warn(rtwdev, "efuse MAC invalid, using random %pM\n",
++			 rtwdev->efuse.addr);
++	}
+ 	SET_IEEE80211_PERM_ADDR(hw, rtwdev->efuse.addr);
+ 
+ 	rtw_regd_init(rtwdev, rtw_regd_notifier);
