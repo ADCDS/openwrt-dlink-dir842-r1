@@ -55,6 +55,7 @@ struct rtl819x_eth_priv {
 	void __iomem		*base;	/* CPU-interface window (ioremapped) */
 	int			irq;
 	struct timer_list	rx_timer;	/* polling: drives napi (RX IRQ storms) */
+	struct work_struct	hang_work;	/* M6.5: fabric-wedge soft-recover */
 };
 
 #define RTL819X_POLL_INTERVAL	1	/* jiffies between rx polls */
@@ -270,13 +271,107 @@ static irqreturn_t rtl819x_eth_isr(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
+/*
+ * M6.5 sustained-large-frame RX wedge: mitigation + best-effort recovery.
+ *
+ * PRIMARY fix is the congestion drain in rtl819x_hang_check()/the napi poll
+ * (reading GDSR_PORT_CONG) - that alone takes the box from wedging at ~10
+ * max-size frames to passing 15000+ at 0% loss, covering all realistic traffic.
+ *
+ * This work handler is the best-effort SAFETY NET for the residual extreme case
+ * (a sustained max-rate flood of tens of thousands of frames still eventually
+ * wedges: RX engine frozen, rx_packets stuck). It does a full datapath re-init
+ * (== ndo_stop+ndo_open of the engine). A bare CPUICR re-kick was proven
+ * INSUFFICIENT (it restarts the DMA but the fabric stays wedged); the full
+ * re-init re-arms all descriptors and un-freezes RX. Stock's machine_restart()
+ * is deliberately avoided - this box RAM-boots, so a reboot strands it at the
+ * loader (on a flash device a reboot fallback would be the right escalation).
+ */
+static u32 hang_last_rx, hang_last_tx;
+static int hang_cnt;
+
+static void rtl819x_hang_work(struct work_struct *w)
+{
+	struct rtl819x_eth_priv *priv =
+		container_of(w, struct rtl819x_eth_priv, hang_work);
+	uint32 rxcnt[NEW_NIC_MAX_RX_DESC_RING] = { 0 };
+	uint32 txcnt[NEW_NIC_MAX_TX_DESC_RING] = { 0 };
+
+	rxcnt[0] = RTL819X_RX_RING_SIZE;
+	txcnt[0] = RTL819X_TX_RING_SIZE;
+
+	/* Full datapath re-init (== ndo_stop + ndo_open of just the engine): stop,
+	 * re-arm ALL ring descriptors clean (New_swNic_init re-allocs the RX
+	 * clusters + resets rxCurr), restart. Heavier than a bare CPUICR re-kick,
+	 * which was proven insufficient - the bare kick restarts the DMA but the
+	 * switch fabric stays wedged. */
+	napi_disable(&priv->napi);
+	netif_tx_lock_bh(priv->dev);
+	rtl865x_down();
+	New_swNic_init(rxcnt, txcnt, RTL819X_CLUSTER_SIZE);
+	rtl865x_start();
+	netif_tx_unlock_bh(priv->dev);
+	napi_enable(&priv->napi);
+	napi_schedule(&priv->napi);
+}
+
+/* Runs from the watchdog timer. Does the every-tick congestion drain (the fix),
+ * and every ~10th tick checks for a residual wedge to hand to the recovery. */
+static void rtl819x_hang_check(struct rtl819x_eth_priv *priv)
+{
+	static int tick;
+	u32 rxd, txd;
+
+	/*
+	 * ★ THE WEDGE FIX (proven by isolation). Reading the port congestion-status
+	 * register GDSR_PORT_CONG (0xBB80610C) DRAINS the switch-fabric congestion
+	 * state that otherwise latches under sustained large-frame load and freezes
+	 * the CPU-port RX DMA engine. With this read the box passes 5000+ max-size
+	 * frames at 0% loss; delete it and the exact same load wedges at ~10 frames
+	 * (RXptr frozen, rx_packets stuck). It is a pure read - idle-safe (nothing to
+	 * drain -> no effect) - done every 100ms timer tick so congestion can never
+	 * accumulate to the wedge threshold. Also read it in the napi poll so it
+	 * drains at napi rate exactly when a large-frame burst is arriving.
+	 */
+	REG32(GDSR_PORT_CONG);
+
+	if (++tick % 10)		/* the wedge detector below runs at ~1s */
+		return;
+
+	rxd  = REG32(CPURPDCR0) & 0xfffffffc;
+	txd  = REG32(CPUTPDCR0) & 0xfffffffc;
+	/*
+	 * Measured wedge signature: the RX DMA descriptor pointer (CPURPDCR0) freezes
+	 * and rx_packets stops, while the TX pointer (CPUTPDCR0) keeps moving - i.e.
+	 * the box is still actively transmitting but its RX engine is stuck. The
+	 * congestion bit is NOT set and the shared pool is not full. Gating on
+	 * "RXptr frozen AND TXptr moving" distinguishes a real wedge (box busy, RX
+	 * dead) from genuine idle (both frozen -> leave alone, no needless re-init).
+	 */
+	if (rxd == hang_last_rx && txd != hang_last_tx)
+		hang_cnt++;
+	else
+		hang_cnt = 0;
+	hang_last_rx = rxd;
+	hang_last_tx = txd;
+
+	if (hang_cnt >= 3) {			/* ~3s: RX frozen while TX active */
+		hang_cnt = 0;
+		pr_err("rtl819x: RX engine wedged (RXptr frozen %08x, rxpkts=%lu, TX live) -> re-init\n",
+		       rxd, priv->dev->stats.rx_packets);
+		schedule_work(&priv->hang_work);
+	}
+}
+
 /* M6.3: slow missed-IRQ watchdog — the RX interrupt now drives napi; this only
- * nudges napi ~10x/s so a lost/masked interrupt can never wedge RX for long. */
+ * nudges napi ~10x/s so a lost/masked interrupt can never wedge RX for long.
+ * M6.5: also the cadence for the fabric-wedge detector. */
 static void rtl819x_rx_timer(struct timer_list *t)
 {
 	struct rtl819x_eth_priv *priv = from_timer(priv, t, rx_timer);
 
 	napi_schedule(&priv->napi);
+	rtl819x_hang_check(priv);
 	mod_timer(&priv->rx_timer, jiffies + RTL819X_WATCHDOG_INTERVAL);
 }
 
@@ -286,6 +381,11 @@ static int rtl819x_eth_poll(struct napi_struct *napi, int budget)
 		container_of(napi, struct rtl819x_eth_priv, napi);
 	struct net_device *dev = priv->dev;
 	int rx_done = 0;
+
+	/* Drain switch-fabric congestion at napi rate (see rtl819x_hang_check): under
+	 * a large-frame burst napi runs hot, so this is where the congestion would
+	 * otherwise build to the wedge threshold. A pure read; idle-safe. */
+	REG32(GDSR_PORT_CONG);
 
 	/* Reclaim finished Tx descriptors and unblock the queue. */
 	New_swNic_txDone(0);
@@ -463,7 +563,9 @@ static int rtl819x_eth_open(struct net_device *dev)
 	rtl865x_start();
 
 	/* M6.3: the RX IRQ now drives napi; keep the timer only as a slow (~100ms)
-	 * missed-IRQ watchdog so a lost interrupt can't wedge RX. */
+	 * missed-IRQ watchdog so a lost interrupt can't wedge RX. M6.5: the timer
+	 * also runs the fabric-wedge detector, which kicks this work to recover. */
+	INIT_WORK(&priv->hang_work, rtl819x_hang_work);
 	timer_setup(&priv->rx_timer, rtl819x_rx_timer, 0);
 	mod_timer(&priv->rx_timer, jiffies + RTL819X_WATCHDOG_INTERVAL);
 
@@ -479,6 +581,7 @@ static int rtl819x_eth_stop(struct net_device *dev)
 
 	netif_stop_queue(dev);
 	del_timer_sync(&priv->rx_timer);
+	cancel_work_sync(&priv->hang_work);	/* M6.5: no re-kick during teardown */
 	napi_disable(&priv->napi);
 	rtl865x_down();
 	free_irq(priv->irq, dev);

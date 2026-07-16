@@ -155,6 +155,12 @@
 #define GDSR0_USEDDSC_MASK		(0x3ff << 16)		/* total used descriptors */
 #define GDSR0_DSCRUNOUT			(1 << 27)		/* descriptor run-out latched */
 
+/* Per-port/queue congestion status - vendor rtl819x_poll_sw reads 0xBB80610C
+ * bit16 = CPU port (6) queue0 congested; combined with frozen Rx/Tx descriptor
+ * pointers it is the fabric-wedge signature (asicBasic.c:502). */
+#define GDSR_PORT_CONG			(RTL819X_SWCORE_BASE + 0x610C)
+#define PORT6_Q0_CONG			(1 << 16)
+
 /* ---- switch MAC config (reserve: carrier-based back-pressure tolerance) --- */
 #define SW_MACCR			(RTL819X_SWCORE_BASE + 0x4000)
 #define SW_MACCR_LONG_TXE		(1 << 22)		/* vendor MACCR=LONG_TXE */
