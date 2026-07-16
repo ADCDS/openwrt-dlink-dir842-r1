@@ -315,6 +315,18 @@ err_out:
  * up its cluster sk_buff, refill the slot with a fresh mapped cluster and
  * re-arm both the pkthdr and mbuf descriptors for the switch.
  */
+/* True if the current Rx descriptor is CPU(RISC)-owned - i.e. a received frame
+ * is waiting to be pulled. Lets the eth poll close the napi_complete re-arm
+ * race: a frame landing just after receive() returned "empty" would otherwise
+ * have its RX_DONE ack'd away and stall until the slow watchdog. Cheap, lockless
+ * peek (single volatile read); a false negative just defers to the next IRQ. */
+int32 New_swNic_rxPending(void)
+{
+	volatile uint32 *rr = RXR();
+
+	return (rr[rxCurr] & DESC_OWNED_BIT) == DESC_RISC_OWNED;
+}
+
 int32 New_swNic_receive(rtl_nicRx_info *info, int retryCount)
 {
 	unsigned long flags = 0;

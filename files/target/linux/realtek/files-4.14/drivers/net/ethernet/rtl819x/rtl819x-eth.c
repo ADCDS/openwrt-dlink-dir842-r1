@@ -35,12 +35,19 @@
 #define R_CPUIIMR		0x028
 #define R_CPUIISR		0x02c
 
-/* NIC interrupt enable set: Rx-done + Tx-all-done only.
+/* NIC interrupt enable set: Rx-done + Tx-all-done + descriptor-runout.
  * LINK_CHANGE_IE is deliberately EXCLUDED: LINK_CHANGE_IP is a level bit that
  * write-1-ack does not clear while the link settles, so re-arming CPUIIMR with
  * LINK_CHANGE_IE re-fires instantly on cable plug-in -> IRQ livelock -> wedge.
- * PKTHDR_DESC_RUNOUT_IE_ALL is excluded too (avoids a storm if Rx refill lags). */
-#define NIC_IIMR		(RX_DONE_IE_ALL | TX_ALL_DONE_IE_ALL)
+ * PKTHDR/MBUF_DESC_RUNOUT_IE are INCLUDED (M6.3b): under sustained load napi can
+ * fall behind, the Rx ring empties of CPU-owned slots, and the switch hits
+ * descriptor runout; arming these kicks napi promptly to drain+refill instead
+ * of waiting on the ~100ms watchdog (which lets the CPU-port queue congest and
+ * hard-wedge the fabric - vendor rtl865x_start arms them too, asicCom.c:1417).
+ * The refill-lag storm the original code feared is avoided because napi masks
+ * the source while polling and re-checks for pending work on complete. */
+#define NIC_IIMR		(RX_DONE_IE_ALL | TX_ALL_DONE_IE_ALL | \
+				 PKTHDR_DESC_RUNOUT_IE_ALL | MBUF_DESC_RUNOUT_IE_ALL)
 
 struct rtl819x_eth_priv {
 	struct net_device	*dev;
@@ -51,6 +58,7 @@ struct rtl819x_eth_priv {
 };
 
 #define RTL819X_POLL_INTERVAL	1	/* jiffies between rx polls */
+#define RTL819X_WATCHDOG_INTERVAL	(HZ / 10)	/* M6.3: slow missed-IRQ watchdog */
 
 /*
  * rtl865x_start() / rtl865x_down(): faithful replication of the vendor
@@ -132,14 +140,35 @@ static void rtl865x_start(void)
 	REG32(0xBB0C0000) = REG32(0xBB0C0000);
 
 	/*
-	 * Ack any pending. POLLING MODE: leave CPUIIMR masked (0) and do NOT
-	 * route the switch NIC line to the CPU (no GIMR). The switch NIC IRQ is
-	 * delivered as CP0 IP4 via plat_irq_dispatch and cannot be reliably gated
-	 * on this SoC (GIMR / disable_irq / CP0-IM4 / CPUIIMR masking all storm),
-	 * so RX/TX is driven by a jiffy timer + napi instead of interrupts.
+	 * M6.3: interrupt-driven NAPI. Ack pending, then ARM the Rx/Tx-done IRQ
+	 * (CPUIIMR=NIC_IIMR). The switch NIC is delivered as an ungateable CP0 IP4
+	 * line; rtl819x_eth_isr() tames the storm by masking CPUIIMR + clearing CP0
+	 * IP4, and rtl819x_eth_poll() re-arms both on napi_complete. The jiffy timer
+	 * stays only as a slow missed-IRQ watchdog. (Was CPUIIMR=0 = pure polling.)
 	 */
 	REG32(CPUIISR) = REG32(CPUIISR);
-	REG32(CPUIIMR) = 0;
+	REG32(CPUIIMR) = NIC_IIMR;
+
+	/*
+	 * Restore the switch shared-buffer / per-port descriptor flow-control
+	 * thresholds the vendor rtl8651_clearRegister() programs
+	 * (sdk-ref/rtl865x_asicCom.c:1124-1134) and this port had dropped. Without
+	 * them the single shared descriptor pool (max 1023 dscs) has no
+	 * turn-on/off/runout back-pressure, so the fabric drops multi-descriptor
+	 * (large) frames congestion-sensitively and wedges when the pool exhausts
+	 * (watchdog reset). This is why ping (1-descriptor frames) worked but
+	 * frames >~500 B failed and progressively degraded under load. Exact 8197F
+	 * constants from the vendor (field offsets S_DSC_*=/P_MaxDSC_*= per
+	 * rtl865xc_asicregs.h:1786-1836). Must precede SIRR=TRXRDY + MSCR_EN_L2.
+	 */
+	REG32(SBFCR0) = 0x000001E0;			/* S_DSC_RUNOUT = 480 */
+	REG32(SBFCR1) = (0x0190u << 16) | 0x01CCu;	/* S_DSC FCOFF=400 / FCON=460 */
+	REG32(SBFCR2) = (0x0050u << 16) | 0x006Cu;	/* Max_SBuf FCOFF=80 / FCON=108 */
+	{
+		int q;
+		for (q = 0; q <= 5; q++)		/* per-port MaxDSC FCOFF=60 / FCON=90 */
+			REG32(PBFCR0 + q * 0x04) = (0x003Cu << 16) | 0x005Au;
+	}
 
 	/* Kick the switch core into normal Tx/Rx. */
 	REG32(SIRR) = TRXRDY;
@@ -186,15 +215,17 @@ static void rtl865x_start(void)
 		REG32(MSCR) |= MSCR_EN_L2;		/* global L2 forwarding enable */
 	}
 
-	/* POLLING MODE: force the switch NIC line OUT of the global mask so it
-	 * can never reach the CPU, regardless of what the bootloader left set. */
-	REG32(GIMR) &= ~BSP_SW_IE;
+	/* M6.3: route the switch NIC line INTO the global mask + enable CP0 IP4 so
+	 * the Rx/Tx-done interrupt reaches the CPU (napi masks + re-arms it). */
+	REG32(GIMR) |= BSP_SW_IE;
+	set_c0_status(STATUSF_IP4);
 
 	/* Bring-up self-diagnosis (readable over ssh via `dmesg`): on a dead-RX
 	 * boot the ring base still latches into CPURPDCR0 but CPUIISR never accrues
 	 * RX_DONE — that distinguishes an engine wedge from a fabric-silent path. */
-	pr_err("rtl819x bringup: CPUICR=%08x CPURPDCR0=%08x CPUIISR=%08x DMA_CR0=%08x MSCR=%08x\n",
-	       REG32(CPUICR), REG32(CPURPDCR0), REG32(CPUIISR), REG32(DMA_CR0), REG32(MSCR));
+	pr_err("rtl819x bringup: CPUICR=%08x CPURPDCR0=%08x CPUIISR=%08x DMA_CR0=%08x MSCR=%08x GDSR0=%08x SBFCR0=%08x\n",
+	       REG32(CPUICR), REG32(CPURPDCR0), REG32(CPUIISR), REG32(DMA_CR0), REG32(MSCR),
+	       REG32(GDSR0), REG32(SBFCR0));
 }
 
 static void rtl865x_down(void)
@@ -239,13 +270,14 @@ static irqreturn_t rtl819x_eth_isr(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-/* Polling: re-schedule napi every jiffy (the RX interrupt is left disabled). */
+/* M6.3: slow missed-IRQ watchdog — the RX interrupt now drives napi; this only
+ * nudges napi ~10x/s so a lost/masked interrupt can never wedge RX for long. */
 static void rtl819x_rx_timer(struct timer_list *t)
 {
 	struct rtl819x_eth_priv *priv = from_timer(priv, t, rx_timer);
 
 	napi_schedule(&priv->napi);
-	mod_timer(&priv->rx_timer, jiffies + RTL819X_POLL_INTERVAL);
+	mod_timer(&priv->rx_timer, jiffies + RTL819X_WATCHDOG_INTERVAL);
 }
 
 static int rtl819x_eth_poll(struct napi_struct *napi, int budget)
@@ -303,19 +335,40 @@ static int rtl819x_eth_poll(struct napi_struct *napi, int budget)
 		rx_done++;
 	}
 
-	/* POLLING MODE: complete; the jiffy timer re-schedules us (no IRQ re-enable). */
-	if (rx_done < budget)
+	/* M6.3: NAPI complete -> re-arm the switch NIC IRQ the ISR masked (CPUIIMR
+	 * + CP0 IP4). */
+	if (rx_done < budget) {
 		napi_complete_done(napi, rx_done);
+		REG32(CPUIISR) = REG32(CPUIISR);
+		REG32(CPUIIMR) = NIC_IIMR;
+		REG32(GIMR) |= BSP_SW_IE;
+		set_c0_status(STATUSF_IP4);
+		/*
+		 * M6.3b race-close: a frame can land between the New_swNic_receive()
+		 * that returned "empty" above and the CPUIISR ack here. The ack (W1C)
+		 * clears that frame's RX_DONE, so its IRQ is lost until the ~100ms
+		 * watchdog - and under sustained load these losses compound, starving
+		 * napi until the CPU-port queue congests and the fabric hard-wedges
+		 * (observed: rx_pkts frozen while polls continue). Re-peek the ring
+		 * and re-schedule napi if a frame is already waiting. */
+		if (New_swNic_rxPending())
+			napi_schedule(napi);
+	}
 
 	/* Liveness heartbeat (~every 10s @ HZ=100): if this stops, the box wedged.
 	 * Also log the engine status so a dead-RX boot self-diagnoses: rx_pkts==0
 	 * with a valid CPURPDCR0 and no RX_DONE bits in CPUIISR == engine wedge. */
 	{
 		static unsigned long pc;
-		if (!(++pc & 0x3ff))
-			pr_err("rtl819x DP: poll#%lu alive rx_done=%d rx_pkts=%lu CPUIISR=%08x CPURPDCR0=%08x\n",
-			       pc, rx_done, dev->stats.rx_packets,
-			       REG32(CPUIISR), REG32(CPURPDCR0));
+		u32 gd = REG32(GDSR0);
+		/* Descriptor-pool watch: log if the shared pool is filling (USEDDSC)
+		 * or has latched a run-out (DSCRUNOUT) - the large-frame drop signature
+		 * - as well as the periodic liveness heartbeat. */
+		if ((gd & GDSR0_DSCRUNOUT) || ((gd & GDSR0_USEDDSC_MASK) >> 16) > 256 ||
+		    !(++pc & 0x3ff))
+			pr_err("rtl819x DP: poll#%lu rx_done=%d rx_pkts=%lu CPUIISR=%08x USEDDSC=%u runout=%d\n",
+			       pc, rx_done, dev->stats.rx_packets, REG32(CPUIISR),
+			       (gd & GDSR0_USEDDSC_MASK) >> 16, !!(gd & GDSR0_DSCRUNOUT));
 	}
 
 	return rx_done;
@@ -347,6 +400,8 @@ static netdev_tx_t rtl819x_eth_xmit(struct sk_buff *skb, struct net_device *dev)
 	 * the broadcast path that reached hal, and EXCLUDES the CPU port (bit6) so
 	 * the frame can't loop back to us. VLAN 9 egress is untagged (see
 	 * rtl865x_start) so the RTL8367R gets clean frames.
+	 * (M6.5 note: narrowing this is INEFFECTIVE - the switch floods CPU frames
+	 * by VLAN *membership*, ignoring this portlist; see auto-memory.)
 	 */
 	nicTx.portlist = 0x3F;
 	/*
@@ -407,9 +462,10 @@ static int rtl819x_eth_open(struct net_device *dev)
 	napi_enable(&priv->napi);
 	rtl865x_start();
 
-	/* POLLING MODE: drive napi from a jiffy timer (RX IRQ is left disabled). */
+	/* M6.3: the RX IRQ now drives napi; keep the timer only as a slow (~100ms)
+	 * missed-IRQ watchdog so a lost interrupt can't wedge RX. */
 	timer_setup(&priv->rx_timer, rtl819x_rx_timer, 0);
-	mod_timer(&priv->rx_timer, jiffies + RTL819X_POLL_INTERVAL);
+	mod_timer(&priv->rx_timer, jiffies + RTL819X_WATCHDOG_INTERVAL);
 
 	netif_start_queue(dev);
 

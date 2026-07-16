@@ -375,6 +375,7 @@ int32 New_swNic_init(uint32 userNeedRxPkthdrRingCnt[NEW_NIC_MAX_RX_DESC_RING],
 		     uint32 clusterSize);
 int32 New_swNic_send(void *skb, void *output, uint32 len, rtl_nicTx_info *nicTx);
 int32 New_swNic_receive(rtl_nicRx_info *info, int retryCount);
+int32 New_swNic_rxPending(void);
 int32 New_swNic_txDone(int idx);
 void New_swNic_freeRxBuf(void);
 void New_swNic_freeRings(void);

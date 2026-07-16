@@ -77,6 +77,7 @@
 /* ---- CPUIIMR / CPUIISR bits ---------------------------------------------- */
 #define LINK_CHANGE_IE			(1 << 31)
 #define PKTHDR_DESC_RUNOUT_IE_ALL	(0x3f << 17)
+#define MBUF_DESC_RUNOUT_IE_ALL		(1 << 16)
 #define RX_DONE_IE_ALL			(0x3f << 3)
 #define TX_ALL_DONE_IE0			(1 << 1)
 #define TX_ALL_DONE_IE1			(1 << 2)
@@ -132,6 +133,31 @@
 #define PCR_MAC_SW_RESET		(1 << 3)		/* 1 = out of reset (normal) */
 #define PCR_STP_FORWARDING		(3 << 4)		/* STP port state = forwarding */
 #define FFCR_UNKMC_2CPU			(1 << 0)		/* trap unknown multicast to CPU */
+
+/* ---- switch shared-buffer / descriptor flow-control thresholds -----------
+ * The vendor rtl8651_clearRegister() (sdk-ref/rtl865x_asicCom.c:1124-1134)
+ * programs these; this port had dropped them, leaving the switch's single
+ * shared descriptor pool (max 1023 dscs) with NO back-pressure thresholds. A
+ * frame spans multiple buffer-page descriptors, so a large frame needs many
+ * dscs; with no turn-on/off/runout thresholds the fabric mismanages the pool
+ * and drops large frames (congestion-sensitively) and wedges when the pool
+ * exhausts (-> watchdog reset). Small (1-descriptor) frames survive, which is
+ * why ping worked but frames >~500 B failed and degraded under load. */
+#define SBFCTR				(RTL819X_SWCORE_BASE + 0x4500)
+#define SBFCR0				(SBFCTR + 0x00)		/* S_DSC_RUNOUT threshold */
+#define SBFCR1				(SBFCTR + 0x04)		/* S_DSC FCOFF<<16 | FCON */
+#define SBFCR2				(SBFCTR + 0x08)		/* Max_SBuf FCOFF<<16 | FCON */
+#define PBFCR0				(SBFCTR + 0x0C)		/* per-port MaxDSC FCOFF<<16|FCON */
+/* PBFCR1..5 = PBFCR0 + n*0x04 */
+
+/* ---- descriptor-pool diagnostic (DESCDIAG GDSR0) ------------------------- */
+#define GDSR0				(RTL819X_SWCORE_BASE + 0x6100)
+#define GDSR0_USEDDSC_MASK		(0x3ff << 16)		/* total used descriptors */
+#define GDSR0_DSCRUNOUT			(1 << 27)		/* descriptor run-out latched */
+
+/* ---- switch MAC config (reserve: carrier-based back-pressure tolerance) --- */
+#define SW_MACCR			(RTL819X_SWCORE_BASE + 0x4000)
+#define SW_MACCR_LONG_TXE		(1 << 22)		/* vendor MACCR=LONG_TXE */
 #define FFCR_UNKUC_2CPU			(1 << 1)		/* trap unknown unicast to CPU */
 #define SWTCR0_UNKVID_2CPU		(1 << 15)		/* trap VLAN-lookup-miss to CPU */
 
