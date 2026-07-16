@@ -21,6 +21,7 @@
 #include <linux/io.h>
 #include <linux/dma-mapping.h>
 #include <linux/skbuff.h>
+#include <linux/if_vlan.h>	/* __vlan_hwaccel_put_tag / skb_vlan_tag_* (M6.2) */
 #include <asm/mipsregs.h>	/* clear_c0_status / set_c0_status / STATUSF_IP4 */
 
 #include "rtl819x_regs.h"
@@ -63,20 +64,24 @@ struct rtl819x_eth_priv {
 /*
  * Force-add one VLAN table entry (vid) with a member portmask, via the switch
  * TLU command interface. member_mask bit i = internal-switch port i; bit 6 is
- * the CPU port. All members egress UNTAGGED so the CPU port receives clean
- * (un-tagged) frames. word-0 bit layout (LE) mirrors the vendor
- * rtl865xc_tblAsic_vlanTable_t: memberPort:6 | extMemberPort:3 | egressUntag:6
- * | extEgressUntag:3 | fid:2 | hp:3 | rsvd:9; words 1..7 reserved (0).
+ * the CPU port. untag_mask bit i = that member egresses UNTAGGED (bit clear =>
+ * egresses 802.1Q-TAGGED). For M6.2 the CPU port (bit 6) is untagged (so the
+ * CPU RX ring gets clean frames + we re-attach the VID via hwaccel) while the
+ * physical ports incl. the RGMII trunk to the RTL8367S egress TAGGED, so the
+ * two cascaded switches carry VID 8 (WAN) / VID 9 (LAN) across the trunk.
+ * word-0 bit layout (LE) mirrors the vendor rtl865xc_tblAsic_vlanTable_t:
+ * memberPort:6 | extMemberPort:3 | egressUntag:6 | extEgressUntag:3 | fid:2 |
+ * hp:3 | rsvd:9; words 1..7 reserved (0).
  */
-static void sw_add_vlan(uint32 vid, uint32 member_mask)
+static void sw_add_vlan(uint32 vid, uint32 member_mask, uint32 untag_mask)
 {
 	uint32 entry[8] = { 0 };
 	int i, guard;
 
 	entry[0] = (member_mask & 0x3F)			/* memberPort   [5:0]  */
 		 | (((member_mask >> 6) & 0x7) << 6)	/* extMemberPort[8:6]  */
-		 | ((member_mask & 0x3F) << 9)		/* egressUntag  [14:9] */
-		 | (((member_mask >> 6) & 0x7) << 15);	/* extEgressUntag[17:15]*/
+		 | ((untag_mask & 0x3F) << 9)		/* egressUntag  [14:9] */
+		 | (((untag_mask >> 6) & 0x7) << 15);	/* extEgressUntag[17:15]*/
 
 	for (guard = 0; guard < 100000 &&
 	     (REG32(SWTACR) & TLU_ACTION_MASK) != TLU_ACTION_DONE; guard++)
@@ -116,6 +121,17 @@ static void rtl865x_start(void)
 			 ((0xA0 << LowFifoMark_OFFSET) | 0xA0);
 
 	/*
+	 * 8197F "driver can't receive packet" erratum: a read-modify-write of
+	 * entry 0 of the ACL table (phys 0x1B0C0000) unsticks the CPU-port RX
+	 * lookup path. Faithful to the vendor rtl865x_start()
+	 * (sdk-ref/rtl865x_asicCom.c:1411-1413, guarded #if RTL_8197F) which this
+	 * port had dropped — without it the SoC CPU-port RX DMA engine comes up
+	 * wedged with ~coin-flip odds per open() (zero descriptor completions,
+	 * eth0 rx_packets stuck at 0) while TX / SMI / ASIC-table writes all work.
+	 */
+	REG32(0xBB0C0000) = REG32(0xBB0C0000);
+
+	/*
 	 * Ack any pending. POLLING MODE: leave CPUIIMR masked (0) and do NOT
 	 * route the switch NIC line to the CPU (no GIMR). The switch NIC IRQ is
 	 * delivered as CP0 IP4 via plat_irq_dispatch and cannot be reliably gated
@@ -145,15 +161,40 @@ static void rtl865x_start(void)
 
 		for (p = 0; p <= 6; p++)		/* all ports (incl CPU 6) forwarding */
 			REG32(PCRP(p)) |= PCR_STP_FORWARDING;
-		sw_add_vlan(9, 0x7F);			/* vid 9: members ports 0-6 (bit6=CPU) */
+		/*
+		 * M6.2: two VLANs across the CPU<->RTL8367S RGMII trunk — VID 9 =
+		 * LAN, VID 8 = WAN. Members = 0x7F (all internal ports; a superset
+		 * so frames reach the CPU whichever internal port is the uplink).
+		 * untag mask 0x40 => only the CPU port (bit 6) egresses UNTAGGED
+		 * (clean frames into the RX ring; the poll loop re-attaches the
+		 * VID via hwaccel), the physical/trunk ports egress 802.1Q-TAGGED
+		 * so the external RTL8367S can split the frames per jack.
+		 */
+		/*
+		 * M6.2b: match STOCK's SoC VLAN — the CPU port is a TAGGED member
+		 * (stock VID2 LAN = member{0-3,8} untag{0-3}: port8/CPU tagged).
+		 * untag_mask 0x00 => nothing untagged, so tagged trunk frames reach
+		 * the CPU WITH the 802.1Q tag inline (proto ETH_P_8021Q) and the
+		 * poll's robust path leaves them for Linux skb_vlan_untag -> eth0.9.
+		 * (v1 used 0x40 = CPU untagged, and the SoC dropped the trunk frames
+		 * on the untagged CPU-egress path -> eth0 RX stayed ~0.)
+		 */
+		sw_add_vlan(9, 0x7F, 0x00);		/* LAN: CPU + trunk both tagged */
+		sw_add_vlan(8, 0x7F, 0x00);		/* WAN: CPU + trunk both tagged */
 		for (p = 0; p <= 6; p++)
-			sw_set_pvid(p, 9);
+			sw_set_pvid(p, 9);		/* untagged ingress default -> LAN */
 		REG32(MSCR) |= MSCR_EN_L2;		/* global L2 forwarding enable */
 	}
 
 	/* POLLING MODE: force the switch NIC line OUT of the global mask so it
 	 * can never reach the CPU, regardless of what the bootloader left set. */
 	REG32(GIMR) &= ~BSP_SW_IE;
+
+	/* Bring-up self-diagnosis (readable over ssh via `dmesg`): on a dead-RX
+	 * boot the ring base still latches into CPURPDCR0 but CPUIISR never accrues
+	 * RX_DONE — that distinguishes an engine wedge from a fabric-silent path. */
+	pr_err("rtl819x bringup: CPUICR=%08x CPURPDCR0=%08x CPUIISR=%08x DMA_CR0=%08x MSCR=%08x\n",
+	       REG32(CPUICR), REG32(CPURPDCR0), REG32(CPUIISR), REG32(DMA_CR0), REG32(MSCR));
 }
 
 static void rtl865x_down(void)
@@ -233,6 +274,28 @@ static int rtl819x_eth_poll(struct napi_struct *napi, int budget)
 
 		skb_put(skb, info.len);
 		skb->protocol = eth_type_trans(skb, dev);
+		{ static int dbg; if (info.len >= 84 && info.len <= 110 && dbg++ < 40)
+			pr_err("rtl819x RXicmp: proto=%04x info.vid=%u info.pid=%u len=%u\n",
+			       ntohs(skb->protocol), info.vid, info.pid, info.len); }
+		/*
+		 * M6.6 cascade: frames arrive UNTAGGED (8367S untags the trunk) with
+		 * the source jack in info.pid (CPU-tag). Derive the VID from the jack
+		 * (jacks 0-3 = LAN vid2, jack4 = WAN vid1) and re-attach it as a
+		 * hwaccel ctag so 8021q demuxes eth0.2 (LAN) / eth0.1 (WAN). (M6.2
+		 * used info.vid directly, but the cascade gives info.vid=0.)
+		 */
+		{
+			/* M6.6 one-armed SW router: normalize ALL cascade frames onto
+			 * vid2 so they demux to eth0.2 (the box routes LAN<->WAN by IP).
+			 * LAN jacks arrive untagged; the WAN jack arrives inline-802.1Q
+			 * (the 8367S tags port6 for the WAN vid) which the old code SKIPPED
+			 * (protocol==8021Q) — strip it first, then force vid2. */
+			if (skb->protocol == htons(ETH_P_8021Q)) {
+				skb = skb_vlan_untag(skb);
+				if (!skb) { dev->stats.rx_dropped++; continue; }
+			}
+			__vlan_hwaccel_put_tag(skb, htons(ETH_P_8021Q), 2);
+		}
 		napi_gro_receive(napi, skb);
 
 		dev->stats.rx_packets++;
@@ -244,11 +307,15 @@ static int rtl819x_eth_poll(struct napi_struct *napi, int budget)
 	if (rx_done < budget)
 		napi_complete_done(napi, rx_done);
 
-	/* Liveness heartbeat (~every 10s @ HZ=100): if this stops, the box wedged. */
+	/* Liveness heartbeat (~every 10s @ HZ=100): if this stops, the box wedged.
+	 * Also log the engine status so a dead-RX boot self-diagnoses: rx_pkts==0
+	 * with a valid CPURPDCR0 and no RX_DONE bits in CPUIISR == engine wedge. */
 	{
 		static unsigned long pc;
 		if (!(++pc & 0x3ff))
-			pr_err("rtl819x DP: poll#%lu alive rx_done=%d\n", pc, rx_done);
+			pr_err("rtl819x DP: poll#%lu alive rx_done=%d rx_pkts=%lu CPUIISR=%08x CPURPDCR0=%08x\n",
+			       pc, rx_done, dev->stats.rx_packets,
+			       REG32(CPUIISR), REG32(CPURPDCR0));
 	}
 
 	return rx_done;
@@ -282,7 +349,16 @@ static netdev_tx_t rtl819x_eth_xmit(struct sk_buff *skb, struct net_device *dev)
 	 * rtl865x_start) so the RTL8367R gets clean frames.
 	 */
 	nicTx.portlist = 0x3F;
-	nicTx.vid = 9;
+	/*
+	 * M6.2: VID from the netdev's hwaccel VLAN tag — eth0.9 (LAN) -> VID 9,
+	 * eth0.8 (WAN) -> VID 8; an untagged frame (bare eth0) defaults to the
+	 * LAN VID. The trunk ports egress tagged (rtl865x_start) so the external
+	 * RTL8367S routes each frame to the correct jack by VID.
+	 */
+	if (skb_vlan_tag_present(skb))
+		nicTx.vid = skb_vlan_tag_get(skb) & 0xfff;
+	else
+		nicTx.vid = 9;
 	nicTx.flags = 0;
 
 	if (New_swNic_send(skb, (void *)(uintptr_t)dma, len, &nicTx) != 0) {
@@ -305,6 +381,18 @@ static int rtl819x_eth_open(struct net_device *dev)
 
 	rxcnt[0] = RTL819X_RX_RING_SIZE;
 	txcnt[0] = RTL819X_TX_RING_SIZE;
+
+	/*
+	 * Quiesce the CPU-port DMA engine + switch core BEFORE (re)programming the
+	 * ring bases in New_swNic_init(). The D-Link loader's TFTP phase leaves the
+	 * engine armed (CPUICR RXCMD set); programming CPURPDCR0/CPUTPDCR0 over a
+	 * running engine and then having rtl865x_start() write CPUICR with RXCMD
+	 * already high gives no 0->1 edge for the engine to re-latch the new ring
+	 * bases -> RX comes up wedged ~half of boots. rtl865x_down() (CPUICR=0,
+	 * SIRR=0) guarantees a stopped engine so the rtl865x_start() re-enable is a
+	 * clean rising edge; it also stops DMA before the rings are freed/realloced.
+	 */
+	rtl865x_down();
 
 	ret = New_swNic_init(rxcnt, txcnt, RTL819X_CLUSTER_SIZE);
 	if (ret)
@@ -385,6 +473,13 @@ static int rtl819x_eth_probe(struct platform_device *pdev)
 
 	dev->netdev_ops = &rtl819x_eth_netdev_ops;
 	dev->watchdog_timeo = HZ;
+	/*
+	 * M6.2: hardware VLAN tag insert/strip. RX frames get the switch VID
+	 * re-attached as a ctag (poll loop) and TX reads the ctag for the
+	 * egress VID (xmit) — this drives the eth0.9 (LAN) / eth0.8 (WAN) split.
+	 */
+	dev->features |= NETIF_F_HW_VLAN_CTAG_RX | NETIF_F_HW_VLAN_CTAG_TX;
+	dev->hw_features |= NETIF_F_HW_VLAN_CTAG_RX | NETIF_F_HW_VLAN_CTAG_TX;
 	netif_napi_add(dev, &priv->napi, rtl819x_eth_poll, NAPI_POLL_WEIGHT);
 
 	/* MAC address: DT if present, else random until efuse/flash read added. */

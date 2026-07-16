@@ -353,9 +353,9 @@ int32 New_swNic_receive(rtl_nicRx_info *info, int retryCount)
 			static int rxt;
 			if (rxt < 40) {
 				rxt++;
-				pr_err("swnic rx#%d idx=%u slot=%08x ph_len=%u port=%02x reason=%04x mlen=%u mdata=%08x\n",
-				       rxt, idx, slot, ph->ph_len, ph->ph_portlist,
-				       ph->ph_reason, mb->m_len, mb->m_data);
+				pr_err("swnic rx#%d idx=%u ph_len=%u port=%02x vid=%u reason=%04x mlen=%u\n",
+				       rxt, idx, ph->ph_len, ph->ph_portlist,
+				       ph->ph_vlanId & 0x0fff, ph->ph_reason, mb->m_len);
 			}
 		}
 
