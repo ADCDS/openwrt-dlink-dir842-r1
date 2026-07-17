@@ -38,7 +38,7 @@ checkout and produces a **RAM-boot** image.
 - ⚠️ **Sustained max-rate ceiling (A-2, open).** Line-rate bulk can latch the
   switch fabric; the earlier "descriptor-pool exhaustion" theory is **disproven**
   (a `/proc/rtl865x_fabric` diagnostic shows the pool never fills). Root-causing
-  it needs a stable wired test peer — tracked as a GitHub issue.
+  it needs a stable wired test peer — tracked in [#1](https://github.com/ADCDS/openwrt-dlink-dir842-r1/issues/1).
 - ⚠️ **RAM-boot only, no NAND/sysupgrade** yet (see *Scope / safety*).
 - ⚠️ **Blank WiFi efuse** — this board keeps no RTL8822BE calibration on-chip,
   so TX power is uncalibrated (works, but not "loud"); handled in software
