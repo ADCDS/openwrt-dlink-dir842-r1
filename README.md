@@ -16,14 +16,30 @@ checkout and produces a **RAM-boot** image.
 ## Status — what works
 
 - ✅ **Boots** mainline OpenWrt (kernel 4.14) to a root shell over serial + SSH.
-- ✅ **Wired ethernet** — a carved RTL8197F NIC driver (`rtl819x`) brings up
-  `eth0` and pings/moves traffic. *Single flat LAN segment only* (see below).
+- ✅ **Wired ethernet** — a carved RTL8197F NIC driver (`rtl819x`) brings up the
+  CPU-port DMA engine and moves traffic.
+- ✅ **Managed switch + WAN/LAN split** — the external 5-port **RTL8367S** is
+  driven via `swconfig`, and an 802.1Q VID cascade over the single RGMII trunk
+  splits it into a **WAN** jack and a **LAN** bridge (`eth0.1` / `eth0.2`).
+- ✅ **Router with NAT** — masquerading gateway (fw3), with the software
+  flowtable fastpath.
+- ✅ **Hardware NAT offload (the M6.6 headline).** The RTL8197F's internal switch
+  L3/L4 engine routes **and source-NATs** flows entirely in silicon: Linux
+  conntrack installs per-flow NAPT rows into the ASIC via the kernel's
+  `ndo_flow_offload` hook, so established flows are forwarded with the **CPU
+  bypassed** — a flow's conntrack counters *freeze* mid-transfer while the CPU
+  sits ~99 % idle. As far as we can tell this is the **first working mainline
+  OpenWrt rtl865x ASIC L3/L4 offload** — the vendor's own "gigabit fast-path"
+  mechanism, reverse-engineered onto a stock kernel. Default-off, runtime
+  toggle: `echo 1 > /sys/module/rtl819x/parameters/hwnat`.
 - ✅ **5 GHz WiFi** — the on-board **RTL8822BE** (PCIe) via **rtw88**, as a
-  working WPA2 AP. This is the headline result: RTL8197F + PCIe WiFi had never
-  worked in OpenWrt before (see *Engineering notes*).
-- ⚠️ **Not a gateway (yet).** Only one flat LAN port works; the external 5-port
-  **RTL8367R** switch is unmanaged, there is **no WAN port and no NAT**. Multi-
-  port WAN/LAN routing is net-new driver work — see [`docs/ASSESSMENT.md`](docs/ASSESSMENT.md).
+  working WPA2 AP. RTL8197F + PCIe WiFi had never worked in OpenWrt before
+  (see *Engineering notes*).
+- ⚠️ **Sustained max-rate ceiling (A-2, open).** Line-rate bulk can latch the
+  switch fabric; the earlier "descriptor-pool exhaustion" theory is **disproven**
+  (a `/proc/rtl865x_fabric` diagnostic shows the pool never fills). Root-causing
+  it needs a stable wired test peer — tracked as a GitHub issue.
+- ⚠️ **RAM-boot only, no NAND/sysupgrade** yet (see *Scope / safety*).
 - ⚠️ **Blank WiFi efuse** — this board keeps no RTL8822BE calibration on-chip,
   so TX power is uncalibrated (works, but not "loud"); handled in software
   (default RFE + random/pinned MAC).
@@ -75,6 +91,25 @@ config + WiFi secrets) can be layered at build time:
 - **Blank efuse** → two small mac80211 patches (`files/package/kernel/mac80211/
   patches/realtek/03,04`): default the RFE type to 2, and assign a random MAC
   when the efuse MAC is invalid.
+- **Hardware NAT offload.** The RTL8197F switch core has an L3/L4 engine (netif +
+  route + nexthop + ARP + L2 + NAPT + extIP tables) that stock uses for its
+  gigabit fast-path but which has no mainline driver. `rtl865x_asichal.c` is a
+  clean re-implementation of the table-access engine (reverse-engineered from the
+  stock 3.10 kernel and cross-checked against the vendor SDK) and `rtl819x_hwnat.c`
+  wires it to Linux conntrack through the downstream `ndo_flow_offload` interface:
+  each offered LAN→WAN masquerade flow gets a pair of NAPT rows (outbound at the
+  vendor hash index, inbound at `globalPort & 0x3ff`), aged by the ASIC and reaped
+  by a worker. The forwarding chain is `route(process=5) → nexthop → ARP → L2`; a
+  NAPT miss traps to the CPU so the software path is always the safe fallback.
+  A key gotcha baked into the config: a VLAN sub-interface inherits the parent's
+  MAC, but the ASIC's WAN netif uses `LAN_MAC+1`, and that mismatch silently
+  blackholes every CPU-path WAN packet — so both LAN and WAN MACs are pinned to
+  match the ASIC netifs. Default-off; an independent code review hardened the
+  DEL/teardown path, table-access locking, and MAC pinning before release.
+- **Known limitations** (documented in `rtl819x_hwnat.c`): the inbound ASIC row
+  is full-cone (a masquerade source-port collision between an offloaded and a
+  software flow can misdeliver packets), and the framework's async ADD can race a
+  flow free. Both are narrow; offload is default-off and conservative.
 
 ## Credits & license
 

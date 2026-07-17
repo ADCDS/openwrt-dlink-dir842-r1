@@ -11,17 +11,69 @@
 # PROFILE=. There is no managed WAN port yet (see docs/ASSESSMENT.md), so the
 # default wan interface is removed to avoid netifd errors.
 
-# --- LAN: br-lan over eth0, 192.168.0.1/24 (D-Link stock LAN subnet) ---
+# --- M6.6 HW-routing cascade (VID-based, no CPU-tag). The SoC ASIC classifies
+# LAN vs WAN purely by 802.1Q VID over the tagged trunk (port6); rtl865x_start +
+# /proc/rtl865x_gw use VID2=LAN / VID1=WAN. ★ GOTCHA (cost a long debug): the
+# rtl8367b swconfig driver IGNORES the `vid=` attribute and uses vid = (vlan
+# index), so vlan '1' => 8367S VID1 and vlan '2' => VID2. The 8367S MUST therefore
+# be VID1 = WAN (jack4 = tiny) and VID2 = LAN (jacks 0-3; hal is on jack2) to match
+# the SoC — backwards routes WAN frames onto the LAN jacks and NOTHING reaches the
+# WAN peer (found via the rtl8367b debugfs vlan_mc dump). Trunk port6 tagged in
+# both. Linux splits the CPU port into eth0.2 (LAN VID2) / eth0.1 (WAN VID1).
 uci -q batch <<'EOF'
-set network.lan.type='bridge'
-set network.lan.ifname='eth0'
+add network switch
+set network.@switch[-1].name='switch0'
+set network.@switch[-1].reset='1'
+set network.@switch[-1].enable_vlan='1'
+add network switch_vlan
+set network.@switch_vlan[-1].device='switch0'
+set network.@switch_vlan[-1].vlan='1'
+set network.@switch_vlan[-1].vid='1'
+set network.@switch_vlan[-1].ports='4 6t'
+add network switch_vlan
+set network.@switch_vlan[-1].device='switch0'
+set network.@switch_vlan[-1].vlan='2'
+set network.@switch_vlan[-1].vid='2'
+set network.@switch_vlan[-1].ports='0 1 2 3 6t'
+set network.lan.ifname='eth0.2'
 set network.lan.proto='static'
 set network.lan.ipaddr='192.168.0.1'
 set network.lan.netmask='255.255.255.0'
 delete network.lan.ip6assign
-delete network.wan
+# ★ Pin the LAN MAC to the ASIC's LAN netif MAC (gw_prog GW_MAC_LAN = ...c2). The
+# eth driver falls back to a RANDOM MAC when DT provides none, so on a fresh boot
+# LAN clients would ARP-resolve 192.168.0.1 to the random MAC — which never matches
+# ASIC netif[0], so the outbound hardware path silently never engages (everything
+# traps to the CPU). Same failure class as the wan.macaddr pin below, LAN side.
+set network.lan.macaddr='00:e0:4c:81:96:c2'
+set network.wan='interface'
+set network.wan.ifname='eth0.1'
+set network.wan.proto='static'
+set network.wan.ipaddr='172.16.0.1'
+set network.wan.netmask='255.255.255.0'
 delete network.wan6
+# ★ M6.6 Phase 3 CRITICAL: pin eth0.1's MAC to the ASIC's WAN netif MAC. gw_prog
+# programs the WAN L3 interface with GW_MAC_WAN = LAN-MAC+1 = ...c3, and the ASIC
+# rewrites HW-routed egress frames' src MAC to c3. But eth0.1 is a VLAN that inherits
+# eth0's ...c2, so CPU-path (software-masqueraded / box-originated) WAN frames go out
+# as c2 while the WAN peer's ARP + all HW-routed frames use c3. That mismatch silently
+# blackholes EVERY CPU<->WAN packet (the miss-path handshake, ICMP, box-originated),
+# while HW-routed traffic works — which is exactly the confusing failure it caused.
+# Aligning eth0.1 to c3 makes the software and hardware datapaths agree.
+set network.wan.macaddr='00:e0:4c:81:96:c3'
 commit network
+EOF
+
+# --- M6.6 Phase 3: firewall + flow-offload. The default zones already ACCEPT
+# lan->wan and masquerade the wan zone (SRC -> 172.16.0.1, which is exactly the
+# ASIC extIP[0] the hwnat rows rewrite to). Enable software flow offloading and, on
+# top of it, HARDWARE offload: that emits the `-j FLOWOFFLOAD --hw` FORWARD rule that
+# actually drives our ndo_flow_offload hooks. nf_conntrack_acct gives per-flow byte/
+# packet counters so Phase 4 can watch them FREEZE when the ASIC takes over a flow.
+uci -q batch <<'EOF'
+set firewall.@defaults[0].flow_offloading='1'
+set firewall.@defaults[0].flow_offloading_hw='1'
+commit firewall
 EOF
 
 # --- 5 GHz AP on the PCIe RTL8822BE (rtw88); 2x2 VHT80. hwmode 11a = 5 GHz on

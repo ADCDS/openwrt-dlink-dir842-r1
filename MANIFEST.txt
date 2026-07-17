@@ -25,8 +25,22 @@ files/  (path-preserving overlay onto the OpenWrt tree)
                   Adds REALTEK_SR_MDIORST 0x100 (used by pci-realtek.c).
     files-4.14/drivers/net/ethernet/rtl819x/{rtl819x-eth.c,rtl819x_swnic.c/.h,
                   rtl819x_regs.h,Kconfig,Makefile}
-                  The carved RTL8197F NIC driver (mbuf-ring DMA + switch VLAN
-                  forwarding). Milestone-1 quality: single flat LAN port.
+                  The carved RTL8197F NIC driver: mbuf-ring CPU-port DMA, switch
+                  VLAN-membership forwarding, IRQ-driven NAPI + a fast RX watchdog
+                  poll, and the SBFCR/PBFCR flow-control + GDSR congestion drain.
+    files-4.14/drivers/net/ethernet/rtl819x/{rtl865x_asichal.c/.h}
+                  ** The ASIC L3/L4 table engine (M6.6) ** — reverse-engineered
+                  netif/route/nexthop/ARP/L2/NAPT/extIP table access + gw_prog,
+                  the stock-equivalent HW routing/NAT datapath (/proc/rtl865x_gw),
+                  and the /proc/rtl865x_{napt,fabric} diagnostics.
+    files-4.14/drivers/net/ethernet/rtl819x/{rtl819x_hwnat.c/.h}
+                  ** Conntrack-driven hardware NAT offload (M6.6) ** — the
+                  ndo_flow_offload glue that installs/reaps per-flow ASIC NAPT
+                  rows so established flows forward + source-NAT in silicon.
+                  Runtime param rtl819x.hwnat (default 0).
+    generic/files/drivers/net/phy/{rtl8367b.c,rtl8366_smi.c/.h}
+                  RTL8367S swconfig management + a forced-on debugfs for live
+                  8367S register access (the key bring-up diagnostic).
     dts/RTL8197F.dtsi        pcie0(RTL8822BE)/pcie1(disabled)/pcie_clk=25MHz + eth node.
     dts/GWR1200ACV1.dts      board dts (ipv6.disable=1 bootarg).
     patches-4.14/0006-net-add-rtl819x-eth.patch   Kbuild wiring for the eth driver.
@@ -34,8 +48,13 @@ files/  (path-preserving overlay onto the OpenWrt tree)
     Makefile                 FEATURES += pci.
     image/Makefile           ipv6.disable=1 CMDLINE.
     base-files/etc/uci-defaults/99-dir842-m5
-                  First-boot: LAN br-lan/eth0 192.168.0.1 + a 5 GHz WPA2 AP on
-                  the RTL8822BE + a pinned wlan MAC (efuse is blank).
+                  First-boot gateway config: LAN eth0.2 192.168.0.1 + WAN eth0.1
+                  static 172.16.0.1/24 (both MACs pinned to the ASIC netifs),
+                  the 8367S VID cascade, fw3 flow_offloading_hw, and a 5 GHz WPA2
+                  AP on the RTL8822BE (pinned wlan MAC — efuse is blank).
+    base-files/etc/{rc.local,sysctl.d/30-hwnat.conf}
+                  Boot: re-apply the 8367S config + program the ASIC datapath;
+                  enable nf_conntrack_acct (so offload can be observed).
   package/kernel/mac80211/patches/realtek/
     03-rtw8822b-blank-efuse-rfe.patch     default RFE type 2 on a blank efuse.
     04-rtw88-random-mac-blank-efuse.patch random MAC when the efuse MAC is invalid.

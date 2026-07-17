@@ -26,6 +26,8 @@
 
 #include "rtl819x_regs.h"
 #include "rtl819x_swnic.h"
+#include "rtl865x_asichal.h"	/* rtl865x_hal_lock: serializes all TLU/table access */
+#include "rtl819x_hwnat.h"	/* M6.6 Phase 3: conntrack HW-NAT offload hooks */
 
 #define RTL819X_RX_RING_SIZE	64
 #define RTL819X_TX_RING_SIZE	64
@@ -42,7 +44,7 @@
  * PKTHDR/MBUF_DESC_RUNOUT_IE are INCLUDED (M6.3b): under sustained load napi can
  * fall behind, the Rx ring empties of CPU-owned slots, and the switch hits
  * descriptor runout; arming these kicks napi promptly to drain+refill instead
- * of waiting on the ~100ms watchdog (which lets the CPU-port queue congest and
+ * of waiting on the ~10ms watchdog (which lets the CPU-port queue congest and
  * hard-wedge the fabric - vendor rtl865x_start arms them too, asicCom.c:1417).
  * The refill-lag storm the original code feared is avoided because napi masks
  * the source while polling and re-checks for pending work on complete. */
@@ -58,8 +60,18 @@ struct rtl819x_eth_priv {
 	struct work_struct	hang_work;	/* M6.5: fabric-wedge soft-recover */
 };
 
-#define RTL819X_POLL_INTERVAL	1	/* jiffies between rx polls */
-#define RTL819X_WATCHDOG_INTERVAL	(HZ / 10)	/* M6.3: slow missed-IRQ watchdog */
+/* M6.6 Phase 3 fast-offload: the RX IRQ (CP0 IP4) is unreliable on this SoC — a
+ * frame landing in the receive-empty/CPUIISR-ack race window loses its RX_DONE, so
+ * at low-to-moderate rate RX ends up driven by THIS timer, not the IRQ (measured:
+ * ~45ms/1-way ping latency == the old 100ms tick / 2). At 100ms that batches
+ * moderate-rate forwarded traffic into 100ms bursts, which wrecks TCP timing and
+ * collapses cwnd on the software (pre-offload) path — so a new flow's first-RTT
+ * packets die before the conntrack ndo_flow_offload ADD can move it to hardware.
+ * Poll every 1 jiffy (10ms @ HZ=100) instead: RX latency drops ~5x, moderate-rate
+ * software forwarding survives, and a flow stays alive long enough to offload.
+ * (Idempotent under load — napi_schedule is a no-op while napi is already active, so
+ * the extra ticks cost nothing when a burst is actually being drained.) */
+#define RTL819X_WATCHDOG_INTERVAL	DIV_ROUND_UP(HZ, 100)	/* ~10ms fast RX poll */
 
 /*
  * rtl865x_start() / rtl865x_down(): faithful replication of the vendor
@@ -175,6 +187,23 @@ static void rtl865x_start(void)
 	REG32(SIRR) = TRXRDY;
 
 	/*
+	 * M6.6 KNOWN-OPEN (A-2): sustained max-rate ROUTED bulk (~700 Mbit/s iperf3
+	 * through the ASIC L3 engine) can latch the fabric into a state where
+	 * multi-descriptor (large) frames die on a routed egress direction while
+	 * small frames pass — the routed-path sibling of the M6.5 CPU-path congestion
+	 * wedge (the GDSR_PORT_CONG drain can't reach it; recovery = eth0 down/up +
+	 * re-trigger /proc/rtl865x_gw). The vendor rtl8651_clearRegister() egress
+	 * packet-scheduler block (sdk-ref/rtl865x_asicCom.c:1112-1152: QIDDPCR,
+	 * P0Q0RGCR rate-guarantee, WFQ, ELB/ILB leaky buckets) was tried here as the
+	 * fix and REJECTED — transplanted onto this otherwise-default queue config it
+	 * STARVES sustained TCP to 0 bit/s (two variants measured: with QIDDPCR the
+	 * L4-classified queue has zero WFQ weight; even rate-regs-only, the leaky
+	 * bucket/rate-guarantee values cap bulk while ICMP + the iperf3 control
+	 * connection still pass). Revisit after Phase 2/3 (NAPT rows reshape the
+	 * L4 datapath); do NOT re-add the block without solving the queue mapping.
+	 */
+
+	/*
 	 * Switch-core L2 forwarding bring-up (v17: VLAN membership, NOT traps).
 	 * v13/v14/v16 proved the FFCR/SWTCR0 "trap-to-CPU" path corrupts kernel
 	 * RAM the instant a frame flows (it DMAs into an unconfigured management
@@ -209,10 +238,20 @@ static void rtl865x_start(void)
 		 * (v1 used 0x40 = CPU untagged, and the SoC dropped the trunk frames
 		 * on the untagged CPU-egress path -> eth0 RX stayed ~0.)
 		 */
-		sw_add_vlan(9, 0x7F, 0x00);		/* LAN: CPU + trunk both tagged */
-		sw_add_vlan(8, 0x7F, 0x00);		/* WAN: CPU + trunk both tagged */
+		/*
+		 * M6.6 Fork A: coherent VID2(LAN)/VID1(WAN) across the trunk so the ASIC
+		 * L3 engine classifies netifs by VID (netif0=VID2, netif1=VID1) WITHOUT
+		 * the source-port CPU-tag (which breaks CPU RX). The external RTL8367S
+		 * tags each jack's frames with its VID and sends them TAGGED up the trunk;
+		 * the SoC distinguishes LAN/WAN purely by 802.1Q. Members 0x7F (all ports
+		 * incl CPU port6) is a superset so frames reach the CPU too; nothing
+		 * untagged so the trunk egress stays tagged (the 8367S needs the VID to
+		 * pick the jack). PVID2 = untagged ingress defaults to LAN.
+		 */
+		sw_add_vlan(2, 0x7F, 0x00);		/* LAN VID2: all ports tagged members */
+		sw_add_vlan(1, 0x7F, 0x00);		/* WAN VID1: all ports tagged members */
 		for (p = 0; p <= 6; p++)
-			sw_set_pvid(p, 9);		/* untagged ingress default -> LAN */
+			sw_set_pvid(p, 2);		/* untagged ingress default -> LAN vid2 */
 		REG32(MSCR) |= MSCR_EN_L2;		/* global L2 forwarding enable */
 	}
 
@@ -289,6 +328,7 @@ static irqreturn_t rtl819x_eth_isr(int irq, void *dev_id)
  */
 static u32 hang_last_rx, hang_last_tx;
 static int hang_cnt;
+static u32 hang_log_n;
 
 static void rtl819x_hang_work(struct work_struct *w)
 {
@@ -304,7 +344,12 @@ static void rtl819x_hang_work(struct work_struct *w)
 	 * re-arm ALL ring descriptors clean (New_swNic_init re-allocs the RX
 	 * clusters + resets rxCurr), restart. Heavier than a bare CPUICR re-kick,
 	 * which was proven insufficient - the bare kick restarts the DMA but the
-	 * switch fabric stays wedged. */
+	 * switch fabric stays wedged.
+	 * rtl865x_start() writes the TLU command interface (sw_add_vlan/sw_set_pvid)
+	 * and RMWs MSCR, so it must hold rtl865x_hal_lock against gw_prog / the /proc
+	 * scanners / the hwnat module. Lock ordering: the mutex is taken BEFORE
+	 * netif_tx_lock_bh (a mutex can't be taken with BHs disabled). */
+	mutex_lock(&rtl865x_hal_lock);
 	napi_disable(&priv->napi);
 	netif_tx_lock_bh(priv->dev);
 	rtl865x_down();
@@ -312,6 +357,7 @@ static void rtl819x_hang_work(struct work_struct *w)
 	rtl865x_start();
 	netif_tx_unlock_bh(priv->dev);
 	napi_enable(&priv->napi);
+	mutex_unlock(&rtl865x_hal_lock);
 	napi_schedule(&priv->napi);
 }
 
@@ -329,13 +375,13 @@ static void rtl819x_hang_check(struct rtl819x_eth_priv *priv)
 	 * the CPU-port RX DMA engine. With this read the box passes 5000+ max-size
 	 * frames at 0% loss; delete it and the exact same load wedges at ~10 frames
 	 * (RXptr frozen, rx_packets stuck). It is a pure read - idle-safe (nothing to
-	 * drain -> no effect) - done every 100ms timer tick so congestion can never
+	 * drain -> no effect) - done every ~10ms timer tick so congestion can never
 	 * accumulate to the wedge threshold. Also read it in the napi poll so it
 	 * drains at napi rate exactly when a large-frame burst is arriving.
 	 */
 	REG32(GDSR_PORT_CONG);
 
-	if (++tick % 10)		/* the wedge detector below runs at ~1s */
+	if (++tick % 10)		/* the wedge detector below runs every 10th tick (~100ms) */
 		return;
 
 	rxd  = REG32(CPURPDCR0) & 0xfffffffc;
@@ -357,9 +403,19 @@ static void rtl819x_hang_check(struct rtl819x_eth_priv *priv)
 
 	if (hang_cnt >= 3) {			/* ~3s: RX frozen while TX active */
 		hang_cnt = 0;
-		pr_err("rtl819x: RX engine wedged (RXptr frozen %08x, rxpkts=%lu, TX live) -> re-init\n",
-		       rxd, priv->dev->stats.rx_packets);
-		schedule_work(&priv->hang_work);
+		/*
+		 * M6.6: this "RXptr frozen + TXptr moving" gate false-positives in the
+		 * gateway role — the box legitimately TXs (DHCP, ARP to unresolved peers,
+		 * routed-path pings) with RX idle, indistinguishable from a real wedge, and
+		 * used to fire a full rtl865x_start() re-init MID-TX that corrupted the
+		 * egress datapath on every control-plane burst. The PRIMARY wedge fix is the
+		 * GDSR_PORT_CONG drain above (runs unconditionally every tick); the re-init
+		 * was only a best-effort net for a sustained max-rate flood we don't hit in
+		 * the gateway path. Log (rate-limited); do NOT re-init on this signature.
+		 */
+		if (!(hang_log_n++ & 0xf))
+			pr_warn("rtl819x: RXptr frozen %08x while TX active (rxpkts=%lu) - not re-initing (gateway TX-without-RX is normal)\n",
+				rxd, priv->dev->stats.rx_packets);
 	}
 }
 
@@ -406,9 +462,6 @@ static int rtl819x_eth_poll(struct napi_struct *napi, int budget)
 
 		skb_put(skb, info.len);
 		skb->protocol = eth_type_trans(skb, dev);
-		{ static int dbg; if (info.len >= 84 && info.len <= 110 && dbg++ < 40)
-			pr_err("rtl819x RXicmp: proto=%04x info.vid=%u info.pid=%u len=%u\n",
-			       ntohs(skb->protocol), info.vid, info.pid, info.len); }
 		/*
 		 * M6.6 cascade: frames arrive UNTAGGED (8367S untags the trunk) with
 		 * the source jack in info.pid (CPU-tag). Derive the VID from the jack
@@ -417,16 +470,19 @@ static int rtl819x_eth_poll(struct napi_struct *napi, int budget)
 		 * used info.vid directly, but the cascade gives info.vid=0.)
 		 */
 		{
-			/* M6.6 one-armed SW router: normalize ALL cascade frames onto
-			 * vid2 so they demux to eth0.2 (the box routes LAN<->WAN by IP).
-			 * LAN jacks arrive untagged; the WAN jack arrives inline-802.1Q
-			 * (the 8367S tags port6 for the WAN vid) which the old code SKIPPED
-			 * (protocol==8021Q) — strip it first, then force vid2. */
+			/* M6.6 Fork A two-VLAN demux: frames arrive from the trunk inline-
+			 * 802.1Q tagged with their REAL vid (rtl865x_start makes CPU egress
+			 * tagged). Move the tag into the hwaccel slot so 8021q demuxes by the
+			 * real vid -> eth0.2 (LAN vid2) / eth0.1 (WAN vid1). (The old one-armed
+			 * code force-normalized everything to vid2, which mis-delivered WAN
+			 * frames to eth0.2 and broke two-VLAN software routing.) Untagged
+			 * frames default to the LAN vid. */
 			if (skb->protocol == htons(ETH_P_8021Q)) {
-				skb = skb_vlan_untag(skb);
+				skb = skb_vlan_untag(skb);	/* -> hwaccel tag = real vid */
 				if (!skb) { dev->stats.rx_dropped++; continue; }
+			} else {
+				__vlan_hwaccel_put_tag(skb, htons(ETH_P_8021Q), 2);
 			}
-			__vlan_hwaccel_put_tag(skb, htons(ETH_P_8021Q), 2);
 		}
 		napi_gro_receive(napi, skb);
 
@@ -446,7 +502,7 @@ static int rtl819x_eth_poll(struct napi_struct *napi, int budget)
 		/*
 		 * M6.3b race-close: a frame can land between the New_swNic_receive()
 		 * that returned "empty" above and the CPUIISR ack here. The ack (W1C)
-		 * clears that frame's RX_DONE, so its IRQ is lost until the ~100ms
+		 * clears that frame's RX_DONE, so its IRQ is lost until the ~10ms
 		 * watchdog - and under sustained load these losses compound, starving
 		 * napi until the CPU-port queue congests and the fabric hard-wedges
 		 * (observed: rx_pkts frozen while polls continue). Re-peek the ring
@@ -560,7 +616,14 @@ static int rtl819x_eth_open(struct net_device *dev)
 	}
 
 	napi_enable(&priv->napi);
+	/* rtl865x_start() drives the TLU command interface (VLAN/PVID writes) and RMWs
+	 * MSCR — hold the HAL lock so it can't interleave with a concurrent gw_prog
+	 * (rc.local backgrounds `cat /proc/rtl865x_gw` ~6 s into boot, racing netifd's
+	 * ifup on slow boots) or the /proc scanners. An interleave could commit a
+	 * mixed table entry or lose gw_prog's MSCR EN_L3|EN_L4 bits (silent NAT death). */
+	mutex_lock(&rtl865x_hal_lock);
 	rtl865x_start();
+	mutex_unlock(&rtl865x_hal_lock);
 
 	/* M6.3: the RX IRQ now drives napi; keep the timer only as a slow (~100ms)
 	 * missed-IRQ watchdog so a lost interrupt can't wedge RX. M6.5: the timer
@@ -571,6 +634,11 @@ static int rtl819x_eth_open(struct net_device *dev)
 
 	netif_start_queue(dev);
 
+	/* M6.6 Phase 3: arm conntrack HW-NAT offload now the datapath is up (no-op
+	 * unless rtl819x.hwnat=1). The static ASIC gateway scaffolding is programmed
+	 * separately by rc.local's `cat /proc/rtl865x_gw`. */
+	rtl819x_hwnat_start(dev);
+
 	netdev_info(dev, "interface up (polling, irq %d unused)\n", priv->irq);
 	return 0;
 }
@@ -580,6 +648,9 @@ static int rtl819x_eth_stop(struct net_device *dev)
 	struct rtl819x_eth_priv *priv = netdev_priv(dev);
 
 	netif_stop_queue(dev);
+	/* M6.6 Phase 3: tear down all HW-NAT rows + quiesce the aging worker while the
+	 * switch core is still up (before rtl865x_down()); no-op unless hwnat=1. */
+	rtl819x_hwnat_stop();
 	del_timer_sync(&priv->rx_timer);
 	cancel_work_sync(&priv->hang_work);	/* M6.5: no re-kick during teardown */
 	napi_disable(&priv->napi);
@@ -589,12 +660,18 @@ static int rtl819x_eth_stop(struct net_device *dev)
 	return 0;
 }
 
+/* M6.6 Phase 3: the two conntrack HW-NAT offload hooks are always present. They gate
+ * internally on the runtime-writable rtl819x.hwnat param and decline every flow to
+ * the software path while it is off, so hwnat=0 behaves identically to a driver
+ * without the hooks — but the param can be flipped on at runtime with no reboot. */
 static const struct net_device_ops rtl819x_eth_netdev_ops = {
 	.ndo_open		= rtl819x_eth_open,
 	.ndo_stop		= rtl819x_eth_stop,
 	.ndo_start_xmit		= rtl819x_eth_xmit,
 	.ndo_set_mac_address	= eth_mac_addr,
 	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_flow_offload_check	= rtl819x_hwnat_flow_offload_check,
+	.ndo_flow_offload	= rtl819x_hwnat_flow_offload,
 };
 
 static int rtl819x_eth_probe(struct platform_device *pdev)

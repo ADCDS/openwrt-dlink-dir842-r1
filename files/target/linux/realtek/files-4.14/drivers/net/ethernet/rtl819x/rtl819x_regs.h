@@ -150,15 +150,24 @@
 #define PBFCR0				(SBFCTR + 0x0C)		/* per-port MaxDSC FCOFF<<16|FCON */
 /* PBFCR1..5 = PBFCR0 + n*0x04 */
 
-/* ---- descriptor-pool diagnostic (DESCDIAG GDSR0) ------------------------- */
-#define GDSR0				(RTL819X_SWCORE_BASE + 0x6100)
-#define GDSR0_USEDDSC_MASK		(0x3ff << 16)		/* total used descriptors */
+/* ---- descriptor-pool diagnostic (DESCDIAG, SWCORE+0x6100) ---------------- */
+#define DESCDIAG_BASE			(RTL819X_SWCORE_BASE + 0x6100)
+#define GDSR0				(DESCDIAG_BASE + 0x000)	/* Global Descriptor Status 0 */
+#define GDSR0_USEDDSC_MASK		(0x3ff << 16)		/* total used descriptors NOW */
 #define GDSR0_DSCRUNOUT			(1 << 27)		/* descriptor run-out latched */
+#define GDSR0_TOTALDSC_FC		(1 << 26)		/* total-descriptor flow-control event */
+#define GDSR0_SHAREDBUF_FCON		(1 << 14)		/* shared-buffer FCON threshold hit */
+#define GDSR0_MAXUSEDDSC_MASK		(0x3fff << 0)		/* max-used-dsc history (high-water) */
+#define GDSR1				(DESCDIAG_BASE + 0x004)	/* Global Descriptor Status 1 */
+#define PCSR0				(DESCDIAG_BASE + 0x008)	/* Port Congestion Status 0 (P0-3 OQ) */
+#define PCSR1				(DESCDIAG_BASE + 0x00C)	/* Port Congestion Status 1 (P4-6 OQ + IQ) */
+#define Pn_DCR0(p)			(DESCDIAG_BASE + 0x010 + (p) * 0x10)	/* per-port dsc-count regs */
 
 /* Per-port/queue congestion status - vendor rtl819x_poll_sw reads 0xBB80610C
- * bit16 = CPU port (6) queue0 congested; combined with frozen Rx/Tx descriptor
- * pointers it is the fabric-wedge signature (asicBasic.c:502). */
-#define GDSR_PORT_CONG			(RTL819X_SWCORE_BASE + 0x610C)
+ * (== PCSR1) bit16 = CPU port (6) queue0 congested; combined with frozen Rx/Tx
+ * descriptor pointers it is the fabric-wedge signature (asicBasic.c:502). Reading
+ * it also DRAINS the latched port-congestion state (the M6.5 wedge mitigation). */
+#define GDSR_PORT_CONG			PCSR1
 #define PORT6_Q0_CONG			(1 << 16)
 
 /* ---- switch MAC config (reserve: carrier-based back-pressure tolerance) --- */

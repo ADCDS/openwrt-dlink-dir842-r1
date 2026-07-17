@@ -42,6 +42,26 @@
 	// 	};
 	// };
 
+	/* External RTL8367S 5-port gigabit switch, managed over bit-banged SMI
+	 * (MDC=GPIO18, MDIO=GPIO19 on gpio0). Hardware-confirmed: the RGMII uplink
+	 * to the SoC is the switch's EXT1 (port 6, forced 1000/full, flow-control)
+	 * — NOT EXT0. cpu_port = 6 so the driver's per-port VLANs bridge each jack
+	 * to the live uplink. WAN jack = port 4, LAN jacks = ports 0-3. The RGMII
+	 * itself is left in its (working) power-on config — the 8367S ext-interface
+	 * registers differ from the 8367R-VB, so the driver skips extif/reset for
+	 * this chip (see rtl8367b_is_8367s); extif1 is kept only for documentation. */
+	rtl8367b {
+		compatible = "realtek,rtl8367b";
+		cpu_port = <6>;
+		realtek,extif1 = <1 0 1 1 1 1 1 1 2>;
+		gpio-sck = <&gpio0 18 GPIO_ACTIVE_HIGH>;
+		gpio-sda = <&gpio0 19 GPIO_ACTIVE_HIGH>;
+	};
+
+};
+
+&gpio0 {
+	status = "okay";
 };
 
 &gpio1 {

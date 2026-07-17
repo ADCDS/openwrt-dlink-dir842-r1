@@ -5,4 +5,4 @@
 
 obj-$(CONFIG_NET_RTL819X) += rtl819x.o
 
-rtl819x-y := rtl819x-eth.o rtl819x_swnic.o
+rtl819x-y := rtl819x-eth.o rtl819x_swnic.o rtl865x_asichal.o rtl819x_hwnat.o

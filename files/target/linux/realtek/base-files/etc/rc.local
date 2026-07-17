@@ -1,0 +1,22 @@
+#!/bin/sh
+# DIR-842 R1 (RTL8197F) M6.6 — bring the ASIC hardware-routing gateway up at boot.
+#
+# Two boot-time steps the normal init sequence doesn't cover:
+#  1) The external RTL8367S retains a wedged trunk->jack L2/forwarding state across
+#     warm reloads (rtl8367b_reset_chip() deliberately skips the 8367S soft reset to
+#     preserve the power-on RGMII uplink). Symptom: routed WAN<->LAN frames reach the
+#     8367S over the trunk but are not forwarded out to the jacks (P4out flat, ~66-100%
+#     loss). A single `swconfig ... set apply` AFTER netifd re-programs the VLAN/
+#     forwarding tables and clears it -> reliable trunk->jack delivery.
+#  2) Program the SoC L3/L4 datapath (netifs + routes + L2 nexthops) into the ASIC via
+#     /proc/rtl865x_gw so LAN(VID2)<->WAN(VID1) is routed in hardware (CPU bypassed).
+#
+# Backgrounded with a short settle so rc.local itself never blocks boot.
+(
+	sleep 5
+	swconfig dev switch0 set apply 1 2>/dev/null
+	sleep 1
+	cat /proc/rtl865x_gw >/dev/null 2>&1
+) &
+
+exit 0

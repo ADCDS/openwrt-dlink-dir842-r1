@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 config NET_RTL819X
-	tristate "Realtek RTL8197F (RTL819x) switch-core Ethernet"
+	bool "Realtek RTL8197F (RTL819x) switch-core Ethernet"
 	depends on SOC_RTL8197F || COMPILE_TEST
 	select PHYLIB
 	default SOC_RTL8197F
@@ -10,4 +10,7 @@ config NET_RTL819X
 	  descriptor DMA engine (swNic) that moves frames between the CPU and
 	  the on-chip Ethernet switch.
 
-	  Say Y here (built-in) to get networking on RTL8197F boards.
+	  bool (not tristate): the multi-object module mixes
+	  module_platform_driver() (rtl819x-eth.c) with late_initcall()
+	  (rtl865x_asichal.c) — two init_module definitions under =m — and the
+	  /proc entries are never removed, so it cannot be built modular.
