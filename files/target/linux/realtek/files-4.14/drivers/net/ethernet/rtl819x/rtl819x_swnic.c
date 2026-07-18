@@ -465,16 +465,27 @@ static int32 _New_swNic_send(void *skb, void *output, uint32 len,
 
 	ph->ph_len = len;
 	ph->ph_vlanId = nicTx->vid & 0x0fff;
-	ph->ph_portlist = nicTx->portlist & 0x1f;
+	ph->ph_portlist = nicTx->portlist & 0x3f;
 	ph->ph_flags = nicTx->flags;
-	ph->ph_asic0 = 0;
+	/*
+	 * ph_srcExtPortNum = CPU (3) for EVERY CPU-injected frame, not just the
+	 * HWLOOKUP path. With srcExtPort left at 0 the switch reads the source as
+	 * physical port 0 and SOURCE-PORT-FILTERS it out of the egress portmask —
+	 * and port 0 IS the single RGMII trunk to the RTL8367S. So a direct-portlist
+	 * (flags=0) CPU frame egressed to ports 0-5 gets the trunk stripped, and
+	 * box-initiated traffic (ARP, unicast on a cold FDB) never reaches the wire
+	 * while host-initiated traffic (real ingress on port 0 -> flood to CPU) does.
+	 * Marking the source as the CPU stops the trunk being filtered. (Same value
+	 * the HWLOOKUP branch already used; see rtl865x_asichal.c PORT0_ROUTER_MODE
+	 * note re: source-port filtering blocking egress back out the trunk.)
+	 */
+	ph->ph_asic0 = (3 << 0);	/* ph_srcExtPortNum = CPU */
 	ph->ph_asic1 = 0;
 	ph->ph_ptpbits = 0;
 	if (nicTx->flags & PKTHDR_HWLOOKUP) {
 		/* CPU-injected frame, let the switch L2-bridge it (translation of
 		 * the old tx_hwlkup|tx_bridge|tx_extspa=CPU descriptor bits). */
 		ph->ph_flags |= PKTHDR_BRIDGING;
-		ph->ph_asic0 = (3 << 0);	/* ph_srcExtPortNum = CPU */
 	}
 
 	tx_ri[idx].skb = (uintptr_t)skb;
