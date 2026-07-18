@@ -99,4 +99,13 @@ set wireless.default_radio0.macaddr='02:11:22:33:44:56'
 commit wireless
 EOF
 
+# --- Force BROADCAST DHCP offers. The box->client UNICAST offer to a just-learned
+#     client MAC is not reliably delivered (box-originated cold-unicast, task #13 /
+#     the RGMII-trunk L2-lookup egress); broadcast offers DO get through. OpenWrt's
+#     `option dhcpbroadcast` only emits the tag-conditional
+#     `dhcp-broadcast=tag:needs-broadcast`, which does NOT cover normal clients — so
+#     drop the UNCONDITIONAL raw option into /etc/dnsmasq.conf, which dnsmasq reads
+#     as an extra conf-file (see dnsmasq.init). Ref: docs/M7-LARGE-FRAME-RX-WEDGE.md.
+grep -qx 'dhcp-broadcast' /etc/dnsmasq.conf 2>/dev/null || echo 'dhcp-broadcast' >> /etc/dnsmasq.conf
+
 exit 0
