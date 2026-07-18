@@ -78,15 +78,31 @@
 		reg = <0>;
 		spi-max-frequency = <41000000>;
 
+		/* DIR-842 stock flash map (matches the RTL8197F v3.4.11B loader,
+		 * which scans 0x10000..0x40000 and boots the cr6b blob at 0x40000):
+		 * boot(128K) + MAC(64K) + config(64K), then the kernel+rootfs
+		 * firmware region at 0x40000. boot+MAC are read-only (sacred loader
+		 * and per-device MAC/RF-calibration). */
 		partition@0 {
 			label = "boot";
-			reg = <0x0 0x30000>;
+			reg = <0x0 0x20000>;
+			read-only;
+		};
+
+		partition@20000 {
+			label = "MAC";
+			reg = <0x20000 0x10000>;
 			read-only;
 		};
 
 		partition@30000 {
+			label = "config";
+			reg = <0x30000 0x10000>;
+		};
+
+		partition@40000 {
 			label = "firmware";
-			reg = <0x30000 0x7C0000>;
+			reg = <0x40000 0x7b0000>;
 		};
 	};
 };

@@ -42,6 +42,30 @@ define Build/cvimg-kernel
                 $(1))
 endef
 
+# DIR-842 R1: the D-Link v3.4.11B loader boots the 'cr6b' firmware signature
+# (verified byte-identical to the stock mtd3 header), not the 'cs6c' that
+# '-c new -t kernel' would emit.
+define Build/cvimg-kernel-cr6b
+        $(call Build/cvimg, \
+                -e $(CVIMG_LOADER_START_ADDR) \
+                -b $(CVIMG_KERNEL_BURN_ADDR) \
+                -s cr6b \
+                $(1))
+endef
+
+# DIR-842 R1: append the D-Link boot signature the v3.4.11B loader validates
+# after finding the cr6b image (else "magic not found" / no boot). The check is:
+#   trailer = MD5( key16 || cvimg_image )[16] , then 0x00C0FFEE[4]
+# where key16 is embedded in the stock bootcode (mtd0 @0x291bc). Reverse-
+# engineered from the bootcode; verified byte-identical to the stock trailer.
+define Build/dlink-md5-sign
+	{ printf '\x8c\xef\xeb\x7b\x3b\x27\x46\x29\xbe\x7d\xf7\xd4\x53\xa6\x4c\x29'; cat $@; } | \
+		md5sum | cut -c1-32 | perl -ne 'chomp; print pack("H*", $$_)' > $@.dgst
+	cat $@.dgst >> $@
+	printf '\x00\xc0\xff\xee' >> $@
+	rm -f $@.dgst
+endef
+
 define Build/cvimg-fw
         $(call Build/cvimg, \
                 -e $(CVIMG_LOADER_START_ADDR) \
@@ -190,6 +214,16 @@ define Device/GWR1200AC-V1
   DEVICE_DTS := GWR1200ACV1
   DEVICE_TITLE := Greatek GWR1200AC V1
   SUPPORTED_DEVICES := gwr1200ac-v1
+  # This profile is the D-Link DIR-842 R1 (RTL8197F) masquerading as
+  # GWR1200AC-V1. Its flash geometry is the DIR-842 stock map: kernel+rootfs
+  # firmware region at 0x40000 (7872k), booted via the cr6b signature.
+  IMAGE_SIZE := 7872k
+  CVIMG_KERNEL_BURN_ADDR := 0x40000
+  # entry = the lzma-loader link addr (LZMA_TEXT_START, image/Makefile:19), NOT
+  # the Greatek 0x80a00000; the loader loads to start_addr and jumps there.
+  CVIMG_LOADER_START_ADDR := 0x81000000
+  IMAGE/factory.bin = append-kernel | append-fake-rootfs | append-rootfs | cvimg-kernel-cr6b | cvimg-pad-rootfs | dlink-md5-sign
+  IMAGE/sysupgrade.bin = append-kernel | append-fake-rootfs | append-rootfs | cvimg-kernel-cr6b | pad-rootfs | dlink-md5-sign
 endef
 TARGET_DEVICES += GWR1200AC-V1
 

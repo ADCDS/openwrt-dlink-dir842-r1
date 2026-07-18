@@ -252,13 +252,45 @@ static void rtl865x_start(void)
 		sw_add_vlan(1, 0x7F, 0x00);		/* WAN VID1: all ports tagged members */
 		for (p = 0; p <= 6; p++)
 			sw_set_pvid(p, 2);		/* untagged ingress default -> LAN vid2 */
-		REG32(MSCR) |= MSCR_EN_L2;		/* global L2 forwarding enable */
-	}
+		/* mode-2 fix: arm the CPU RX interrupt (GIMR switch-NIC line + CP0
+		 * IP4) BEFORE enabling global L2 forwarding, so the CPU is already
+		 * ready to drain the RX ring the instant frames flow. If L2-enable
+		 * comes first (as it used to, a few lines below), an ingress burst
+		 * (ARP/broadcast the moment the port forwards) floods the ring while
+		 * no RX-done IRQ/napi is armed -> the ring overflows and the bring-up
+		 * hangs right at 'br-lan forwarding' (the intermittent mode-2 freeze).
+		 * This is the same "frames flow before the CPU path is ready" hazard
+		 * the trap-to-CPU comment above warns about. */
+		REG32(GIMR) |= BSP_SW_IE;
+		set_c0_status(STATUSF_IP4);
 
-	/* M6.3: route the switch NIC line INTO the global mask + enable CP0 IP4 so
-	 * the Rx/Tx-done interrupt reaches the CPU (napi masks + re-arms it). */
-	REG32(GIMR) |= BSP_SW_IE;
-	set_c0_status(STATUSF_IP4);
+		/* --- RGMII trunk (port0 <-> external RTL8367S) cold bring-up ---
+		 * The stock D-Link/Realtek loader's init_8367r (which only runs on the
+		 * loader's TFTP path) puts SoC switch-core port0 into RGMII mode and
+		 * latches the GMII config. FLASHED boots skip it, so the CPU<->8367S
+		 * trunk is mis-configured and ingress from the jacks never reaches the
+		 * CPU RX ring -> dead RX while forced-link/TX look fine. Replicate the
+		 * essential bits (addresses RE'd from stock init_8367r and matching the
+		 * loader source: SWCORE+0x4100 PITCR, +0x414C P0GMIICR, +0x4000 MACCR).
+		 * Idempotent on TFTP/RAM boots where the loader already did it. */
+		pr_err("rtl819x trunk-pre : PITCR=%08x P0GMIICR=%08x MACCR=%08x PCRP0=%08x\n",
+		       REG32(RTL819X_SWCORE_BASE + 0x4100),
+		       REG32(RTL819X_SWCORE_BASE + 0x414C),
+		       REG32(RTL819X_SWCORE_BASE + 0x4000),
+		       REG32(RTL819X_SWCORE_BASE + 0x4104));
+		REG32(RTL819X_SWCORE_BASE + 0x4000) |= (1u << 12);	/* MACCR CF_SYSCLK_SEL */
+		REG32(RTL819X_SWCORE_BASE + 0x414C) =
+			(REG32(RTL819X_SWCORE_BASE + 0x414C) & ~((1u << 4) | (7u << 0)))
+			| (1u << 4) | (5u << 0);			/* P0GMIICR RGMII TX/RX delays */
+		REG32(RTL819X_SWCORE_BASE + 0x4100) |= (1u << 0);	/* PITCR port0 = RGMII (default UTP!) */
+		REG32(RTL819X_SWCORE_BASE + 0x414C) |= (1u << 6);	/* P0GMIICR Conf_done: latch */
+		pr_err("rtl819x trunk-post: PITCR=%08x P0GMIICR=%08x MACCR=%08x\n",
+		       REG32(RTL819X_SWCORE_BASE + 0x4100),
+		       REG32(RTL819X_SWCORE_BASE + 0x414C),
+		       REG32(RTL819X_SWCORE_BASE + 0x4000));
+
+		REG32(MSCR) |= MSCR_EN_L2;		/* global L2 forwarding enable (LAST) */
+	}
 
 	/* Bring-up self-diagnosis (readable over ssh via `dmesg`): on a dead-RX
 	 * boot the ring base still latches into CPURPDCR0 but CPUIISR never accrues

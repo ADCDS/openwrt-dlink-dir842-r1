@@ -776,8 +776,20 @@ static int rtl8367b_reset_chip(struct rtl8366_smi *smi)
 	int err;
 	u32 data;
 
-	if (rtl8367b_is_8367s(smi))
-		return 0;	/* preserve the working power-on RGMII uplink */
+	if (rtl8367b_is_8367s(smi)) {
+		/* Do NOT reset the 8367S here. Empirically (live-instrumented on the
+		 * DIR-842 bench): a gpio474 HW-reset at probe fires AFTER the boot
+		 * loader has already brought up the SoC-side RGMII trunk (P0GMIICR/
+		 * PCRP0 in init_97f_8367r) against the pre-reset chip. Re-strapping the
+		 * 8367S now desynchronises the EXT1<->SoC-P0 pair: the link forces up
+		 * 1000/full but the data plane is dead BOTH ways (SoC eth0 rx=0,
+		 * CPUIISR=0; 8367S port6 ifIn=0 while its L2 still forwards jack->port6,
+		 * ifOut>0). The loader's power-on RTL8367R_init already brings the
+		 * uplink up coherently, so preserve it. Cold (flashed) bring-up — where
+		 * the loader ran no RTL8367R_init — is done conditionally in setup(),
+		 * gated on the chip reading un-configured. */
+		return 0;
+	}
 
 	REG_WR(smi, RTL8367B_CHIP_RESET_REG, RTL8367B_CHIP_RESET_HW);
 	msleep(RTL8367B_RESET_DELAY);
@@ -1069,7 +1081,7 @@ static int rtl8367b_setup(struct rtl8366_smi *smi)
 	 * insertion config (fn 0x801c7258: regs 0x890-0x892 + 0x1219/0x121A) survives
 	 * the D-Link loader. If it does, replicate the read values directly. */
 	if (rtl8367b_is_8367s(smi)) {
-		u32 dr, dv;
+		u32 dr, dv, cpu_mask = 0;
 		for (dr = 0x1219; dr <= 0x121c; dr++) {
 			rtl8366_smi_read_reg(smi, dr, &dv);
 			printk(KERN_ERR "DIR842 8367Sdump[%04x]=%04x\n", dr, dv);
@@ -1077,6 +1089,61 @@ static int rtl8367b_setup(struct rtl8366_smi *smi)
 		for (dr = 0x0890; dr <= 0x0893; dr++) {
 			rtl8366_smi_read_reg(smi, dr, &dv);
 			printk(KERN_ERR "DIR842 8367Sdump[%04x]=%04x\n", dr, dv);
+		}
+
+		/* ---- RTL8367S EXT1 (CPU RGMII uplink) COLD bring-up (flashed boot only) ----
+		 * Replicate the loader's 8367S-correct SMI init so a FLASHED boot (no
+		 * loader RTL8367R_init) has a live uplink. BUT: on a loader-configured
+		 * boot (TFTP/monitor) the loader already brought this up coherently with
+		 * the SoC-P0 side, and re-writing the physical uplink regs with this
+		 * partial replica DESYNCS the RGMII pair -> data plane dead both ways
+		 * (proven live: link forced-up, SoC eth0 rx=0, 8367S port6 ifIn=0). So
+		 * gate on 0x1219 (CPU port mask): the loader's RTL8367R_init sets it to
+		 * 0x40; strap default is 0. Only bring up when un-configured (==0).
+		 * Registers cross-checked vs RTL8197F bootcode rtk_api (init_rtl8367r),
+		 * rtl8367c SDK, OpenWrt rtl8367c_initvals (4b81eda3c1a9), mainline
+		 * rtl8365mb. 8367S trap: EXT1 serdes/RGMII mux at SDS_MISC (0x1D11) bits
+		 * 6/11 must be cleared or the RGMII pads stay disconnected. */
+		rtl8366_smi_read_reg(smi, 0x1219, &cpu_mask);
+		if (cpu_mask != 0) {
+			dev_info(smi->parent,
+				 "RTL8367S: loader-configured uplink (0x1219=%04x) — preserving power-on RGMII trunk\n",
+				 cpu_mask);
+		} else {
+			static const u16 s_init[][2] = {
+				{0x13eb, 0x15bb}, {0x1303, 0x06d6}, {0x1304, 0x0700},
+				{0x13e2, 0x003f}, {0x13f9, 0x0090}, {0x121e, 0x03ca},
+				{0x1233, 0x0352}, {0x1237, 0x00a0}, {0x123a, 0x0030},
+				{0x1239, 0x0084}, {0x18e0, 0x4004}, {0x122b, 0x641c},
+				{0x1305, 0xc000}, {0x1d32, 0x0002}, {0x09da, 0x0017},
+				/* jack PHYs (0-4) BMCR: AN enable + restart, gigabit */
+				{0x2000, 0x1340}, {0x2020, 0x1340}, {0x2040, 0x1340},
+				{0x2060, 0x1340}, {0x2080, 0x1340},
+			};
+			int k;
+
+			rtl8366_smi_write_reg(smi, 0x13c2, 0x0249);	/* magic-ID unlock (leave on) */
+			for (k = 0; k < ARRAY_SIZE(s_init); k++)
+				rtl8366_smi_write_reg(smi, s_init[k][0], s_init[k][1]);
+			/* EXT1 uplink: RGMII delay BEFORE mode/force (vendor order) */
+			rtl8366_smi_rmwr(smi, 0x03f7, (1 << 1), 0);		/* not TMII */
+			rtl8366_smi_rmwr(smi, 0x1d11, (1 << 6) | (1 << 11), 0);	/* serdes mux OFF -> RGMII pads live */
+			rtl8366_smi_rmwr(smi, 0x1307, 0x000f, 0x0002);		/* EXT1 RGMXF: tx0 rx2 */
+			rtl8366_smi_rmwr(smi, 0x1305, 0x00f0, (1 << 4));	/* EXT1 mode = RGMII */
+			rtl8366_smi_write_reg(smi, 0x1311, 0x1076);		/* force 1000/full/link/tx+rx-pause */
+			/* CPU port + forwarding: the gpio474 HW reset above clears these to
+			 * strap-default (0x1219=0 => NO CPU port mask => nothing forwards to
+			 * the CPU), and swconfig doesn't restore them on an initramfs, so
+			 * program them here (values from the loader's RTL8367R_init). */
+			rtl8366_smi_write_reg(smi, 0x1219, 0x0040);		/* CPU port mask = phys port 6 (EXT1) */
+			rtl8366_smi_rmwr(smi, 0x121a, 0x003f,
+					 (1 << 0) | (6 << 3) | (2 << 1));	/* CPU en | trap port6 | tag=NONE */
+			rtl8366_smi_write_reg(smi, 0x0890, 0x00ff);		/* flood unknown DA -> all ports */
+			rtl8366_smi_write_reg(smi, 0x0891, 0x00ff);		/* flood unknown MC */
+			rtl8366_smi_write_reg(smi, 0x0892, 0x00ff);		/* flood BC */
+			for (k = 0; k <= 7; k++)
+				rtl8366_smi_write_reg(smi, 0x08a2 + k, 0x00ff);	/* no port isolation */
+			dev_info(smi->parent, "RTL8367S: EXT1 RGMII uplink + CPU/forwarding configured (flashed-boot bring-up)\n");
 		}
 	}
 
