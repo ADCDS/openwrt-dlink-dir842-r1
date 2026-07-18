@@ -3,6 +3,7 @@ config NET_RTL819X
 	bool "Realtek RTL8197F (RTL819x) switch-core Ethernet"
 	depends on SOC_RTL8197F || COMPILE_TEST
 	select PHYLIB
+	select CRC32
 	default SOC_RTL8197F
 	help
 	  Ethernet MAC driver for the built-in switch-core CPU port of the

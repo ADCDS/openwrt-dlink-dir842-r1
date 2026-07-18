@@ -22,6 +22,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/skbuff.h>
 #include <linux/if_vlan.h>	/* __vlan_hwaccel_put_tag / skb_vlan_tag_* (M6.2) */
+#include <linux/delay.h>	/* msleep/udelay: M7 fabric-reset sequencing */
 #include <asm/mipsregs.h>	/* clear_c0_status / set_c0_status / STATUSF_IP4 */
 
 #include "rtl819x_regs.h"
@@ -127,6 +128,146 @@ static void sw_set_pvid(uint32 port, uint32 pvid)
 	else
 		v = (pvid & 0xfff) | (v & ~0x00000FFFu);
 	REG32(PVCR0 + off) = v;
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * M7 fabric full reset (the large-frame RX-corruption wedge recovery)
+ * ---------------------------------------------------------------------------
+ * Measured wedge: after sustained large-frame CPU-RX load the switch delivers
+ * multi-cell (>~128 B) frames with a CORRECT pkthdr/ph_len but CORRUPT cluster
+ * payload (~93% fail ip_rcv checksum), while single-cell frames stay clean.
+ * The latch survives eth0 down/up (rtl865x_down + New_swNic_init +
+ * rtl865x_start) — it lives in switch-core NIC/fabric state below the CPU DMA
+ * engine (cell-gather / RX-FIFO / internal free-list, invisible in GDSR/PCSR).
+ * Stock-kernel coherency handling was verified equivalent to this port
+ * (stock swNic_receive @0x8016eeb8: 32 B pkthdr+mbuf invalidate at consume,
+ * full-cluster invalidate at re-arm == our uncached pools + dma_map_single),
+ * so this is device-side latched state, not a dropped cache op.
+ *
+ * The only vendor reset that reaches that state is FullAndSemiReset()
+ * (sdk-ref/rtl865x_asicCom.c:2122, stock @0x8019396c, called at every stock
+ * ethernet init @0x8070be78): SIRR FULL_RST + a switch-core CLOCK GATE cycle.
+ * That resets ALL switch tables & queues and returns config registers to
+ * defaults, so the recovery snapshots a curated known-good register set at
+ * first bring-up and restores it after the reset, then re-runs the normal
+ * engine bring-up (New_swNic_init + rtl865x_start re-add rings/VLANs/PVIDs/
+ * trunk/thresholds). ASIC L3/NAT scaffolding+flows are re-armed via
+ * rtl819x_hwnat_stop/start plus a userspace `cat /proc/rtl865x_gw`.
+ */
+
+/* Curated config snapshot: every register the datapath depends on that the
+ * LOADER or this driver set up and that SIRR_FULL_RST + the clock cycle would
+ * revert to chip defaults. Ranges are contiguous register blocks (vendor map,
+ * rtl865xc_asicregs.h). Deliberately EXCLUDED: SIRR/CPUICR/CPUIIMR/CPUIISR and
+ * the ring-base registers (rebuilt by rtl865x_start/New_swNic_init), table RAM
+ * (re-added by start/gw_prog), MIB/GDSR/PCSR (status).
+ * Notable members:
+ *  - CPUICR1 (0xB80100A4): pkthdr type + TX/RX gather config. Stock programs
+ *    it right after FullAndSemiReset (=0x100|0x40: TX_PKTHDR_SHORTCUT_LSO +
+ *    CF_TX_GATHER, @0x8070c014-38); this port INHERITS it from the loader, so
+ *    it must be restored or RX/TX descriptor parsing changes shape.
+ *  - DMA_CR0 whole (HsbAddrMark address-window bits[19:16], not just marks).
+ *  - PCRP0-8 + PITCR + P0GMIICR + MACCR: the RGMII trunk force-link config the
+ *    loader's init_8367r left behind (rtl865x_start only RMWs bits on top).
+ *  - The egress-scheduler block (QIDDPCR/P0Q0RGCR/WFQ/ELB/ILB/PATP): restored
+ *    to the LOADER-established baseline that provably carries line-rate TCP —
+ *    NOT the vendor-SDK constants that the A-2 experiment proved starve TCP.
+ */
+static const struct { u32 base; u16 cnt; } fab_cfg_ranges[] = {
+	{ 0xB8010030,  3 },	/* CPUQDM0-5 (3x32-bit view of six u16 regs) */
+	{ 0xB801003C,  3 },	/* DMA_CR0-2 (incl HsbAddrMark + FIFO marks) */
+	{ 0xB8010068,  1 },	/* DMA_CR3 */
+	{ 0xB8010078,  1 },	/* TXRINGCR (tx ring enables) */
+	{ 0xB80100A0,  2 },	/* DMA_CR4 (tail-aware), CPUICR1 (pkthdr type/gather) */
+	{ 0xBB804000,  1 },	/* MACCR (LONG_TXE / CF_SYSCLK_SEL) */
+	{ 0xBB804010, 13 },	/* PPMAR + PATP0-11 (port aging/trunk map) */
+	{ 0xBB804100, 10 },	/* PITCR (port0 RGMII mode) + PCRP0-8 (force-link) */
+	{ 0xBB80414C,  1 },	/* P0GMIICR (RGMII delays + Conf_done) */
+	{ 0xBB804400, 12 },	/* TEACR,ATCR?,RMACR,ALECR,MSCR,SWTCR0/1,FFCR block */
+	{ 0xBB804500,  9 },	/* SBFCR0-2 + PBFCR0-5 (also rewritten by start) */
+	{ 0xBB804730, 19 },	/* LPTM8021Q,DSCPCR0-6,QIDDPCR,RMCR1P,DSCPRM0/1,RLRC */
+	{ 0xBB804800, 69 },	/* P0Q0RGCR x42 + WFQRCR/WFQWCR x21 + ELB/ILB buckets */
+	{ 0xBB804A00,  8 },	/* VCR0/1 + PVCR0-4 (PVIDs; start rewrites vid2) */
+	{ 0xBB806300,  1 },	/* TMCR (test-mode off) */
+};
+
+#define FAB_CFG_WORDS 153	/* sum of cnt above (BUILD_BUG_ON-checked) */
+static u32 fab_cfg_snap[FAB_CFG_WORDS];
+static bool fab_cfg_snap_valid;
+
+static void rtl819x_fabric_snapshot(void)
+{
+	int r, i, w = 0;
+
+	for (r = 0; r < ARRAY_SIZE(fab_cfg_ranges); r++)
+		for (i = 0; i < fab_cfg_ranges[r].cnt; i++) {
+			if (WARN_ON_ONCE(w >= FAB_CFG_WORDS))
+				return;
+			fab_cfg_snap[w++] = REG32(fab_cfg_ranges[r].base + (i << 2));
+		}
+	fab_cfg_snap_valid = true;
+}
+
+static void rtl819x_fabric_restore(void)
+{
+	int r, i, w = 0;
+
+	if (!fab_cfg_snap_valid) {
+		pr_err("rtl819x: fabric restore skipped - no snapshot\n");
+		return;
+	}
+	for (r = 0; r < ARRAY_SIZE(fab_cfg_ranges); r++)
+		for (i = 0; i < fab_cfg_ranges[r].cnt; i++) {
+			u32 addr = fab_cfg_ranges[r].base + (i << 2);
+			u32 val;
+
+			if (WARN_ON_ONCE(w >= FAB_CFG_WORDS))
+				return;
+			val = fab_cfg_snap[w++];
+
+			/* MSCR: restore CONFIG bits but keep L2/L3/L4 forwarding
+			 * OFF until the rings are re-armed — restoring EN_L2 here
+			 * would let frames flood a CPU port whose ring registers
+			 * are still reset (DMA to phys 0). rtl865x_start re-sets
+			 * EN_L2 LAST as designed; gw_prog re-adds EN_L3|EN_L4. */
+			if (addr == MSCR)
+				val &= ~(MSCR_EN_L2 | (1 << 1) | (1 << 2));
+			REG32(addr) = val;
+		}
+}
+
+/* The vendor 8197F fabric reset + table-SRAM re-init.  Caller MUST have the
+ * datapath fully quiesced (napi disabled, rx_timer stopped, TX disabled, HAL
+ * mutex held, CPU engine down): between the clock gate and ungate NOTHING may
+ * touch 0xBB80xxxx/0xB801xxxx or the Lexra bus access stalls. */
+static void rtl819x_fabric_full_reset(void)
+{
+	int guard;
+
+	/* FullAndSemiReset(), CONFIG_RTL_8197F branch (asicCom.c:2125-2133;
+	 * stock 0x8019396c verified instruction-for-instruction). */
+	REG32(SIRR) |= SIRR_FULL_RST;
+	msleep(300);
+	REG32(SYS_CLK_MAG) &= ~CM_ACTIVE_SWCORE;
+	msleep(300);
+	REG32(SYS_CLK_MAG) |= CM_ACTIVE_SWCORE;
+	msleep(50);
+
+	/* Stock rtl8651_initAsic table-SRAM init (0x801928c8): MEMCR=0 -> 0x24,
+	 * poll (MEMCR & 0x2400) == 0x2400.  Without it the TLU table writes that
+	 * follow land in uninitialised SRAM control state. */
+	REG32(MEMCR) = 0;
+	REG32(MEMCR) = MEMCR_INIT_CMD;
+	for (guard = 0; guard < 200000 &&
+	     (REG32(MEMCR) & MEMCR_INIT_DONE) != MEMCR_INIT_DONE; guard++)
+		udelay(1);
+	if ((REG32(MEMCR) & MEMCR_INIT_DONE) != MEMCR_INIT_DONE)
+		pr_err("rtl819x: fabric reset: MEMCR init timeout (%08x)\n",
+		       REG32(MEMCR));
+
+	rtl819x_fabric_restore();
+	pr_err("rtl819x: fabric full reset done (SIRR FULL_RST + swcore clock cycle + MEMCR init + cfg restore)\n");
 }
 
 static void rtl865x_start(void)
@@ -295,9 +436,16 @@ static void rtl865x_start(void)
 	/* Bring-up self-diagnosis (readable over ssh via `dmesg`): on a dead-RX
 	 * boot the ring base still latches into CPURPDCR0 but CPUIISR never accrues
 	 * RX_DONE — that distinguishes an engine wedge from a fabric-silent path. */
-	pr_err("rtl819x bringup: CPUICR=%08x CPURPDCR0=%08x CPUIISR=%08x DMA_CR0=%08x MSCR=%08x GDSR0=%08x SBFCR0=%08x\n",
+	pr_err("rtl819x bringup: CPUICR=%08x CPURPDCR0=%08x CPUIISR=%08x DMA_CR0=%08x MSCR=%08x GDSR0=%08x SBFCR0=%08x CPUICR1=%08x\n",
 	       REG32(CPUICR), REG32(CPURPDCR0), REG32(CPUIISR), REG32(DMA_CR0), REG32(MSCR),
-	       REG32(GDSR0), REG32(SBFCR0));
+	       REG32(GDSR0), REG32(SBFCR0), REG32(CPUICR1));
+
+	/* M7: latch the known-good fabric config ONCE, at the end of the first
+	 * successful bring-up (loader groundwork + this function's programming,
+	 * before gw_prog's later L3/L4 additions). The fabric full reset restores
+	 * from this snapshot. */
+	if (!fab_cfg_snap_valid)
+		rtl819x_fabric_snapshot();
 }
 
 static void rtl865x_down(void)
@@ -362,34 +510,111 @@ static u32 hang_last_rx, hang_last_tx;
 static int hang_cnt;
 static u32 hang_log_n;
 
+/*
+ * M7 recovery ladder trigger. Write to /sys/module/rtl819x/parameters/
+ * fabric_reset to run a recovery level on the LIVE box (the ~10ms watchdog
+ * tick picks it up, clears it and schedules hang_work):
+ *   1 = CPU-engine re-init only (rtl865x_down + New_swNic_init + rtl865x_start
+ *       — the old M6.5 recovery; proven NOT to clear the large-frame wedge)
+ *   2 = level 1 + a CPUICR SOFTRST pulse (bit22 "re-initialize all
+ *       descriptors" — the NIC-block descriptor/gather engine reset the old
+ *       recovery never tried; cheap, no table loss)
+ *   3 = level 2 + the FULL vendor fabric reset (SIRR FULL_RST + swcore clock
+ *       cycle + MEMCR table-SRAM init + config restore) — resets all switch
+ *       tables & queues; hwnat is re-armed AND the gw scaffolding (netif MACs
+ *       / L2 / L3 / nexthops / ACL permits) is re-programmed IN-KERNEL via
+ *       rtl865x_gw_rearm(), so level 3 is fully self-sufficient (validated:
+ *       without the gw re-arm, MSCR=EN_L2-only and ALL CPU-bound frames drop
+ *       until a manual `cat /proc/rtl865x_gw`).
+ * fabric_autoreset: ladder level the wedge detector auto-runs (default 3 =
+ * self-healing full reset; 0 = detector logs only).
+ */
+static int fabric_reset;
+module_param(fabric_reset, int, 0644);
+MODULE_PARM_DESC(fabric_reset, "trigger recovery now: 1=engine 2=+SOFTRST 3=+full fabric reset");
+static int fabric_autoreset = 3;
+module_param(fabric_autoreset, int, 0644);
+MODULE_PARM_DESC(fabric_autoreset, "wedge detector action: 0=log only, 1/2/3=auto ladder level (default 3)");
+
+static int fabric_reset_mode;	/* latched ladder level for the queued hang_work */
+
 static void rtl819x_hang_work(struct work_struct *w)
 {
 	struct rtl819x_eth_priv *priv =
 		container_of(w, struct rtl819x_eth_priv, hang_work);
 	uint32 rxcnt[NEW_NIC_MAX_RX_DESC_RING] = { 0 };
 	uint32 txcnt[NEW_NIC_MAX_TX_DESC_RING] = { 0 };
+	int mode = xchg(&fabric_reset_mode, 0);
+
+	/* Spurious re-queue, or the device went down (ndo_stop) while this was
+	 * queued: rtl819x_eth_stop already ran napi_disable/rtl865x_down —
+	 * re-running them here would deadlock (double napi_disable). */
+	if (!mode || !netif_running(priv->dev))
+		return;
 
 	rxcnt[0] = RTL819X_RX_RING_SIZE;
 	txcnt[0] = RTL819X_TX_RING_SIZE;
 
-	/* Full datapath re-init (== ndo_stop + ndo_open of just the engine): stop,
-	 * re-arm ALL ring descriptors clean (New_swNic_init re-allocs the RX
-	 * clusters + resets rxCurr), restart. Heavier than a bare CPUICR re-kick,
-	 * which was proven insufficient - the bare kick restarts the DMA but the
-	 * switch fabric stays wedged.
-	 * rtl865x_start() writes the TLU command interface (sw_add_vlan/sw_set_pvid)
-	 * and RMWs MSCR, so it must hold rtl865x_hal_lock against gw_prog / the /proc
-	 * scanners / the hwnat module. Lock ordering: the mutex is taken BEFORE
-	 * netif_tx_lock_bh (a mutex can't be taken with BHs disabled). */
+	pr_err("rtl819x: recovery level %d starting (rx_pkts=%lu)\n",
+	       mode, priv->dev->stats.rx_packets);
+
+	/* Level 3 nukes the NAPT table: quiesce/flush the hwnat module FIRST
+	 * (takes rtl865x_hal_lock itself, so call before we take it). */
+	if (mode >= 3)
+		rtl819x_hwnat_stop();
+
+	/*
+	 * Quiesce EVERYTHING that can touch 0xBB80xxxx/0xB801xxxx: during the
+	 * level-3 clock-gate window (600ms+) any switch-core register access
+	 * stalls the Lexra bus. The HAL mutex fences gw_prog//proc scanners/
+	 * hwnat; del_timer_sync stops the GDSR_PORT_CONG drain; napi_disable
+	 * stops the poll (its GDSR read + ring work); netif_tx_disable
+	 * synchronously fences in-flight xmit (doorbell writes) and keeps the
+	 * stack off; rtl865x_down masks CPUIIMR+GIMR so the (level-triggered)
+	 * switch line can't storm while the core resets. The old
+	 * netif_tx_lock_bh critical section is replaced because this path now
+	 * sleeps (msleep in the reset) — a BH lock can't be held across it.
+	 */
 	mutex_lock(&rtl865x_hal_lock);
+	del_timer_sync(&priv->rx_timer);
 	napi_disable(&priv->napi);
-	netif_tx_lock_bh(priv->dev);
+	netif_tx_disable(priv->dev);
+
 	rtl865x_down();
+	if (mode >= 2) {
+		/* NIC descriptor-engine soft reset (vendor CPUICR bit22). Pulse
+		 * with TX/RX already off; ring bases are re-latched by the
+		 * New_swNic_init + rtl865x_start below. */
+		REG32(CPUICR) = CPUICR_SOFTRST;
+		udelay(100);
+		REG32(CPUICR) = 0;
+	}
+	if (mode >= 3)
+		rtl819x_fabric_full_reset();
+
 	New_swNic_init(rxcnt, txcnt, RTL819X_CLUSTER_SIZE);
 	rtl865x_start();
-	netif_tx_unlock_bh(priv->dev);
+
+	netif_wake_queue(priv->dev);
 	napi_enable(&priv->napi);
+	mod_timer(&priv->rx_timer, jiffies + RTL819X_WATCHDOG_INTERVAL);
 	mutex_unlock(&rtl865x_hal_lock);
+
+	if (mode >= 3) {
+		rtl819x_hwnat_start(priv->dev);
+		/*
+		 * M7 self-heal: FULL_RST wiped the ASIC TLU tables (netif MACs,
+		 * L2/L3 routes, nexthops, ACL permits) — without them the ASIC
+		 * refuses even small CPU-bound frames (validated live:
+		 * MSCR=EN_L2-only + 100% loss until a manual
+		 * `cat /proc/rtl865x_gw`). Re-run the very same gw program
+		 * in-kernel; it takes rtl865x_hal_lock itself, so it must run
+		 * after the unlock above.
+		 */
+		rtl865x_gw_rearm();
+		pr_err("rtl819x: ASIC gw scaffolding re-armed in-kernel (netif/L2/L3/NAT tables reprogrammed)\n");
+	}
+	pr_err("rtl819x: recovery level %d complete\n", mode);
 	napi_schedule(&priv->napi);
 }
 
@@ -412,6 +637,77 @@ static void rtl819x_hang_check(struct rtl819x_eth_priv *priv)
 	 * drains at napi rate exactly when a large-frame burst is arriving.
 	 */
 	REG32(GDSR_PORT_CONG);
+
+	/* M7 manual recovery trigger (bench: echo N > .../parameters/fabric_reset). */
+	if (unlikely(fabric_reset)) {
+		fabric_reset_mode = fabric_reset;
+		fabric_reset = 0;
+		schedule_work(&priv->hang_work);
+	}
+
+	/*
+	 * M7 wedge detector v2 — sampled-FCS (replaces the USEDDSC-floor detector,
+	 * which was USELESS: live calibration showed idle USEDDSC is 18 on a FRESH
+	 * boot, identical to 18-19 wedged, so it fired constantly on a healthy box).
+	 *
+	 * Signal: New_swNic_receive software-verifies the Ethernet FCS of every
+	 * large (>132 B) delivered frame. The switch MAC discards genuinely
+	 * bad-FCS frames at ingress, so a software mismatch == the delivered bytes
+	 * are not the received frame — the wedge's exact symptom (live-validated:
+	 * wedged ≈93% of large frames stale in DRAM, fresh = 0 failures).
+	 *
+	 * Self-arming: the detector only acts after one ~10s window has seen >=2
+	 * GOOD large frames since boot (proves the FCS-in-cluster convention holds
+	 * on this datapath; DHCP DISCOVERs / SSH KEX / any large ping arm it
+	 * organically). If large frames systematically fail while none pass, it
+	 * logs once and stays dormant instead of reset-looping a healthy box.
+	 *
+	 * Declare: a window with fail>=4 and a >=4:1 fail majority (the wedge
+	 * measures ~93% fail, so 4:1 has margin while a healthy mixed window can
+	 * never trip it). Action: fabric_autoreset ladder level (default 3 = full
+	 * self-heal incl. in-kernel gw re-arm), rate-limited to one per 30s.
+	 */
+	{
+		static u32 fcs_prev_ok, fcs_prev_fail;
+		static int fcs_win;
+		static bool fcs_armed, fcs_off_logged;
+		static unsigned long fcs_last_auto;
+
+		if (++fcs_win >= 1024) {		/* ~10s @ ~10ms ticks */
+			u32 dok = rtl819x_rx_fcs_ok - fcs_prev_ok;
+			u32 dfail = rtl819x_rx_fcs_fail - fcs_prev_fail;
+
+			fcs_prev_ok = rtl819x_rx_fcs_ok;
+			fcs_prev_fail = rtl819x_rx_fcs_fail;
+			fcs_win = 0;
+
+			if (!fcs_armed) {
+				if (dok >= 2) {
+					fcs_armed = true;
+					pr_info("rtl819x: FCS wedge detector armed (%u good large frames)\n",
+						dok);
+				} else if (dfail >= 8 && !dok && !fcs_off_logged) {
+					fcs_off_logged = true;
+					pr_err("rtl819x: FCS check unusable on this datapath (%u fails, 0 ok) - wedge detector stays OFF\n",
+					       dfail);
+				}
+			} else if (dfail >= 4 && dfail >= 4 * dok) {
+				pr_err("rtl819x: FABRIC WEDGE detected (large-frame FCS fail=%u ok=%u in 10s)%s\n",
+				       dfail, dok,
+				       fabric_autoreset ? " - auto recovery" : " - set fabric_reset=3 to recover");
+				/* !fcs_last_auto == "never fired" (INITIAL_JIFFIES on
+				 * MIPS would otherwise defer the FIRST auto-reset by
+				 * minutes); |1 keeps the sentinel unambiguous. */
+				if (fabric_autoreset &&
+				    (!fcs_last_auto ||
+				     time_after(jiffies, fcs_last_auto + 30 * HZ))) {
+					fcs_last_auto = jiffies | 1;
+					fabric_reset_mode = fabric_autoreset;
+					schedule_work(&priv->hang_work);
+				}
+			}
+		}
+	}
 
 	if (++tick % 10)		/* the wedge detector below runs every 10th tick (~100ms) */
 		return;
@@ -683,8 +979,12 @@ static int rtl819x_eth_stop(struct net_device *dev)
 	/* M6.6 Phase 3: tear down all HW-NAT rows + quiesce the aging worker while the
 	 * switch core is still up (before rtl865x_down()); no-op unless hwnat=1. */
 	rtl819x_hwnat_stop();
+	/* M7: cancel the recovery work BEFORE the timer — hang_work re-arms the
+	 * timer when it finishes, so the old order (timer first) could leave a
+	 * live timer behind. A work queued after this point no-ops on
+	 * !netif_running(). */
+	cancel_work_sync(&priv->hang_work);
 	del_timer_sync(&priv->rx_timer);
-	cancel_work_sync(&priv->hang_work);	/* M6.5: no re-kick during teardown */
 	napi_disable(&priv->napi);
 	rtl865x_down();
 	free_irq(priv->irq, dev);

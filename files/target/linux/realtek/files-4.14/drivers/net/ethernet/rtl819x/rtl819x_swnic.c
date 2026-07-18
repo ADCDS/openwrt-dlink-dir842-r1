@@ -34,6 +34,8 @@
 #include <linux/dma-mapping.h>
 #include <linux/ip.h>
 #include <linux/tcp.h>
+#include <linux/crc32.h>	/* M7: software FCS verify (wedge detector) */
+#include <asm/unaligned.h>
 #include <asm/cpu-features.h>
 
 #include "rtl819x_regs.h"
@@ -45,6 +47,44 @@
 #ifndef FAILED
 #define FAILED		1
 #endif
+
+/*
+ * M7 large-frame-corruption discriminator: `echo N > /sys/module/rtl819x/
+ * parameters/rx_dump` dumps the next N received LARGE (>132 B) frames from
+ * inside the RX path (tcpdump/AF_PACKET is blind on this driver). For each
+ * frame it prints the descriptor view (ph_len vs mbuf m_len/m_next/m_data) and
+ * hexdumps head+tail of the cluster through BOTH the cached kernel mapping and
+ * the uncached KSEG1 alias of the same physical cluster, plus the first
+ * cached-vs-uncached differing offset. Discriminates the three candidate
+ * mechanisms of the wedge measured on the bench (large frames arrive with
+ * correct ph_len but corrupt payload):
+ *   - m_next != 0 or m_len < ph_len       -> HW split the frame across mbufs
+ *     (gather engine latch; driver assumes single-mbuf like stock does)
+ *   - cached == uncached, both stale      -> data never reached DRAM (NIC FIFO
+ *     /bus-ordering latch; descriptor overtook the payload writes)
+ *   - cached stale, uncached correct      -> CPU cache staleness (would indict
+ *     the DMA API path; not expected - fresh boots are 100% clean)
+ * Run with a known payload pattern (ping -p) so stale vs true data is obvious.
+ */
+int rtl819x_rx_dump;
+module_param_named(rx_dump, rtl819x_rx_dump, int, 0644);
+MODULE_PARM_DESC(rx_dump, "hexdump the next N large RX frames (cached vs uncached view)");
+
+/*
+ * M7 FCS wedge signal: every large (>132 B) delivered frame gets its Ethernet
+ * FCS software-verified (EXCLUDE_CRC is clear, so ph_len includes the 4 FCS
+ * bytes and they are DMA'd into the cluster). The switch MAC already discards
+ * genuinely bad-FCS frames at ingress, so a software mismatch here means the
+ * DELIVERED bytes are not the received frame — exactly the wedge (validated
+ * live: wedged = cached AND uncached views both stale, ~93% of large frames
+ * corrupt, while small frames pass). The eth watchdog windows these counters
+ * into the wedge detector (rtl819x-eth.c). CRC32 (Sarwate) over ~1 KB is a
+ * few microseconds on this 1 GHz MIPS — only large CPU-terminating frames pay.
+ * The frame is still delivered either way (the stack's checksums decide) —
+ * these are counters, not a filter.
+ */
+u32 rtl819x_rx_fcs_ok;
+u32 rtl819x_rx_fcs_fail;
 
 /* On UP this SoC serialises the engine with irq-off spinlocks. */
 static DEFINE_SPINLOCK(swnic_tx_lock);
@@ -407,6 +447,40 @@ int32 New_swNic_receive(rtl_nicRx_info *info, int retryCount)
 		info->pid = ph->ph_portlist & 0x7;
 		info->vid = ph->ph_vlanId & 0x0fff;
 		pr_err_once("rtl819x DP: first RX frame (len=%d)\n", info->len);
+
+		/* M7 FCS wedge signal (doc above): verify the hardware-provided FCS
+		 * against the delivered bytes the stack will actually consume. */
+		if (len > 132) {
+			u8 *d = ((struct sk_buff *)r_skb)->data;
+			u32 want = get_unaligned_le32(d + len - 4);
+			u32 got = ~crc32_le(~0u, d, len - 4);
+
+			if (got == want)
+				rtl819x_rx_fcs_ok++;
+			else
+				rtl819x_rx_fcs_fail++;
+		}
+
+		/* M7 wedge discriminator (see rx_dump doc at the top of this file). */
+		if (unlikely(rtl819x_rx_dump > 0) && len > 132) {
+			u8 *cv = ((struct sk_buff *)r_skb)->data;
+			volatile u8 *uv = (volatile u8 *)
+				(0xA0000000u | ((u32)rx_ri[idx].dma & 0x1FFFFFFFu));
+			int i, diff = -1;
+
+			rtl819x_rx_dump--;
+			for (i = 0; i < (int)len; i++)
+				if (cv[i] != uv[i]) { diff = i; break; }
+			pr_err("rxdump idx=%u ph_len=%u ph_reason=%04x m_len=%u m_next=%08x m_data=%08x dma=%08x cache-vs-uncache-diff@%d\n",
+			       idx, len, ph->ph_reason, mb->m_len, mb->m_next,
+			       mb->m_data, (u32)rx_ri[idx].dma, diff);
+			print_hex_dump(KERN_ERR, "rxd-head-c: ", DUMP_PREFIX_OFFSET,
+				       16, 1, cv, 48, false);
+			print_hex_dump(KERN_ERR, "rxd-head-u: ", DUMP_PREFIX_OFFSET,
+				       16, 1, (void *)(uintptr_t)uv, 48, false);
+			print_hex_dump(KERN_ERR, "rxd-tail-c: ", DUMP_PREFIX_OFFSET,
+				       16, 1, cv + len - 16, 16, false);
+		}
 
 		/* Install the fresh cluster into the mbuf + bookkeeping. */
 		rx_ri[idx].skb = (uintptr_t)nskb;

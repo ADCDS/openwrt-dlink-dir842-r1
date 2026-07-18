@@ -603,6 +603,26 @@ static int gw_prog(struct seq_file *m, void *v)
 	return 0;
 }
 
+/*
+ * M7 level-3 recovery: run the exact same gw scaffolding program WITHOUT the
+ * /proc read. SIRR FULL_RST wipes the ASIC TLU tables (netif MACs, L2/L3
+ * routes, nexthops, ACL permits) — rtl865x_start() only re-adds VLANs, so
+ * after a fabric reset the box drops even small CPU-bound frames until this
+ * runs (validated live: MSCR=00000001 + 100% loss until a manual
+ * `cat /proc/rtl865x_gw`). Trick: seq_printf/seq_puts on a ZEROED seq_file
+ * (count==size==0, buf==NULL) take the overflow path and write nothing (4.14
+ * seq_vprintf: `if (m->count < m->size)` is false), so gw_prog's dump lines
+ * vanish safely and only its register/table programming happens.
+ * Takes rtl865x_hal_lock internally (via gw_prog) — caller must NOT hold it.
+ */
+int rtl865x_gw_rearm(void)
+{
+	struct seq_file m;
+
+	memset(&m, 0, sizeof(m));
+	return gw_prog(&m, NULL);
+}
+
 static int gw_proc_open(struct inode *inode, struct file *file)
 {
 	return single_open(file, gw_prog, NULL);
@@ -666,9 +686,17 @@ static const struct file_operations napt_scan_fops = {
  * (pure register reads, no table access). */
 static int fabric_show(struct seq_file *m, void *v)
 {
-	u32 g0 = REG32(GDSR0), g1 = REG32(GDSR1);
-	u32 c0 = REG32(PCSR0), c1 = REG32(PCSR1);
+	u32 g0, g1, c0, c1;
 	int p;
+
+	/* M7: must hold the HAL lock — the fabric-reset recovery (rtl819x-eth.c
+	 * hang_work) gates the switch-core CLOCK for ~600ms under this lock, and
+	 * a concurrent read of any 0xBB80xxxx register in that window stalls the
+	 * Lexra bus. (Table access is still not needed here; the lock is purely
+	 * the clock-gate fence.) */
+	mutex_lock(&rtl865x_hal_lock);
+	g0 = REG32(GDSR0), g1 = REG32(GDSR1);
+	c0 = REG32(PCSR0), c1 = REG32(PCSR1);
 
 	seq_printf(m, "GDSR0=%08x  USEDDSC(now)=%u  MaxUsedDsc(hi)=%u  %s%s%s\n",
 		   g0,
@@ -694,6 +722,7 @@ static int fabric_show(struct seq_file *m, void *v)
 	}
 	seq_printf(m, "SBFCR0=%08x SBFCR1=%08x SBFCR2=%08x (S_DSC runout/FCOFF/FCON thresholds)\n",
 		   REG32(SBFCR0), REG32(SBFCR1), REG32(SBFCR2));
+	mutex_unlock(&rtl865x_hal_lock);
 	return 0;
 }
 

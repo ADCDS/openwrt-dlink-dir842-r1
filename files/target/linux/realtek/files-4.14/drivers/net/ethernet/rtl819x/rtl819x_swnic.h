@@ -380,4 +380,10 @@ int32 New_swNic_txDone(int idx);
 void New_swNic_freeRxBuf(void);
 void New_swNic_freeRings(void);
 
+/* M7 FCS wedge signal: cumulative software-FCS verdicts for large (>132 B)
+ * delivered RX frames (see rtl819x_swnic.c). Windowed by the eth watchdog's
+ * wedge detector. Same-CPU softirq increment/read — plain u32 is fine. */
+extern u32 rtl819x_rx_fcs_ok;
+extern u32 rtl819x_rx_fcs_fail;
+
 #endif /* _RTL819X_SWNIC_H */

@@ -115,6 +115,29 @@
 #define SSIR				(0x04 + SWMISC_BASE)
 #define SIRR				(SSIR)			/* alias */
 #define TRXRDY				(1 << 0)		/* start normal Tx and Rx */
+#define SIRR_FULL_RST			(1 << 2)		/* SwitchFullRst: reset all tables & queues */
+#define SIRR_SEMI_RST			(1 << 1)		/* SwitchSemiRst: reset queues */
+
+/* ---- M7 fabric full-reset (vendor FullAndSemiReset, 8197F branch) --------
+ * Ground truth: sdk-ref/rtl865x_asicCom.c:2122-2133 (#if CONFIG_RTL_8197F) and
+ * the STOCK kernel byte-for-byte at 0x8019396c:
+ *   SIRR |= FULL_RST; mdelay(300);
+ *   CLK_MANAGE &= ~CM_ACTIVE_SWCORE; mdelay(300);   (gate switch-core clock)
+ *   CLK_MANAGE |=  CM_ACTIVE_SWCORE; mdelay(50);    (ungate)
+ * followed by the table-SRAM init (stock rtl8651_initAsic @0x801928c8):
+ *   MEMCR = 0; MEMCR = 0x24; poll until (MEMCR & 0x2400) == 0x2400.
+ * The stock kernel runs this at EVERY ethernet init (sole caller 0x8070be78),
+ * BEFORE initAsicL2/L3/L4 — it is the vendor's from-clean fabric reset. */
+#define SYS_CLK_MAG			(RTL819X_SYSTEM_BASE + 0x10)	/* CLK_MANAGE */
+#define CM_ACTIVE_SWCORE		(1 << 11)	/* switch-core clock/active (8197F) */
+#define MEMCR				(0x34 + SWMISC_BASE)	/* 0xBB804234 MEM CTRL */
+#define MEMCR_INIT_CMD			0x24		/* start table-SRAM init */
+#define MEMCR_INIT_DONE			0x2400		/* init-done poll mask/value */
+
+/* CPUICR bit22 (vendor asicregs.h:303): NIC-engine descriptor soft-reset —
+ * "Re-initialize all descriptors". Untried by the old recovery (which only
+ * toggled TXCMD/RXCMD); ladder level 2 pulses it. */
+#define CPUICR_SOFTRST			(1 << 22)
 
 /* ---- switch-core L2 forwarding (offsets from SWCORE_BASE 0xBB800000) -----
  * Without these the switch never forwards ingress LAN-port frames to the CPU

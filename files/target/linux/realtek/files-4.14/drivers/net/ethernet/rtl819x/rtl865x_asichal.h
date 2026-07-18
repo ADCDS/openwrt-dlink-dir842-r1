@@ -169,4 +169,9 @@ int rtl865x_napt_write(u32 idx, const struct asic_napt_tcpudp *e);
 int rtl865x_napt_read(u32 idx, struct asic_napt_tcpudp *out);
 int rtl865x_napt_clear(u32 idx);
 
+/* M7: re-run the full gw scaffolding program (== `cat /proc/rtl865x_gw` minus
+ * the dump) from kernel context after a fabric full reset. Takes
+ * rtl865x_hal_lock internally — caller must NOT hold it. */
+int rtl865x_gw_rearm(void);
+
 #endif /* _RTL865X_ASICHAL_H */
