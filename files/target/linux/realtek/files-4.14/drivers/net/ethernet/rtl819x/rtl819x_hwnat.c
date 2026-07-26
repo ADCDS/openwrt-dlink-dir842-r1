@@ -57,6 +57,7 @@
 #include <linux/list.h>
 #include <linux/mutex.h>
 #include <linux/in.h>
+#include <linux/inetdevice.h>	/* M7.2: read the WAN netdev's live IPv4 */
 #include <linux/ip.h>
 #include <linux/netfilter.h>		/* nf_hookfn / nf_hook_state (needed by the header below) */
 #include <net/netfilter/nf_flow_table.h>
@@ -100,6 +101,15 @@ static LIST_HEAD(hwnat_flows);
 static DECLARE_BITMAP(hwnat_used, RTL865X_NAPT_ROWS);	/* rows this module owns */
 static bool hwnat_active;				/* datapath up (open) & armed */
 
+/*
+ * M7.3 step 4 handshake state (also under rtl865x_hal_lock): the module-owned flow table +
+ * its flow_offload_lookup(), pushed in by xt_FLOWOFFLOAD at module init (we are =y and can't
+ * link those =m symbols directly). Both NULL until the module registers; the aging worker
+ * refreshes timeouts only while both are set.
+ */
+static struct nf_flowtable		*hwnat_flowtable;
+static rtl819x_flow_lookup_fn		hwnat_flow_lookup;
+
 static void hwnat_aging_work_fn(struct work_struct *w);
 static DECLARE_DELAYED_WORK(hwnat_aging_work, hwnat_aging_work_fn);
 
@@ -121,52 +131,152 @@ static DECLARE_DELAYED_WORK(hwnat_aging_work, hwnat_aging_work_fn);
  * already-installed flows drain via their (still-delivered) DELs within one GC
  * timeout (~30 s).
  */
+/*
+ * M7.2 Part B: the ASIC PPPoE hardware offload. Default ON — now FUNCTIONAL.
+ * The EN_PPPOE encap path programs correctly (session table + type=1 PPPoEIndex
+ * nexthop + dynamic extIP) AND now egresses. The original black-hole was the WAN
+ * netif MTU set to 1492 (vs stock 1500), which made the ASIC trap the encap
+ * frame as oversized — fixed in rtl865x_asichal.c gw_wan_netif_prog_locked().
+ * Bench-validated: a LAN->PPPoE flow offloads and forwards end-to-end at
+ * ~157 Mbit/s (peer eth0 rx-byte rate), was 0 (total black-hole). The A-2
+ * trunk-pause fix (rtl819x-eth.c) is what lets it sustain — otherwise the
+ * loader's trunk PAUSE throttled it. Set to 0 to force PPPoE onto software
+ * forwarding.
+ */
+static bool pppoe_hw_offload = true;
+module_param(pppoe_hw_offload, bool, 0644);
+MODULE_PARM_DESC(pppoe_hw_offload,
+	"ASIC PPPoE encap offload: 1=on (default, ~157 Mbit bench-validated), 0=software forwarding");
+
 int rtl819x_hwnat_flow_offload_check(struct flow_offload_hw_path *path)
 {
-	if ((path->flags & (FLOW_OFFLOAD_PATH_ETHERNET | FLOW_OFFLOAD_PATH_VLAN)) !=
-	    (FLOW_OFFLOAD_PATH_ETHERNET | FLOW_OFFLOAD_PATH_VLAN))
-		return -EOPNOTSUPP;
+	/* Two accepted path shapes once the upper layers have flattened onto eth0
+	 * (M7.2):
+	 *   ETHERNET|VLAN       — plain ethernet on one of our two datapath VIDs
+	 *                         (the LAN side, or the bench ethernet-WAN).
+	 *   PPPOE|VLAN (no ETH) — PPPoE WAN: ppp0 is not ARPHRD_ETHER so the core
+	 *                         never set ETHERNET (nf_flow_table_hw.c
+	 *                         flow_offload_check_ethernet); instead
+	 *                         pppoe_flow_offload_check filled eth_dest = the AC
+	 *                         MAC + pppoe_sid and chained through eth0.1 (which
+	 *                         added VLAN). Only the WAN VID may carry PPPoE, and
+	 *                         a connected session always has a nonzero sid. */
+	if (path->flags == (FLOW_OFFLOAD_PATH_ETHERNET | FLOW_OFFLOAD_PATH_VLAN)) {
+		if (path->vlan_id != RTL865X_VID_LAN && path->vlan_id != RTL865X_VID_WAN)
+			return -EOPNOTSUPP;
+		return 0;
+	}
 
-	if (path->vlan_id != RTL865X_VID_LAN && path->vlan_id != RTL865X_VID_WAN)
-		return -EOPNOTSUPP;
+	if (path->flags == (FLOW_OFFLOAD_PATH_PPPOE | FLOW_OFFLOAD_PATH_VLAN)) {
+		/* Default OFF (see pppoe_hw_offload above): the ASIC encap black-holes
+		 * offloaded PPPoE, so decline here and let PPPoE ride software forwarding. */
+		if (!pppoe_hw_offload)
+			return -EOPNOTSUPP;
+		if (path->vlan_id != RTL865X_VID_WAN || path->pppoe_sid == 0)
+			return -EOPNOTSUPP;
+		return 0;
+	}
 
-	return 0;
+	return -EOPNOTSUPP;
 }
 
 /* ------------------------------------------------------------------ ADD / DEL */
+
+/*
+ * Current primary IPv4 of the netdev with ifindex @ifidx in @net, host order
+ * (0 = device gone / no address). For a PPPoE WAN this is ppp0's local IP —
+ * assigned at IPCP-up, different on every reconnect, so it must be read LIVE
+ * and never compiled in. Same RCU discipline as inet_select_addr(): safe from
+ * the sleepable ADD path with only rcu_read_lock held.
+ */
+static u32 hwnat_wan_ipv4(struct net *net, int ifidx)
+{
+	struct net_device *dev;
+	struct in_device *in_dev;
+	u32 ip = 0;
+
+	rcu_read_lock();
+	dev = dev_get_by_index_rcu(net, ifidx);
+	if (dev) {
+		in_dev = __in_dev_get_rcu(dev);
+		if (in_dev && in_dev->ifa_list)
+			ip = ntohl(in_dev->ifa_list->ifa_local);
+	}
+	rcu_read_unlock();
+	return ip;
+}
+
+/*
+ * Tear down every installed flow: rows cleared, indices returned, slots freed.
+ * Used when the WAN identity changes under us (extIP / PPPoE session / peer
+ * MAC) — rows programmed under the old identity would translate to a stale IP
+ * or encapsulate into a dead session — and by rtl819x_hwnat_stop(). The flows
+ * themselves keep software-forwarding and simply re-offload on a later ADD
+ * offer. Caller holds rtl865x_hal_lock.
+ */
+static void hwnat_flush_locked(void)
+{
+	struct hwnat_slot *slot, *tmp;
+
+	list_for_each_entry_safe(slot, tmp, &hwnat_flows, list) {
+		rtl865x_napt_clear(slot->idx_out);
+		rtl865x_napt_clear(slot->idx_in);
+		__clear_bit(slot->idx_out, hwnat_used);
+		__clear_bit(slot->idx_in, hwnat_used);
+		list_del(&slot->list);
+		kfree(slot);
+	}
+}
 
 /*
  * Build both NAPT rows for one LAN->WAN masquerade flow and write them. Caller holds
  * rtl865x_hal_lock. Returns 0 on success, <0 to decline (flow stays in software).
  */
 static int hwnat_program_rows(u32 is_tcp, u32 int_ip, u16 int_port, u16 gport,
-			      u16 idx_out, u16 idx_in)
+			      u32 rem_ip, u16 rem_port, u16 idx_out, u16 idx_in)
 {
-	/* The remote endpoint is not stored in the row — it is encoded in idx_out via
-	 * gw_napt_hash1(); the row only needs the internal tuple + the ext mapping. */
+	/* The outbound row encodes the internal tuple + ext mapping; the inbound row is
+	 * NOT a copy of it (see below) — it re-encodes G differently and stores a
+	 * remote-endpoint VERIFICATION hash the ASIC checks on every return packet. */
 	struct asic_napt_tcpudp e, v;
 	int rc;
 
 	memset(&e, 0, sizeof(e));
-	e.intIPAddr  = int_ip;
-	e.intPort    = int_port;
+	e.intIPAddr  = htonl(int_ip);		/* NETWORK order: the ASIC verifies the stored */
+	e.intPort    = htons(int_port);		/* key against the on-wire src (vendor nat.c:1129-1130) */
 	e.isTCP      = is_tcp;
 	e.valid      = 1;
 	e.collision  = 1;			/* vendor: always set on a dedicated row */
 	e.collision2 = 1;
-	e.isStatic   = 0;			/* dynamic: let the ASIC age it (Phase 3) */
-	e.dedicate   = 1;
+	e.isStatic   = 1;			/* vendor: driver-added NAPT rows are STATIC (nat.c:1134); a dynamic (isStatic=0) row with auto-learn OFF is matched but NOT forwarded */
+	e.dedicate   = 0;			/* vendor main path sets isDedicated=0 (nat.c:1133); dedicate=1 was mis-copied from the LIBERAL setter (asicL4.c:191) */
 	e.agingTime  = RTL865X_NAPT_AGING_RELOAD;	/* start at the ceiling (fresh) */
 	e.selIPIdx   = 0;			/* -> extIP[0] = the WAN masquerade IP */
-	e.selEIdx    = gport & 0x3ff;
-	e.offset     = gport >> 10;		/* G reconstructs as (offset<<10)|selEIdx */
-	e.TCPFlag    = 0x1;			/* outbound direction */
+	e.selEIdx    = htons(gport) & 0x3ff;	/* G in NETWORK order -- the ASIC writes it back */
+	e.offset     = htons(gport) >> 10;	/* as the on-wire src port (vendor nat.c:711-712) */
+	e.TCPFlag    = 0x3;			/* vendor outbound: 0x2 (unidirectional) | 0x1 (outbound), nat.c:1142 */
 
 	rc = rtl865x_napt_write(idx_out, &e);
 	if (rc)
 		return rc;
 
-	e.TCPFlag = 0x0;			/* inbound twin: only the direction differs */
+	/* Inbound/return row is NOT a TCPFlag-tweaked copy of the outbound row. The ASIC
+	 * treats it as a VERIFICATION row (enhanced-hash1): its offset/selEIdx/selIPIdx
+	 * encode different fields than the outbound row (vendor nat.c:1137-1140). It stores
+	 * the low 10 bits of G split across offset[5:0] + selIPIdx[9:6], and in selEIdx a
+	 * verification hash `very` of the remote endpoint = HASH1(remIP,remPort,0,0)
+	 * (nat.c:714; HASH_FOR_VERI forces HASH1, so gw_napt_hash1 with dip/dport=0 is it).
+	 * On an inbound hit the silicon recomputes `very` from the packet's src
+	 * {remIP,remPort} and REJECTS the row on mismatch — so a copied outbound selEIdx
+	 * (=G) fails verification: the return packet is never un-NAT'd (dst stays the extIP),
+	 * mis-routes, and egresses with a garbage DMAC that floods (proven on the WAN peer:
+	 * forward frames carried the peer MAC + correct src, return frames carried
+	 * 00:00:00:00:00:10 and an un-rewritten dst). intIPAddr/intPort (the un-NAT target)
+	 * are identical in both rows and stay as set above. */
+	e.offset   = htons(gport) & 0x3f;
+	e.selEIdx  = gw_napt_hash1(is_tcp, htonl(rem_ip), htons(rem_port), 0, 0) & 0x3ff;
+	e.selIPIdx = (htons(gport) & 0x3ff) >> 6;
+	e.TCPFlag  = 0x2;			/* vendor inbound: 0x2 (unidirectional) | 0x0 (inbound), nat.c:1142 */
 	rc = rtl865x_napt_write(idx_in, &e);
 	if (rc) {
 		rtl865x_napt_clear(idx_out);
@@ -174,7 +284,7 @@ static int hwnat_program_rows(u32 is_tcp, u32 int_ip, u16 int_port, u16 gport,
 	}
 
 	/* Read the outbound row back and sanity-check it landed. */
-	if (rtl865x_napt_read(idx_out, &v) || !v.valid || v.intIPAddr != int_ip) {
+	if (rtl865x_napt_read(idx_out, &v) || !v.valid || v.intIPAddr != htonl(int_ip)) {
 		rtl865x_napt_clear(idx_out);
 		rtl865x_napt_clear(idx_in);
 		return -EIO;
@@ -188,8 +298,9 @@ static int hwnat_add_flow(struct flow_offload *flow,
 {
 	const struct flow_offload_tuple *o = &flow->tuplehash[FLOW_OFFLOAD_DIR_ORIGINAL].tuple;
 	const struct flow_offload_tuple *r = &flow->tuplehash[FLOW_OFFLOAD_DIR_REPLY].tuple;
-	u32 int_ip, rem_ip, ext_ip, is_tcp;
+	u32 int_ip, rem_ip, ext_ip, is_tcp, wan_ip;
 	u16 int_port, rem_port, gport;
+	bool wan_pppoe;
 	u16 idx_out, idx_in;
 	struct hwnat_slot *slot;
 	int rc;
@@ -197,9 +308,13 @@ static int hwnat_add_flow(struct flow_offload *flow,
 	if (!READ_ONCE(rtl819x_hwnat_enabled))	/* runtime gate (also guards a stale ADD) */
 		return -EOPNOTSUPP;
 
-	/* Structural: LAN(vid2) src -> WAN(vid1) dest only. */
+	/* Structural: LAN(vid2) src -> WAN(vid1) dest only; PPPoE (if present) can
+	 * only be the WAN side. */
 	if (src->vlan_id != RTL865X_VID_LAN || dest->vlan_id != RTL865X_VID_WAN)
 		return -EOPNOTSUPP;
+	if (src->flags & FLOW_OFFLOAD_PATH_PPPOE)
+		return -EOPNOTSUPP;
+	wan_pppoe = !!(dest->flags & FLOW_OFFLOAD_PATH_PPPOE);
 
 	/* Source-NAT masquerade only (no destination NAT / port forwards), and not a
 	 * flow that is already being torn down. */
@@ -229,12 +344,41 @@ static int hwnat_add_flow(struct flow_offload *flow,
 	ext_ip   = ntohl(r->dst_v4.s_addr);
 	gport    = ntohs(r->dst_port);
 
-	/* We masquerade to exactly one WAN IP (extIP[0]); decline anything else. */
-	if (ext_ip != RTL865X_WAN_EXTIP)
+	/* M7.2: the masquerade IP is DYNAMIC — it must equal the WAN interface's
+	 * CURRENT primary IPv4 (ppp0's local address on a PPPoE WAN, assigned at
+	 * IPCP-up and different every reconnect; the bench rig's static 172.16.0.1
+	 * on the ethernet WAN). The REPLY tuple's iifidx IS the WAN-side ingress
+	 * device (nf_flow_table_core fill_dir: iifidx = other-direction egress dev),
+	 * so read the address off it live. Masquerade always sources from the
+	 * egress interface's address, so a mismatch means the address moved under
+	 * the flow — decline; the flow is dying with the old address anyway. */
+	wan_ip = hwnat_wan_ipv4(dev_net(dest->dev), r->iifidx);
+	if (!wan_ip || ext_ip != wan_ip)
 		return -EOPNOTSUPP;
 
-	idx_out = gw_napt_hash1(is_tcp, int_ip, int_port, rem_ip, rem_port);
-	idx_in  = gport & 0x3ff;
+	/* The ASIC hashes/keys the ON-WIRE (network-order) header fields. The vendor
+	 * driver installs the outbound row at hash(htonl(intIP),htons(intPort),
+	 * htonl(remIP),htons(remPort)) to match it (sdk-ref l4Driver/rtl865x_nat.c:716;
+	 * the vendor's naptEntry IPs/ports are HOST order -- see the 0xc0a8030b test
+	 * literals in rtl865x_proc_debug.c:1725 and the byte<<24|byte<<16|... compose in
+	 * rtl865x_multipleWan.c:1018 -- and it converts with htonl/htons at the ASIC
+	 * boundary). This is a LITTLE-ENDIAN build (target rtl8197f ARCH:=mipsel,
+	 * CONFIG_CPU_LITTLE_ENDIAN=y), so htonl(host)!=host: feeding host order writes the
+	 * row at a byte-swapped index the ASIC never looks up -> every outbound packet
+	 * misses, traps to the CPU, and the orphan row just ages out (the exact symptom).
+	 * Feed NETWORK order for the index AND for the stored key + G-encoding (below). */
+	idx_out = gw_napt_hash1(is_tcp, htonl(int_ip), htons(int_port),
+				htonl(rem_ip), htons(rem_port));
+	/* Return-path row: the ASIC hashes the INBOUND packet {src=rem, dst=ext:G} to
+	 * locate the reverse row, so it must live at hash(remIP,remPort,extIP,G) -- NOT at
+	 * G&0x3ff (that full-cone shortcut is not where the silicon looks). Vendor
+	 * l4Driver/rtl865x_nat.c:715: in = naptTcpUdpTableIndex(htonl(remIp),htons(remPort),
+	 * htonl(extIp),extPort), extPort=htons(G); network order as everywhere. Without it,
+	 * WAN->LAN replies miss + trap to CPU (NAPTR_NOT_FOUND_DROP=0): the flow still works
+	 * but the return half is never HW-accelerated (and the old G&0x3ff row aliases an
+	 * unrelated inbound slot). */
+	idx_in  = gw_napt_hash1(is_tcp, htonl(rem_ip), htons(rem_port),
+				htonl(ext_ip), htons(gport));
 
 	slot = kzalloc(sizeof(*slot), GFP_KERNEL);
 	if (!slot)
@@ -247,6 +391,27 @@ static int hwnat_add_flow(struct flow_offload *flow,
 		goto out_unlock;
 	}
 
+	/* M7.2: sync the live WAN identity into the ASIC before touching rows.
+	 * extIP[0] <- the masquerade IP (verified == the WAN local IP above);
+	 * nexthop chain <- the WAN peer MAC from the dest path (PPPoE: the AC MAC
+	 * pppoe_flow_offload_check captured; ethernet: the neigh MAC), plus type=1
+	 * + the PPPoE session row when the WAN is PPPoE. Both helpers are
+	 * shadow-compared no-ops in steady state; 1 means the identity CHANGED
+	 * (PPP reconnect / new session / new IP), so every row programmed under the
+	 * old identity is flushed — those flows fall back to software and
+	 * re-offload on their next offer. */
+	rc = rtl865x_set_wan_extip(ext_ip);
+	if (rc < 0)
+		goto out_unlock;
+	if (rc > 0)
+		hwnat_flush_locked();
+	rc = rtl865x_wan_set_nexthop(dest->eth_dest, wan_pppoe,
+				     wan_pppoe ? dest->pppoe_sid : 0);
+	if (rc < 0)
+		goto out_unlock;
+	if (rc > 0)
+		hwnat_flush_locked();
+
 	/* Both rows must be free in our shadow bitmap. A collision (or the pathological
 	 * case where the two indices coincide) declines cleanly to software — the
 	 * intended graceful fallback, not an error to chase. */
@@ -256,7 +421,7 @@ static int hwnat_add_flow(struct flow_offload *flow,
 		goto out_unlock;
 	}
 
-	rc = hwnat_program_rows(is_tcp, int_ip, int_port, gport, idx_out, idx_in);
+	rc = hwnat_program_rows(is_tcp, int_ip, int_port, gport, rem_ip, rem_port, idx_out, idx_in);
 	if (rc)
 		goto out_unlock;
 
@@ -333,21 +498,74 @@ int rtl819x_hwnat_flow_offload(enum flow_offload_type type,
 	}
 }
 
+/* ------------------------------------------------------------------ step-4 handshake */
+
+/*
+ * Registration handshake with xt_FLOWOFFLOAD (=m). We are =y and cannot link that module's
+ * EXPORT'd flow_offload_lookup() nor its file-static nf_flowtable, so the module hands us
+ * {&nf_flowtable, flow_offload_lookup} at its init and retracts them at its exit (see
+ * hack-4.14/650-netfilter-add-xt_OFFLOAD-target.patch and the prototypes in rtl819x_hwnat.h).
+ * Serialized against the aging worker by rtl865x_hal_lock, so once unregister() returns no
+ * poll can dereference the module state it is about to free.
+ */
+void rtl819x_hwnat_flowtable_register(struct nf_flowtable *ft, rtl819x_flow_lookup_fn lookup)
+{
+	mutex_lock(&rtl865x_hal_lock);
+	hwnat_flowtable   = ft;
+	hwnat_flow_lookup = lookup;
+	mutex_unlock(&rtl865x_hal_lock);
+	pr_info("rtl819x hwnat: step-4 timeout-refresh armed (xt_FLOWOFFLOAD flowtable registered)\n");
+}
+EXPORT_SYMBOL_GPL(rtl819x_hwnat_flowtable_register);
+
+void rtl819x_hwnat_flowtable_unregister(void)
+{
+	mutex_lock(&rtl865x_hal_lock);
+	hwnat_flowtable   = NULL;
+	hwnat_flow_lookup = NULL;
+	mutex_unlock(&rtl865x_hal_lock);
+}
+EXPORT_SYMBOL_GPL(rtl819x_hwnat_flowtable_unregister);
+
+/*
+ * Step 4: refresh the software flow's GC timeout so a flow the ASIC is still actively
+ * forwarding is not torn down + re-learned every NF_FLOW_TIMEOUT (~30 s). UAF-safe: never
+ * touch slot->flow (it may be freed); look the flow up by our by-value ORIGINAL-tuple copy
+ * on the module's table under rcu_read_lock. flow_offload_lookup() returns only a still-
+ * linked, non-DYING/TEARDOWN flow, and because flow_offload_free() defers with kfree_rcu(),
+ * the RCU read-side section pins the flow across the timeout store. Caller holds
+ * rtl865x_hal_lock (so both handshake pointers are stable here). No-op until the module
+ * has registered.
+ */
+static void hwnat_refresh_timeout(struct hwnat_slot *slot)
+{
+	struct flow_offload_tuple_rhash *th;
+	struct flow_offload *flow;
+
+	if (!hwnat_flow_lookup || !hwnat_flowtable)
+		return;
+
+	rcu_read_lock();
+	th = hwnat_flow_lookup(hwnat_flowtable, &slot->orig_tuple);
+	if (th) {
+		flow = container_of(th, struct flow_offload, tuplehash[th->tuple.dir]);
+		flow->timeout = (u32)jiffies + NF_FLOW_TIMEOUT;
+	}
+	rcu_read_unlock();
+}
+
 /* ------------------------------------------------------------------ aging worker */
 
 /*
- * Runs every HWNAT_AGING_INTERVAL in process context. v1 (Phase-3 steps 1-3):
- * OBSERVE only — read each row's live agingTime (which ticks because TEACR L4-aging
- * is on) and count how many are at the reload ceiling (== recently carried traffic).
- * It deliberately does NOT dereference slot->flow.
- *
- * Phase-3 step 4 will add the timeout refresh here, done UAF-safely: look the flow up
- * by slot->orig_tuple under rcu_read_lock via the (exported) flow_offload_lookup on
- * xt_FLOWOFFLOAD's table — a lookup only returns a still-linked, non-dying flow, and
- * RCU keeps it alive across the flow->timeout store. That is what lets an actively
- * HW-forwarded flow avoid re-offloading every 30 s. Until then, a long-lived flow
- * simply re-learns each GC timeout (a brief software-forwarding blip), which is
- * correct, just not optimal.
+ * Runs every HWNAT_AGING_INTERVAL in process context. Two jobs:
+ *  - OBSERVE (Phase-3 steps 1-3): read each row's live agingTime (which ticks because
+ *    TEACR L4-aging is on), reap rows the ASIC auto-deleted at age-0, count how many are
+ *    still hot. Never dereferences slot->flow.
+ *  - REFRESH (step 4): for every still-hot row, hwnat_refresh_timeout() pushes the software
+ *    flow's GC timeout out (UAF-safe, by orig_tuple under RCU). This is what lets an actively
+ *    HW-forwarded flow avoid being GC'd + software-re-learned every ~30 s. The refresh is a
+ *    no-op until xt_FLOWOFFLOAD registers its table (see the handshake section above);
+ *    without it a long-lived flow just re-learns each GC timeout — correct, only less optimal.
  */
 static void hwnat_aging_work_fn(struct work_struct *w)
 {
@@ -382,8 +600,27 @@ static void hwnat_aging_work_fn(struct work_struct *w)
 			reaped++;
 			continue;
 		}
-		if (e.agingTime >= RTL865X_NAPT_AGING_RELOAD || e.agingTime > slot->last_aging)
+		{	/* M7 DEBUG instrument: expose BOTH row ages each poll to the console log
+			 * (captured continuously by the bootlog, so it survives serial input-
+			 * overrun). Decisive question: on WAN->LAN return traffic does the ASIC
+			 * HIT the inbound row (age pins near the RELOAD ceiling) or NEVER look it
+			 * up (age monotonically decays)? The latter = reverse-NAPT isn't even
+			 * attempted (L3 routes the reply before the L4 reverse stage). */
+			struct asic_napt_tcpudp ein;
+			u8 age_in = 0xff;
+			if (!rtl865x_napt_read(slot->idx_in, &ein) && ein.valid)
+				age_in = ein.agingTime;
+			pr_err("hwnat AGE out[%u]=%u in[%u]=%u\n",
+			       slot->idx_out, e.agingTime, slot->idx_in, age_in);
+		}
+		if (e.agingTime >= RTL865X_NAPT_AGING_RELOAD || e.agingTime > slot->last_aging) {
+			/* Row still hot (agingTime at the reload ceiling, or it ticked back UP
+			 * since the last poll = the ASIC reloaded it on a recent hit) => the flow
+			 * is live in silicon. Push its software GC timeout out so the flowtable
+			 * GC doesn't tear it down at 30 s idle and force a software re-learn. */
 			active++;
+			hwnat_refresh_timeout(slot);
+		}
 		slot->last_aging = e.agingTime;
 	}
 	mutex_unlock(&rtl865x_hal_lock);
@@ -417,19 +654,10 @@ void rtl819x_hwnat_start(struct net_device *dev)
 
 void rtl819x_hwnat_stop(void)
 {
-	struct hwnat_slot *slot, *tmp;
-
 	/* Quiesce ADD/worker via hwnat_active, then tear down every installed row. */
 	mutex_lock(&rtl865x_hal_lock);
 	hwnat_active = false;
-	list_for_each_entry_safe(slot, tmp, &hwnat_flows, list) {
-		rtl865x_napt_clear(slot->idx_out);
-		rtl865x_napt_clear(slot->idx_in);
-		__clear_bit(slot->idx_out, hwnat_used);
-		__clear_bit(slot->idx_in, hwnat_used);
-		list_del(&slot->list);
-		kfree(slot);
-	}
+	hwnat_flush_locked();
 	mutex_unlock(&rtl865x_hal_lock);
 
 	/* Outside the lock (the worker takes it): wait for any in-flight poll to finish. */

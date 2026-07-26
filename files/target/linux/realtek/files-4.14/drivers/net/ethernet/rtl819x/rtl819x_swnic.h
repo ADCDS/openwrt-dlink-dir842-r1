@@ -336,6 +336,24 @@ struct rtl_mBuf {
 #define PKT_OUTGOING		0x0800
 #define PKTHDR_BRIDGING		0x0040	/* HW L2-bridge assist (with PKTHDR_HWLOOKUP) */
 
+/*
+ * Bug #13 — RTL8197F "used/own" software-flag positions. The MBUF_USED /
+ * PKTHDR_USED values above are the legacy RTL865x bit positions of a
+ * half-ported flag table; on the 8197F the used bits moved to 0x80 / 0x8000
+ * (vendor common/mbuf.h, 8197F branch). The proven-working RX pre-seed
+ * (New_swNic_init / receive refill) is built on the legacy values and the
+ * fragile large-frame RX path is tuned around it, so those macros MUST NOT
+ * be changed. These _8197F constants are for the TX send path ONLY:
+ * ph_flags = PKTHDR_USED_8197F | PKT_OUTGOING (= 0x8800) is the vendor
+ * direct-TX recipe that makes the switch egress ph_portlist VERBATIM (no L2
+ * lookup) — required for box-originated cold-FDB UNICAST to reach the RGMII
+ * trunk — and it only works when m_flags also carries the 0x80 own bit
+ * (m_flags = 0x9C); with the legacy 0x02 instead, the OUTGOING descriptor
+ * path rejects the buffer and wedges ALL TX.
+ */
+#define MBUF_USED_8197F		0x80
+#define PKTHDR_USED_8197F	0x8000
+
 /* ---- trimmed NIC Rx/Tx info structs ------------------------------------- *
  * Only the fields the ported engine actually touches are kept.
  */

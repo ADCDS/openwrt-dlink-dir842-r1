@@ -449,16 +449,31 @@ int32 New_swNic_receive(rtl_nicRx_info *info, int retryCount)
 		pr_err_once("rtl819x DP: first RX frame (len=%d)\n", info->len);
 
 		/* M7 FCS wedge signal (doc above): verify the hardware-provided FCS
-		 * against the delivered bytes the stack will actually consume. */
+		 * against the delivered bytes the stack will actually consume.
+		 * M7.3 line-rate: SAMPLE 1-in-8 large frames instead of every one.
+		 * The full-rate check taxed the very CPU punt path it guards
+		 * (~5-10 us Sarwate CRC per 1500 B frame ~= up to ~13% of the 1 GHz
+		 * 24Kc at the ~13 kpps software-forwarding rate) — pure fast-path
+		 * overhead on the pre-offload/trapped packets whose survival decides
+		 * whether a flow lives long enough to reach hardware (rtl819x-eth.c
+		 * watchdog note). Detector power is preserved: a wedged fabric
+		 * corrupts ~93% of large frames, so a 1/8 sample still accrues the
+		 * >=4-fails/4:1-majority gate within one 2.5 s window under any real
+		 * traffic; arming (>=2 good sampled larges in one window) just needs
+		 * ~16 large frames in 2.5 s — any SSH/bulk burst provides that. */
 		if (len > 132) {
-			u8 *d = ((struct sk_buff *)r_skb)->data;
-			u32 want = get_unaligned_le32(d + len - 4);
-			u32 got = ~crc32_le(~0u, d, len - 4);
+			static u32 fcs_sample;
 
-			if (got == want)
-				rtl819x_rx_fcs_ok++;
-			else
-				rtl819x_rx_fcs_fail++;
+			if (!(fcs_sample++ & 0x7)) {
+				u8 *d = ((struct sk_buff *)r_skb)->data;
+				u32 want = get_unaligned_le32(d + len - 4);
+				u32 got = ~crc32_le(~0u, d, len - 4);
+
+				if (got == want)
+					rtl819x_rx_fcs_ok++;
+				else
+					rtl819x_rx_fcs_fail++;
+			}
 		}
 
 		/* M7 wedge discriminator (see rx_dump doc at the top of this file). */
@@ -534,19 +549,43 @@ static int32 _New_swNic_send(void *skb, void *output, uint32 len,
 	mb->m_len = len;
 	mb->m_extsize = len;
 	mb->m_next = 0;
-	mb->m_flags = MBUF_USED | MBUF_EXT | MBUF_PKTHDR | MBUF_EOR;
+	/* Bug #13: the 8197F mbuf own bit is 0x80, NOT the legacy 0x02 — without
+	 * it the OUTGOING (direct-TX) descriptor path rejects the buffer and
+	 * wedges ALL TX (the prior 0x8800 attempt wedged exactly here, m_flags
+	 * was still 0x1E). TX-only: the RX pre-seed keeps legacy MBUF_USED. */
+	mb->m_flags = MBUF_USED_8197F | MBUF_EXT | MBUF_PKTHDR | MBUF_EOR;
 	mb->skb = (uint32)(uintptr_t)skb;
 
+	/*
+	 * Bug #13 clean-slate: zero every HW-interpreted pkthdr field before the
+	 * writes below. Offsets +4..+23 = ph_asic0..ph_ptpbits; TX pkthdrs are
+	 * ring-recycled, so stale bits (ph_reason, ph_asic1 linkID/tag fields,
+	 * ph_flags2, ph_ipbits, ...) would otherwise ride into the OUTGOING
+	 * descriptor. Preserves ph_mbuf (+0) and the sw scratch words (+24..).
+	 */
+	memset((u8 *)ph + 4, 0, 20);
 	ph->ph_len = len;
 	ph->ph_vlanId = nicTx->vid & 0x0fff;
 	ph->ph_portlist = nicTx->portlist & 0x3f;
-	ph->ph_flags = nicTx->flags;
+	/*
+	 * Bug #13 (box-originated cold UNICAST never egressed the RGMII trunk):
+	 * vendor direct-TX recipe — ph_flags = PKTHDR_USED|PKT_OUTGOING = 0x8800
+	 * in the 8197F bit positions (PKTHDR_USED_8197F = 0x8000, NOT the legacy
+	 * 0x0200 this port half-carried). 0x8800 makes the switch egress
+	 * ph_portlist VERBATIM with no L2 lookup, so a unicast DA on a cold FDB
+	 * can no longer be dropped inside the switch (broadcast/ARP already got
+	 * out via VLAN-membership flooding; unicast did not). Requires the mbuf
+	 * 0x80 own bit above (m_flags 0x9C) or the OUTGOING path rejects the
+	 * buffer and wedges ALL TX. nicTx->flags is OR'd on top so a future
+	 * HWLOOKUP request still passes through (it is 0 on the xmit path today).
+	 */
+	ph->ph_flags = PKTHDR_USED_8197F | PKT_OUTGOING | nicTx->flags;
 	/*
 	 * ph_srcExtPortNum = CPU (3) for EVERY CPU-injected frame, not just the
 	 * HWLOOKUP path. With srcExtPort left at 0 the switch reads the source as
 	 * physical port 0 and SOURCE-PORT-FILTERS it out of the egress portmask —
 	 * and port 0 IS the single RGMII trunk to the RTL8367S. So a direct-portlist
-	 * (flags=0) CPU frame egressed to ports 0-5 gets the trunk stripped, and
+	 * CPU frame egressed to ports 0-5 gets the trunk stripped, and
 	 * box-initiated traffic (ARP, unicast on a cold FDB) never reaches the wire
 	 * while host-initiated traffic (real ingress on port 0 -> flood to CPU) does.
 	 * Marking the source as the CPU stops the trunk being filtered. (Same value
@@ -554,8 +593,6 @@ static int32 _New_swNic_send(void *skb, void *output, uint32 len,
 	 * note re: source-port filtering blocking egress back out the trunk.)
 	 */
 	ph->ph_asic0 = (3 << 0);	/* ph_srcExtPortNum = CPU */
-	ph->ph_asic1 = 0;
-	ph->ph_ptpbits = 0;
 	if (nicTx->flags & PKTHDR_HWLOOKUP) {
 		/* CPU-injected frame, let the switch L2-bridge it (translation of
 		 * the old tx_hwlkup|tx_bridge|tx_extspa=CPU descriptor bits). */

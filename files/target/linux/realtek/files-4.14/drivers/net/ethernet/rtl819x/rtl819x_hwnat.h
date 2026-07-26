@@ -44,4 +44,25 @@ int rtl819x_hwnat_flow_offload(enum flow_offload_type type,
 void rtl819x_hwnat_start(struct net_device *dev);
 void rtl819x_hwnat_stop(void);
 
+/*
+ * M7.3 step 4 — software-flow timeout refresh, built-in <-> module handshake.
+ *
+ * The driver is CONFIG_NET_RTL819X=y but nf_flow_table / xt_FLOWOFFLOAD are =m, so it can
+ * neither link the flow table's EXPORT_SYMBOL_GPL'd flow_offload_lookup() nor reach
+ * xt_FLOWOFFLOAD's file-static struct nf_flowtable. The linkage is INVERTED: the driver
+ * EXPORTs the two functions below and xt_FLOWOFFLOAD's module init/exit hands over
+ * {&nf_flowtable, flow_offload_lookup} (see hack-4.14/650-netfilter-add-xt_OFFLOAD-target.patch).
+ * Guarded by rtl865x_hal_lock; the aging worker uses them (under RCU) to keep an actively
+ * ASIC-forwarded flow's software timeout fresh so it isn't GC'd + re-learned every ~30 s.
+ * Structs only forward-declared here (real defs come from <net/netfilter/nf_flow_table.h>,
+ * which rtl819x_hwnat.c includes BEFORE this header, so the fwd-decls are harmless no-ops). */
+struct nf_flowtable;
+struct flow_offload_tuple;
+struct flow_offload_tuple_rhash;
+typedef struct flow_offload_tuple_rhash *(*rtl819x_flow_lookup_fn)(
+		struct nf_flowtable *ft, struct flow_offload_tuple *tuple);
+void rtl819x_hwnat_flowtable_register(struct nf_flowtable *ft,
+				      rtl819x_flow_lookup_fn lookup);
+void rtl819x_hwnat_flowtable_unregister(void);
+
 #endif /* _RTL819X_HWNAT_H */

@@ -1048,6 +1048,61 @@ int rtl8367s_cpu_tag_enable(void)
 }
 EXPORT_SYMBOL(rtl8367s_cpu_tag_enable);
 
+/*
+ * A-2 residual (a2-residual): 802.3x PAUSE on the 8367S side of the RGMII
+ * trunk (EXT1 = phys port 6, the SoC-P0 uplink) — a SURGICAL read-modify-write
+ * of the DI1 force register (0x1311 = RTL8367B_DI_FORCE_REG(1)) ONLY.
+ *
+ * Why: a routed LAN->WAN flow U-turns on the single trunk (ingress VID2 +
+ * egress VID1 on the SAME SoC port0), so under a saturating TCP burst the
+ * port0 egress queue is the tightest stage; when the SoC's per-port
+ * descriptor threshold (PBFCR FCON=90) fires it can only shed load LOSSLESSLY
+ * by PAUSE-ing the 8367S — which must generate (txpause) and honor (rxpause)
+ * pause on EXT1. Mainline never programs this: reset_chip()/setup()
+ * deliberately skip the whole extif-init/reset for the 8367S (re-strapping
+ * desyncs the live trunk, see rtl8367b_is_8367s), so a LOADER boot inherits
+ * the loader's EXT1 force value as-is. The flashed-boot cold bring-up in
+ * setup() already forces 0x1311=0x1076 (pause bits included); this helper
+ * only closes the loader-boot gap, WITHOUT touching mode/speed/duplex/link/
+ * delay bits (the #12/#14 desync hazard class).
+ *
+ * on!=0: set FORCE_TXPAUSE|FORCE_RXPAUSE. on==0: clear them (bench A/B
+ * lever, driven by rtl819x.trunk_pause=2). No-op with a print when already in
+ * the requested state; -ENODEV until the SMI driver has probed (the caller
+ * re-applies on the next eth0 open). Prints old->new for bench verification —
+ * the OLD value on a loader boot is the ground truth for what the loader's
+ * RTL8367R_init actually programs (incl. whether DI_FORCE_MODE bit12 is set;
+ * if it is NOT, these ability bits are inert and the print exposes that).
+ */
+int rtl8367s_trunk_pause_set(int on)
+{
+	struct rtl8366_smi *smi = g_dir842_smi;
+	const u32 pause = RTL8367B_DI_FORCE_TXPAUSE | RTL8367B_DI_FORCE_RXPAUSE;
+	u32 old = 0, want, back = 0;
+	int err;
+
+	if (!smi)
+		return -ENODEV;
+
+	err = rtl8366_smi_read_reg(smi, RTL8367B_DI_FORCE_REG(1), &old);
+	if (err)
+		return err;
+	want = on ? (old | pause) : (old & ~pause);
+	if (want == old) {
+		printk(KERN_ERR "DIR842 8367S EXT1 pause: already %s (0x1311=%04x)\n",
+		       on ? "on" : "off", old);
+		return 0;
+	}
+	err = rtl8366_smi_write_reg(smi, RTL8367B_DI_FORCE_REG(1), want);
+	if (err)
+		return err;
+	rtl8366_smi_read_reg(smi, RTL8367B_DI_FORCE_REG(1), &back);
+	printk(KERN_ERR "DIR842 8367S EXT1 pause %s: 0x1311 %04x -> %04x\n",
+	       on ? "ON" : "OFF", old, back);
+	return 0;
+}
+EXPORT_SYMBOL(rtl8367s_trunk_pause_set);
+
 static int rtl8367b_setup(struct rtl8366_smi *smi)
 {
 	struct rtl8367_platform_data *pdata;
@@ -1136,11 +1191,21 @@ static int rtl8367b_setup(struct rtl8366_smi *smi)
 			 * the CPU), and swconfig doesn't restore them on an initramfs, so
 			 * program them here (values from the loader's RTL8367R_init). */
 			rtl8366_smi_write_reg(smi, 0x1219, 0x0040);		/* CPU port mask = phys port 6 (EXT1) */
-			rtl8366_smi_rmwr(smi, 0x121a, 0x003f,
-					 (1 << 0) | (6 << 3) | (2 << 1));	/* CPU en | trap port6 | tag=NONE */
+			/* #14: loader-EXACT CPU-ctrl bytes (init_97f_8367r) —
+			 * identical to the live stock/loader register dump that
+			 * rtl8367s_cpu_tag_enable() replicates (0x121a/0x121b =
+			 * 0x00b5, 0x890-0x893 = 0xff). The old masked write
+			 * (0x121a low6=0x35, no 0x121b/0x0893) was a partial-
+			 * replica gap vs the loader. With the SoC-side CPU-tag
+			 * decode OFF (P0GMIICR bits[26:25]=0, Fork A) these
+			 * values are proven tag-free on the wire — every working
+			 * loader boot runs with exactly them. */
+			rtl8366_smi_write_reg(smi, 0x121a, 0x00b5);
+			rtl8366_smi_write_reg(smi, 0x121b, 0x00b5);
 			rtl8366_smi_write_reg(smi, 0x0890, 0x00ff);		/* flood unknown DA -> all ports */
 			rtl8366_smi_write_reg(smi, 0x0891, 0x00ff);		/* flood unknown MC */
 			rtl8366_smi_write_reg(smi, 0x0892, 0x00ff);		/* flood BC */
+			rtl8366_smi_write_reg(smi, 0x0893, 0x00ff);		/* loader-exact 4th flood/behave mask */
 			for (k = 0; k <= 7; k++)
 				rtl8366_smi_write_reg(smi, 0x08a2 + k, 0x00ff);	/* no port isolation */
 			dev_info(smi->parent, "RTL8367S: EXT1 RGMII uplink + CPU/forwarding configured (flashed-boot bring-up)\n");

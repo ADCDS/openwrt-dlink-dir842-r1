@@ -30,8 +30,17 @@
 #include "rtl865x_asichal.h"	/* rtl865x_hal_lock: serializes all TLU/table access */
 #include "rtl819x_hwnat.h"	/* M6.6 Phase 3: conntrack HW-NAT offload hooks */
 
-#define RTL819X_RX_RING_SIZE	64
-#define RTL819X_TX_RING_SIZE	64
+/* M7.3 line-rate: 256 (was 64). The CPU punt path must absorb one full
+ * lost-RX_DONE window — the RX IRQ is documented-lossy (CPUIISR-ack race, see
+ * the M6.3b note in the poll) and the watchdog back-stop is ~10 ms, so at the
+ * ~13 kpps software-forwarding rate a single lost interrupt queues ~130 frames
+ * against the old 64-slot ring -> descriptor runout -> drops that no port MIB
+ * counts (the fabric retries/discards internally) -> TCP retransmits with zero
+ * visible loss. 256 slots = ~20 ms of headroom; cost ~512 KB of RX clusters +
+ * ~20 KB of coherent descriptors on a 64 MB box. NAPI weight stays 64 (budget
+ * per poll pass; the re-peek/IRQ loop drains the deeper ring fine). */
+#define RTL819X_RX_RING_SIZE	256
+#define RTL819X_TX_RING_SIZE	256
 #define RTL819X_CLUSTER_SIZE	2048
 
 /* CPU-interface register offsets within the ioremapped window. */
@@ -181,9 +190,11 @@ static const struct { u32 base; u16 cnt; } fab_cfg_ranges[] = {
 	{ 0xB8010078,  1 },	/* TXRINGCR (tx ring enables) */
 	{ 0xB80100A0,  2 },	/* DMA_CR4 (tail-aware), CPUICR1 (pkthdr type/gather) */
 	{ 0xBB804000,  1 },	/* MACCR (LONG_TXE / CF_SYSCLK_SEL) */
+	{ 0xBB804058,  1 },	/* MACCR1 (trunk bit0 — #14 cold path) */
 	{ 0xBB804010, 13 },	/* PPMAR + PATP0-11 (port aging/trunk map) */
 	{ 0xBB804100, 10 },	/* PITCR (port0 RGMII mode) + PCRP0-8 (force-link) */
 	{ 0xBB80414C,  1 },	/* P0GMIICR (RGMII delays + Conf_done) */
+	{ 0xBB805108,  1 },	/* EXTPCR0 (ext-port cfg — #14 cold path) */
 	{ 0xBB804400, 12 },	/* TEACR,ATCR?,RMACR,ALECR,MSCR,SWTCR0/1,FFCR block */
 	{ 0xBB804500,  9 },	/* SBFCR0-2 + PBFCR0-5 (also rewritten by start) */
 	{ 0xBB804730, 19 },	/* LPTM8021Q,DSCPCR0-6,QIDDPCR,RMCR1P,DSCPRM0/1,RLRC */
@@ -192,7 +203,7 @@ static const struct { u32 base; u16 cnt; } fab_cfg_ranges[] = {
 	{ 0xBB806300,  1 },	/* TMCR (test-mode off) */
 };
 
-#define FAB_CFG_WORDS 153	/* sum of cnt above (BUILD_BUG_ON-checked) */
+#define FAB_CFG_WORDS 155	/* sum of cnt above (BUILD_BUG_ON-checked) */
 static u32 fab_cfg_snap[FAB_CFG_WORDS];
 static bool fab_cfg_snap_valid;
 
@@ -270,17 +281,66 @@ static void rtl819x_fabric_full_reset(void)
 	pr_err("rtl819x: fabric full reset done (SIRR FULL_RST + swcore clock cycle + MEMCR init + cfg restore)\n");
 }
 
+/* #14 (flashed-boot cold trunk) bench lever: force the FULL Fork-B trunk
+ * cold replica in rtl865x_start() on a loader-configured boot, to validate
+ * the replica is loader-exact (a true replica must be a data-plane NO-OP
+ * over the loader's own bring-up — the old partial replica provably killed
+ * the trunk in exactly this test). SoC SWCORE regs have no devmem path, so
+ * this param is the only live lever for the SoC half:
+ *   echo 1 > /sys/module/rtl819x/parameters/trunk_cold_force
+ *   ip link set eth0 down; ip link set eth0 up
+ * Self-clears once consumed. */
+static int trunk_cold_force;
+module_param(trunk_cold_force, int, 0644);
+MODULE_PARM_DESC(trunk_cold_force, "force the flashed-boot RGMII-trunk cold bring-up replica on next eth0 open");
+
+/* A-2 residual: DISABLE 802.3x PAUSE on the RGMII trunk (SoC-P0 <-> 8367S-EXT1),
+ * applied in rtl865x_start(). MEASURED, and OPPOSITE the original hypothesis:
+ * the loader FORCES pause on both trunk ends (0x1311=0x1076, PCRP0[17:16]=3),
+ * and on this single trunk — which a routed LAN->WAN flow crosses TWICE (VID2
+ * ingress + VID1 egress on the SAME port0) — that pause is a self-inflicted
+ * feedback loop: WAN-egress back-pressure PAUSEs the LAN ingress on the same
+ * wire, throttling a saturating single TCP flow. Bench A/B (fresh iperf3, plain
+ * routed hal->tiny): pause ON = ~0.9 Mbit collapse; pause OFF = ~95 Mbit
+ * sustained (vs ~27 Mbit with the loader's untouched pause). So default = 2
+ * (force-clear both ends). Values: 2 = clear (default, the fix); 1 = force
+ * enable (bench A/B — reproduces the collapse); 0 = leave the loader value
+ * (~27 Mbit baseline). SWCORE regs have no devmem path, so this param is the
+ * live lever — A/B/A on ONE RAM boot (no flaky flash reboots):
+ *   echo 1 > /sys/module/rtl819x/parameters/trunk_pause  # pause on  (collapse)
+ *   echo 2 > /sys/module/rtl819x/parameters/trunk_pause  # pause off (fix)
+ *   ip link set eth0 down; ip link set eth0 up           # re-apply, then measure */
+static int trunk_pause = 2;
+module_param(trunk_pause, int, 0644);
+MODULE_PARM_DESC(trunk_pause, "RGMII-trunk 802.3x pause: 2=force OFF (default, A-2 residual fix), 1=force on (bench A/B collapse), 0=leave loader value");
+
+/* 8367S half of the trunk-pause fix (rtl8367b.c; CONFIG_RTL8367B_PHY=y, so
+ * this built-in <-> built-in reference links into vmlinux). */
+extern int rtl8367s_trunk_pause_set(int on);
+
 static void rtl865x_start(void)
 {
 	/* Enable Tx/Rx, 128-word Lexra bus burst, 2048-byte mbufs. */
 	REG32(CPUICR) = TXCMD | RXCMD | BUSBURST_128WORDS | MBUF_2048BYTES;
 
 	/*
-	 * 8197F: the Hi/Low FIFO water marks reset to defaults whenever the
-	 * burst-size field of CPUICR is written, so restore them here.
+	 * 8197F: the Hi/Low FIFO water marks reset to defaults (HiFifoMark 0x57)
+	 * whenever the burst-size field of CPUICR is written, so restore them here.
+	 *
+	 * A-2 fabric wedge: write the SHIPPED stock kernel's 8197F value 0xA0CE
+	 * (LowFifoMark=0xA0, HiFifoMark=0xCE — stock vmlinux 0x80192be4
+	 * `ori v0,v0,0xa0ce` on the chip-ID==0x8197 branch this SoC takes), NOT
+	 * the public SDK's 0xA0A0 (asicCom.c:1408) this port originally copied.
+	 * Hi==Low==0xA0 is a degenerate no-hysteresis drain config; DMA_CR0
+	 * governs when the CPU-port DMA drains its internal FIFO to DRAM relative
+	 * to the descriptor writeback — the exact ordering the A-2 stale-DRAM
+	 * race (descriptor overtakes payload, M7-LARGE-FRAME-RX-WEDGE.md) lives
+	 * in.  rtl865x_start() runs at cold boot AND after every self-heal, so
+	 * this covers both paths (the bringup pr_err below prints DMA_CR0 for
+	 * bench verification: expect ....A0CE).
 	 */
 	REG32(DMA_CR0) = (REG32(DMA_CR0) & ~(LowFifoMark_MASK | HiFifoMark_MASK)) |
-			 ((0xA0 << LowFifoMark_OFFSET) | 0xA0);
+			 ((0xA0 << LowFifoMark_OFFSET) | 0xCE);
 
 	/*
 	 * 8197F "driver can't receive packet" erratum: a read-modify-write of
@@ -406,29 +466,127 @@ static void rtl865x_start(void)
 		set_c0_status(STATUSF_IP4);
 
 		/* --- RGMII trunk (port0 <-> external RTL8367S) cold bring-up ---
-		 * The stock D-Link/Realtek loader's init_8367r (which only runs on the
-		 * loader's TFTP path) puts SoC switch-core port0 into RGMII mode and
-		 * latches the GMII config. FLASHED boots skip it, so the CPU<->8367S
-		 * trunk is mis-configured and ingress from the jacks never reaches the
-		 * CPU RX ring -> dead RX while forced-link/TX look fine. Replicate the
-		 * essential bits (addresses RE'd from stock init_8367r and matching the
-		 * loader source: SWCORE+0x4100 PITCR, +0x414C P0GMIICR, +0x4000 MACCR).
-		 * Idempotent on TFTP/RAM boots where the loader already did it. */
-		pr_err("rtl819x trunk-pre : PITCR=%08x P0GMIICR=%08x MACCR=%08x PCRP0=%08x\n",
+		 * #14: FULL replica of the loader's init_97f_8367r (RE'd: init
+		 * ~0x80197ed4, trunk setup 0x80194728, P0GMIICR write 0x801947a0;
+		 * bit names sdk-ref/rtl865xc_asicregs.h). The loader only runs it
+		 * on its TFTP path; a FLASHED boot skips it -> dead trunk. GATED
+		 * on PITCR bit0 (port0 iface type): loader sets RGMII (1), chip
+		 * default is UTP (0) — loader-configured boots skip this block
+		 * UNTOUCHED (the #12 lesson: partial/duplicate re-writes over the
+		 * loader's coherent bring-up desync the RGMII pair). Live loader-
+		 * boot reference: P0GMIICR=0x00037d55, PITCR bit0=1. Bench lever:
+		 * trunk_cold_force=1 runs the replica on a loader boot (a loader-
+		 * exact replica must be a data-plane no-op). */
+		pr_err("rtl819x trunk-pre : PITCR=%08x P0GMIICR=%08x MACCR=%08x PCRP0=%08x EXTPCR0=%08x MACCR1=%08x PAD=%08x\n",
+		       REG32(RTL819X_SWCORE_BASE + 0x4100),
+		       REG32(RTL819X_SWCORE_BASE + 0x414C),
+		       REG32(RTL819X_SWCORE_BASE + 0x4000),
+		       REG32(RTL819X_SWCORE_BASE + 0x4104),
+		       REG32(RTL819X_SWCORE_BASE + 0x5108),
+		       REG32(RTL819X_SWCORE_BASE + 0x4058),
+		       REG32(0xB8000850));
+		/* A-2 (M7.3 fabric-wedge prevention): MACCR back-pressure LONG_TXE
+		 * (bit22) + CF_SYSCLK_SEL, set UNCONDITIONALLY — the fabric fix must
+		 * apply on loader/RAM boots too, not only the gated cold path below.
+		 * MACCR is a MAC-level reg (not an RGMII-pair timing reg), so writing
+		 * it over the loader's config is safe, unlike the gated PHY regs. */
+		REG32(RTL819X_SWCORE_BASE + 0x4000) |= (1u << 12) | SW_MACCR_LONG_TXE;
+		if (!(REG32(RTL819X_SWCORE_BASE + 0x4100) & (1u << 0)) ||
+		    trunk_cold_force) {
+			u32 v;
+
+			trunk_cold_force = 0;
+			/* 1. board RGMII pad mux/drive (loader value) */
+			REG32(0xB8000850) =
+				(REG32(0xB8000850) & 0x019FFFFF) | 0xDA600000;
+			/* 2. MACCR CF_SYSCLK_SEL (bits[13:12]=01) + MACCR1 bit0 */
+			REG32(RTL819X_SWCORE_BASE + 0x4000) |= (1u << 12);
+			REG32(RTL819X_SWCORE_BASE + 0x4058) |= (1u << 0);
+			/* 3. EXTPCR0 bits[19:16] = 0x8 (stock init_8367r) */
+			v = REG32(RTL819X_SWCORE_BASE + 0x5108);
+			REG32(RTL819X_SWCORE_BASE + 0x5108) =
+				(v & ~(0xFu << 16)) | (0x8u << 16);
+			/* 4. P0GMIICR: GMAC=RGMII (bits[24:23]=0), NO CPU-tag
+			 * (bits[26:25]=0 — Fork A), CF_SEL_RGTXC bits[19:18]=0
+			 * (loader-live value; =3 only in stock's CPU-tag mode —
+			 * fallback variant B), loader fields bits[17:16]=3 +
+			 * bits[15:8]=0x7d, delays TX(bit4)+RX=5. Conf_done
+			 * (bit6) stays CLEAR here — latched LAST, after the
+			 * settle, exactly like the loader. Target: 0x00037d15. */
+			v = REG32(RTL819X_SWCORE_BASE + 0x414C);
+			v &= ~((3u << 25) | (3u << 23) | (3u << 18) |
+			       (3u << 16) | (0xFFu << 8) | 0xFFu);
+			v |= (3u << 16) | (0x7Du << 8) | (1u << 4) | (5u << 0);
+			REG32(RTL819X_SWCORE_BASE + 0x414C) = v;
+			/* 5. PITCR port0 = RGMII (default UTP!) */
+			REG32(RTL819X_SWCORE_BASE + 0x4100) |= (1u << 0);
+			/* 6. PCRP0 trunk force-link: EnablePHYIf(0)|MacSwReset(3,
+			 * 1=normal)|ForceDuplex(18)|ForceSpeed1000M(2<<19)|
+			 * ForceLink(23)|EnForceMode(25) = 0x02940009, then the
+			 * vendor EnForceMode double-toggle latch
+			 * (TOGGLE_BIT_IN_REG_TWICE, sdk-ref asicCom.c). */
+			v = REG32(RTL819X_SWCORE_BASE + 0x4104) | 0x02940009u;
+			REG32(RTL819X_SWCORE_BASE + 0x4104) = v;
+			REG32(RTL819X_SWCORE_BASE + 0x4104) = v ^ (1u << 25);
+			REG32(RTL819X_SWCORE_BASE + 0x4104) = v;
+			/* 7. settle, then latch Conf_done LAST (loader order/
+			 * timing; cold/forced path only — loader boots never
+			 * reach this). Final P0GMIICR must read 0x00037d55. */
+			msleep(1000);
+			REG32(RTL819X_SWCORE_BASE + 0x414C) |= (1u << 6);
+			pr_err("rtl819x trunk COLD replica applied\n");
+		}
+		/* --- A-2 residual (a2-residual): 802.3x PAUSE on the RGMII trunk ---
+		 * The routed LAN->WAN flow U-turns on port0 (ingress VID2 + egress
+		 * VID1 on the SAME port), so a saturating TCP cwnd burst tail-drops
+		 * ~0.25% at the port0 egress queue (Mathis => the ~27 Mbit collapse)
+		 * while the SHARED pool never nears runout (GDSR0 MaxUsedDsc ~30 <<
+		 * S_DSC_RUNOUT=480, and ICMP -f — 1 pkt in flight — loses 0%).
+		 * Internal back-pressure (SBFCR/PBFCR above, byte-identical to the
+		 * shipped stock kernel) cannot throttle the EXTERNAL sender; only
+		 * link-level pause can push the burst back onto the 8367S and
+		 * onward into hal's deep NIC queue. Two coordinated ends:
+		 *   SoC:   PCRP0[17:16] PauseFlowControl = 3 (EtxErx: force TX+RX
+		 *          pause on the forced-mode trunk). Stock's trunk setup
+		 *          (0x80194728-64) masks/sets bits 18-25 and PRESERVES
+		 *          [17:16]; the cold replica above only ORs 0x02940009 —
+		 *          so this field was never forced by either. Ability-only
+		 *          MAC bits, NOT RGMII-pair timing, so writing over the
+		 *          loader's live trunk is safe (same argument as the
+		 *          unconditional MACCR LONG_TXE write above); latched via
+		 *          the vendor EnForceMode double-toggle exactly like the
+		 *          cold replica (TOGGLE_BIT_IN_REG_TWICE).
+		 *   8367S: EXT1 DI-force txpause|rxpause via the surgical SMI
+		 *          helper (rtl8367b.c) — the driver never runs extif-init
+		 *          for the 8367S, so on loader boots these bits are
+		 *          inherited unknown (the flashed-boot cold path already
+		 *          forces 0x1311=0x1076, pause included).
+		 * Runs UNCONDITIONALLY of the PITCR cold-gate above: the bench
+		 * RAM-boots via the loader path, which skips the gated block.
+		 * Idempotent (skip + no re-toggle when already in the requested
+		 * state), so self-heal re-runs of rtl865x_start() don't bounce the
+		 * trunk. trunk_pause: 1=enable, 0=don't touch, 2=force-clear. */
+		if (trunk_pause == 1 || trunk_pause == 2) {
+			u32 v = REG32(RTL819X_SWCORE_BASE + 0x4104);
+			u32 want = (trunk_pause == 1) ? (v | (3u << 16))
+						      : (v & ~(3u << 16));
+
+			if (want != v) {
+				REG32(RTL819X_SWCORE_BASE + 0x4104) = want;
+				REG32(RTL819X_SWCORE_BASE + 0x4104) =
+					want ^ (1u << 25);	/* EnForceMode latch */
+				REG32(RTL819X_SWCORE_BASE + 0x4104) = want;
+				pr_err("rtl819x trunk-pause: PCRP0 %08x -> %08x\n",
+				       v, want);
+			}
+			if (rtl8367s_trunk_pause_set(trunk_pause == 1) < 0)
+				pr_err("rtl819x trunk-pause: 8367S SMI not probed — SoC side only (re-apply: eth0 down/up)\n");
+		}
+		pr_err("rtl819x trunk-post: PITCR=%08x P0GMIICR=%08x MACCR=%08x PCRP0=%08x\n",
 		       REG32(RTL819X_SWCORE_BASE + 0x4100),
 		       REG32(RTL819X_SWCORE_BASE + 0x414C),
 		       REG32(RTL819X_SWCORE_BASE + 0x4000),
 		       REG32(RTL819X_SWCORE_BASE + 0x4104));
-		REG32(RTL819X_SWCORE_BASE + 0x4000) |= (1u << 12);	/* MACCR CF_SYSCLK_SEL */
-		REG32(RTL819X_SWCORE_BASE + 0x414C) =
-			(REG32(RTL819X_SWCORE_BASE + 0x414C) & ~((1u << 4) | (7u << 0)))
-			| (1u << 4) | (5u << 0);			/* P0GMIICR RGMII TX/RX delays */
-		REG32(RTL819X_SWCORE_BASE + 0x4100) |= (1u << 0);	/* PITCR port0 = RGMII (default UTP!) */
-		REG32(RTL819X_SWCORE_BASE + 0x414C) |= (1u << 6);	/* P0GMIICR Conf_done: latch */
-		pr_err("rtl819x trunk-post: PITCR=%08x P0GMIICR=%08x MACCR=%08x\n",
-		       REG32(RTL819X_SWCORE_BASE + 0x4100),
-		       REG32(RTL819X_SWCORE_BASE + 0x414C),
-		       REG32(RTL819X_SWCORE_BASE + 0x4000));
 
 		REG32(MSCR) |= MSCR_EN_L2;		/* global L2 forwarding enable (LAST) */
 	}
@@ -656,7 +814,7 @@ static void rtl819x_hang_check(struct rtl819x_eth_priv *priv)
 	 * are not the received frame — the wedge's exact symptom (live-validated:
 	 * wedged ≈93% of large frames stale in DRAM, fresh = 0 failures).
 	 *
-	 * Self-arming: the detector only acts after one ~10s window has seen >=2
+	 * Self-arming: the detector only acts after one window (~2.5s, A-2) has seen >=2
 	 * GOOD large frames since boot (proves the FCS-in-cluster convention holds
 	 * on this datapath; DHCP DISCOVERs / SSH KEX / any large ping arm it
 	 * organically). If large frames systematically fail while none pass, it
@@ -665,7 +823,7 @@ static void rtl819x_hang_check(struct rtl819x_eth_priv *priv)
 	 * Declare: a window with fail>=4 and a >=4:1 fail majority (the wedge
 	 * measures ~93% fail, so 4:1 has margin while a healthy mixed window can
 	 * never trip it). Action: fabric_autoreset ladder level (default 3 = full
-	 * self-heal incl. in-kernel gw re-arm), rate-limited to one per 30s.
+	 * self-heal incl. in-kernel gw re-arm), rate-limited to one per 5s (A-2).
 	 */
 	{
 		static u32 fcs_prev_ok, fcs_prev_fail;
@@ -673,7 +831,12 @@ static void rtl819x_hang_check(struct rtl819x_eth_priv *priv)
 		static bool fcs_armed, fcs_off_logged;
 		static unsigned long fcs_last_auto;
 
-		if (++fcs_win >= 1024) {		/* ~10s @ ~10ms ticks */
+		/* A-2: 256 ticks ~= 2.5s (was 1024 ~= 10s).  Detection latency is
+		 * dead air — a wedged fabric corrupts ~93% of large frames until
+		 * the self-heal runs, so shrink the window: when wedged, 4 fails
+		 * accrue in well under 2.5s under any traffic, while a healthy
+		 * window still cannot hit the >=4-fails AND 4:1-majority gate. */
+		if (++fcs_win >= 256) {		/* ~2.5s @ ~10ms ticks */
 			u32 dok = rtl819x_rx_fcs_ok - fcs_prev_ok;
 			u32 dfail = rtl819x_rx_fcs_fail - fcs_prev_fail;
 
@@ -698,9 +861,14 @@ static void rtl819x_hang_check(struct rtl819x_eth_priv *priv)
 				/* !fcs_last_auto == "never fired" (INITIAL_JIFFIES on
 				 * MIPS would otherwise defer the FIRST auto-reset by
 				 * minutes); |1 keeps the sentinel unambiguous. */
+				/* A-2: holdoff 30s -> 5s.  Under sustained routed
+				 * bulk the wedge recurs ~5s after each recovery; a
+				 * 30s holdoff left the box sitting WEDGED (blackholing
+				 * large frames) for up to ~25s per cycle = TCP-fatal.
+				 * 5s still prevents back-to-back thrash (reset ~1s). */
 				if (fabric_autoreset &&
 				    (!fcs_last_auto ||
-				     time_after(jiffies, fcs_last_auto + 30 * HZ))) {
+				     time_after(jiffies, fcs_last_auto + 5 * HZ))) {
 					fcs_last_auto = jiffies | 1;
 					fabric_reset_mode = fabric_autoreset;
 					schedule_work(&priv->hang_work);
@@ -889,16 +1057,24 @@ static netdev_tx_t rtl819x_eth_xmit(struct sk_buff *skb, struct net_device *dev)
 	 */
 	nicTx.portlist = 0x3F;
 	/*
-	 * M6.2: VID from the netdev's hwaccel VLAN tag — eth0.9 (LAN) -> VID 9,
-	 * eth0.8 (WAN) -> VID 8; an untagged frame (bare eth0) defaults to the
-	 * LAN VID. The trunk ports egress tagged (rtl865x_start) so the external
-	 * RTL8367S routes each frame to the correct jack by VID.
+	 * VID from the netdev's hwaccel VLAN tag — eth0.2 (LAN) -> VID 2,
+	 * eth0.1 (WAN) -> VID 1 (the M6.6 Fork A VLAN plan); an untagged frame
+	 * (bare eth0) defaults to the LAN VID. The trunk ports egress tagged
+	 * (rtl865x_start) so the external RTL8367S routes each frame to the
+	 * correct jack by VID.
+	 * Bug #13 requirement: ph_vlanId must name a VID whose SoC VLAN member
+	 * mask covers the 0x3F portlist — only VID 2 (LAN) and VID 1 (WAN) are
+	 * installed (sw_add_vlan, members 0x7F, trunk egress TAGGED), and the
+	 * external RTL8367S only carries those two across the trunk. The old
+	 * fallback, the stale M6.2 vid 9, has had NO VLAN table entry since
+	 * Fork A, so untagged bare-eth0 TX rode a VID with a 0/garbage member
+	 * mask and an unknown tag downstream.
 	 */
 	if (skb_vlan_tag_present(skb))
 		nicTx.vid = skb_vlan_tag_get(skb) & 0xfff;
 	else
-		nicTx.vid = 9;
-	nicTx.flags = 0;
+		nicTx.vid = 2;
+	nicTx.flags = 0;	/* direct-TX: swnic adds PKTHDR_USED_8197F|PKT_OUTGOING */
 
 	if (New_swNic_send(skb, (void *)(uintptr_t)dma, len, &nicTx) != 0) {
 		dma_unmap_single(dev->dev.parent, dma, len, DMA_TO_DEVICE);

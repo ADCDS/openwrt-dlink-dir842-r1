@@ -26,8 +26,11 @@
  * two translation units can never disagree on the VLAN/masquerade identity. */
 #define RTL865X_VID_WAN		1		/* 802.1Q VID the ASIC treats as WAN */
 #define RTL865X_VID_LAN		2		/* 802.1Q VID the ASIC treats as LAN */
-#define RTL865X_WAN_EXTIP	0xAC100001	/* 172.16.0.1 = the single masquerade IP (extIP[0]) */
+#define RTL865X_WAN_EXTIP	0xAC100001	/* 172.16.0.1 = BOOT-DEFAULT masquerade IP (extIP[0]);
+						 * M7.2: the LIVE value is rtl865x_wan_extip — dynamic,
+						 * = the WAN (ppp0) local IPv4, learned per-flow */
 #define RTL865X_NAPT_ROWS	1024		/* flat 1-way L4 table depth (SWTCR1 EnL4WayH=0) */
+#define RTL865X_PPPOE_TBL_SIZE	8		/* type-11 PPPoE session table depth (vendor RTL8651_PPPOETBL_SIZE) */
 /* 6-bit "differentiated timer" reload value written to every TEATCR proto field and
  * to a freshly-added row's agingTime. 0x11 ≈ 102 s of idle life before the ASIC
  * auto-clears the row's valid bit (per vendor _rtl8651_NaptAgingToSec). The hwnat
@@ -45,6 +48,7 @@
 #define ASIC_TYPE_NETIF		4
 #define ASIC_TYPE_VLAN		6
 #define ASIC_TYPE_L4_TCP_UDP	9
+#define ASIC_TYPE_PPPOE		11
 #define ASIC_TYPE_ACL_RULE	12
 #define ASIC_TYPE_NEXT_HOP	13
 
@@ -81,6 +85,18 @@ struct asic_l3route_l2 {
 /* Nexthop entry (type 13, 32 entries, 1 word). LE branch, vendor asicL3.h. */
 struct asic_nexthop {
 	u32 type:1, IPIndex:4, dstVid:3, PPPoEIndex:3, nextHop:10, reserv0:11;
+	u32 reservw1, reservw2, reservw3, reservw4, reservw5, reservw6, reservw7;
+};
+
+/* PPPoE session entry (type 11, 8 entries, 1 word) — vendor
+ * rtl8651_tblAsic_pppoeTable_t LE branch (sdk-ref/rtl865x_asicL3.h:89-115):
+ * word0 = sessionID[15:0] | ageTime[18:16]. A nexthop with type=1 selects a row
+ * here via PPPoEIndex; with ALECR EN_PPPOE set the ASIC then auto-encapsulates
+ * routed WAN egress as {ETH_P_PPP_SES, this sessionID, PPP proto 0x0021} and
+ * auto-decapsulates matching inbound session frames before the L3/L4 lookup
+ * (non-matching / non-IPv4 PPP frames — LCP etc. — trap to the CPU intact). */
+struct asic_pppoe {
+	u32 sessionID:16, ageTime:3, reserv0:13;
 	u32 reservw1, reservw2, reservw3, reservw4, reservw5, reservw6, reservw7;
 };
 
@@ -168,6 +184,22 @@ u32 gw_napt_hash1(u32 isTCP, u32 sip, u32 sport, u32 dip, u32 dport);
 int rtl865x_napt_write(u32 idx, const struct asic_napt_tcpudp *e);
 int rtl865x_napt_read(u32 idx, struct asic_napt_tcpudp *out);
 int rtl865x_napt_clear(u32 idx);
+
+/* ---- M7.2: dynamic WAN identity (PPPoE session + dynamic masquerade IP) ----
+ * The WAN side is no longer compile-time: on a PPPoE WAN the peer MAC (the AC),
+ * the session id and the masquerade IP (ppp0's local IPv4) are only known at
+ * PPP-up and change on every reconnect. rtl819x_hwnat.c learns them from the
+ * flow-offload dest path + the WAN netdev and pushes them down here. The two
+ * setters are shadow-compared and idempotent: return 0 = ASIC already holds the
+ * requested state (steady-state fast path, no table writes), 1 = tables were
+ * actually rewritten (the caller must flush its per-flow NAPT rows — they were
+ * programmed under the OLD identity), <0 = error. Caller MUST hold
+ * rtl865x_hal_lock. gw_prog()/rtl865x_gw_rearm() replay the live shadows, so a
+ * /proc reprogram or fabric-reset rearm reproduces the CURRENT WAN identity. */
+extern u32 rtl865x_wan_extip;	/* live extIP[0] (host order); boot = RTL865X_WAN_EXTIP */
+int rtl865x_set_wan_extip(u32 ip);
+int rtl865x_pppoe_set(u32 idx, u16 sid);	/* raw PPPoE session-table row write */
+int rtl865x_wan_set_nexthop(const u8 *gw_mac, bool is_pppoe, u16 pppoe_sid);
 
 /* M7: re-run the full gw scaffolding program (== `cat /proc/rtl865x_gw` minus
  * the dump) from kernel context after a fabric full reset. Takes

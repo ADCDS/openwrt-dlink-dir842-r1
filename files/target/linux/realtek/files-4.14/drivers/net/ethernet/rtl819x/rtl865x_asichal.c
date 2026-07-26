@@ -152,7 +152,11 @@ int rtl865x_asic_read_entry(u32 type, u32 idx, void *entry)
 #define MSCR_EN_L4		(1 << 2)
 #define MSCR_EN_IN_ACL		(1 << 4)
 #define GW_ALECR		(RTL819X_SWCORE_BASE + 0x440C)	/* == TTLCR */
+#define GW_DACLRCR		(RTL819X_SWCORE_BASE + 0x4424)	/* default ACL rule ctrl (ALE_BASE+0x24): net-decision-miss ACL range */
 #define GW_ALECR_EN_TTL1	(1 << 16)	/* TTL-decrement on routing (required) */
+#define GW_ALECR_EN_PPPOE	(1 << 18)	/* M7.2: PPPoE auto-encap/decap master enable (vendor
+						 * ALECR EN_PPPOE; stock sets it unconditionally in
+						 * initAsicL3, sdk-ref/rtl865x_asicL3.c:1887) */
 #define GW_TEACR		(RTL819X_SWCORE_BASE + 0x4400)
 #define GW_TEATCR		(RTL819X_SWCORE_BASE + 0x4404)	/* per-proto NAPT aging reload timeouts */
 #define GW_CSCR			(RTL819X_SWCORE_BASE + 0x4048)	/* checksum control */
@@ -240,6 +244,15 @@ static u32 gw_write_l2_full(const u8 *m, u32 member, u32 extmember,
 static const u8 GW_MAC_HALLAN[6]  = { 0x54,0xbf,0x64,0x18,0xb8,0xde };	/* hal enp3s0 */
 static const u8 GW_MAC_TINYWAN[6] = { 0xe4,0x5f,0x01,0x04,0x98,0xaf };	/* tiny eth0 */
 
+/* ---- M7.2: live WAN-identity shadows (all guarded by rtl865x_hal_lock) ----
+ * Learned at runtime from the flow-offload dest path (rtl819x_hwnat.c) and
+ * replayed by gw_prog so /proc reprogram + the M7 fabric-reset rearm keep the
+ * live identity. Boot defaults = the M6.6 bench rig (ethernet WAN via tiny). */
+static u8   gw_wan_gw_mac[6] = { 0xe4,0x5f,0x01,0x04,0x98,0xaf };	/* boot = GW_MAC_TINYWAN */
+static bool gw_wan_is_pppoe;
+static u16  gw_wan_pppoe_sid;
+u32 rtl865x_wan_extip = RTL865X_WAN_EXTIP;
+
 /* ---- M6.6 Phase 2: static NAPT (hardware NAT src-rewrite) ---- */
 #define ASIC_TYPE_EXT_INT_IP	5	/* external/WAN-IP table (16 entries, 3 words) — absent from hal.h's enum */
 #define SWTCR1			(ALE_BASE + 0x1C)	/* EnL4WayH(bit9)/L4EnHash1(bit13) — not in rtl819x_regs.h */
@@ -314,6 +327,157 @@ int rtl865x_napt_read(u32 idx, struct asic_napt_tcpudp *out)
 	return rtl865x_asic_read_entry(ASIC_TYPE_L4_TCP_UDP, idx, out);
 }
 
+/* ---- M7.2: WAN identity programming (PPPoE session + dynamic extIP) ---- */
+
+/* Write PPPoE session-table row @idx (type 11). sid 0 (none assigned) and
+ * 0xffff (vendor-reserved, rtl8651_setAsicPppoe) are rejected. The sid is the
+ * HOST-ORDER numeric session id (== flow_offload_hw_path.pppoe_sid, which
+ * pppoe.c fills as be16_to_cpu(po->num)) — the vendor setter takes the same
+ * numeric convention. ageTime is written at max but is moot: TEACR
+ * PPPoEAgingDisable (gw_prog) freezes the table. Caller holds rtl865x_hal_lock. */
+int rtl865x_pppoe_set(u32 idx, u16 sid)
+{
+	struct asic_pppoe e;
+
+	if (idx >= RTL865X_PPPOE_TBL_SIZE || sid == 0 || sid == 0xffff)
+		return -EINVAL;
+	memset(&e, 0, sizeof(e));
+	e.sessionID = sid;
+	e.ageTime = 7;
+	return rtl865x_asic_write_entry(ASIC_TYPE_PPPOE, idx, &e, true);
+}
+
+/* (Re)write extIP[0] = the masquerade external IP. Shadow-compared: 0 = already
+ * live, 1 = rewritten (caller must flush per-flow NAPT rows — they translate to
+ * the OLD IP), <0 error. Caller holds rtl865x_hal_lock. */
+int rtl865x_set_wan_extip(u32 ip)
+{
+	struct asic_extintip ext;
+	int rc;
+
+	if (!ip)
+		return -EINVAL;
+	if (ip == rtl865x_wan_extip)
+		return 0;
+	memset(&ext, 0, sizeof(ext));
+	ext.externalIP = htonl(ip);	/* NETWORK order: the ASIC rewrites the src to this
+					 * on-wire value (vendor nat.c:690 ext_host.ip=htonl);
+					 * host order = a byte-swapped src that the peer drops.
+					 * internalIP=0 + isOne2One=0 => many-to-one */
+	ext.valid = 1;
+	ext.nextHop = 0;		/* -> nexthop[0] for the reverse/inbound path */
+	rc = rtl865x_asic_write_entry(ASIC_TYPE_EXT_INT_IP, 0, &ext, true);
+	if (rc)
+		return rc;
+	rtl865x_wan_extip = ip;
+	pr_info("rtl865x gw: extIP[0] -> %pI4h (live WAN local IP)\n", &rtl865x_wan_extip);
+	return 1;
+}
+
+/* (Re)program netif[1] (the WAN L3 interface) from the shadows.
+ *
+ * ★ M7.2 PPPoE-encap fix: the WAN netif MTU is ALWAYS 1500 — stock parity.
+ * The port originally dropped it to 1492 on a PPPoE WAN (the "routable" MTU),
+ * but stock never programs 1492: the full ke/vmlinux.bin disasm has NO
+ * `li ...,1492` anywhere in code (the image's only 0x5d4 is one non-code data
+ * word at 0x8064f198) while 1500 is loaded throughout, and the vendor SDK
+ * contains no 1492 either. The ASIC budgets the 8-byte PPPoE+PPP overhead
+ * ITSELF (rtl865xc_asicregs.h:1253 AcptMaxLen = "16K-2(cutoff)-4(vlan)
+ * -8(pppoe)"), which suggests its length checks work in post-encap frame
+ * terms. Under mtu=1492 the offloaded PPPoE path black-holed with ZERO
+ * 0x8864 egress (M7.2 Part B): bench bulk TCP segments are EXACTLY 1492-byte
+ * IP datagrams (the AC advertises MSS 1452), so +8 encap = 1500 > 1492 fails
+ * a post-encap check on every large packet — and because the flow is
+ * [OFFLOAD], the CPU never re-forwards the off-ramped packets. mtu=1500
+ * admits them (1492+8 <= 1500) exactly as the working plain-ethernet offload
+ * admits its 1500-byte frames. (The precise netif-MTU compare lives in
+ * fast-path microcode we cannot disassemble — this is the leading
+ * hypothesis, being the sole PPPoE-specific divergence from both stock and
+ * the proven ethernet path; the small-vs-full-MSS A/B on the bench decides
+ * it.) Oversize safety is unchanged: TCP is MSS/PMTU-clamped to the 1492
+ * route MTU anyway, and a genuinely oversized routed packet still off-ramps
+ * to the CPU like stock. Caller holds rtl865x_hal_lock. */
+static void gw_wan_netif_prog_locked(void)
+{
+	struct asic_netif nif;
+	u32 mac_hi, mac_lo;
+
+	memset(&nif, 0, sizeof(nif));
+	mac_hi = (GW_MAC_WAN[0] << 21) | (GW_MAC_WAN[1] << 13) | (GW_MAC_WAN[2] << 5) | (GW_MAC_WAN[3] >> 3);
+	mac_lo = ((GW_MAC_WAN[3] & 0x7) << 16) | (GW_MAC_WAN[4] << 8) | GW_MAC_WAN[5];
+	nif.valid = 1; nif.vid = GW_VID_WAN; nif.mac18_0 = mac_lo; nif.mac47_19 = mac_hi;
+	nif.enHWRoute = 1; nif.macMaskL = 1; nif.macMaskH = 3;
+	nif.mtu = 1500;	/* ALWAYS 1500, even on PPPoE — stock parity (encap fix; see header comment) */
+	/* ★ WAN ingress ACL = [4..6], matching stock (STOCK-TABLES.md: LAN netif0 [0..3],
+	 * WAN netif1 [4..6]). It USED to be [0..3] like the LAN — which silently defeated the
+	 * reverse-NAPT trigger: the dst-MAC==WAN-MAC->TOCPU classifier is written to slot 4,
+	 * so with the range at [0..3] it was NEVER SCANNED and every WAN->LAN reply fell
+	 * through to the catch-all permit, got transit-routed, and left the WAN with an
+	 * unresolved DMAC (the 00:00:00:00:00:10 flood). inACLStart is split across two
+	 * fields: start = (inACLStartH << 1) | inACLStartL, so 4 => H=2, L=0. */
+	nif.inACLStartL = 0; nif.inACLStartH = 2; nif.inACLEnd = 6;	/* ingress ACL [4..6] */
+	nif.outACLStart = 253; nif.outACLEnd = 253;
+	rtl865x_asic_write_entry(ASIC_TYPE_NETIF, 1, &nif, true);
+}
+
+/* (Re)program the WAN egress chain from the shadows: peer L2 entry (WAN
+ * gateway / PPPoE-AC MAC, trunk egress) -> ARP[64] -> nexthop[0..1]
+ * (type=1 + PPPoEIndex=0 when PPPoE) -> PPPoE table row 0. Returns the peer
+ * L2 index (gw_prog dumps it). Caller holds rtl865x_hal_lock. */
+static u32 gw_wan_nexthop_prog_locked(void)
+{
+	struct asic_nexthop nh;
+	struct asic_arp a;
+	u32 wan_nh;
+
+	wan_nh = gw_write_l2(gw_wan_gw_mac, 0x3f, 1);	/* WAN peer -> trunk (VID1), fid1 */
+
+	memset(&a, 0, sizeof(a));
+	a.valid = 1;
+	a.nextHop = wan_nh;		/* ARP -> the L2 entry (peer MAC, trunk egress) */
+	a.aging = 0x1f;			/* max; TEACR bit0 freezes L2/ARP aging anyway */
+	rtl865x_asic_write_entry(ASIC_TYPE_ARP, 64, &a, true);
+
+	if (gw_wan_is_pppoe)
+		rtl865x_pppoe_set(0, gw_wan_pppoe_sid);
+
+	memset(&nh, 0, sizeof(nh));
+	nh.nextHop = 64;		/* ARP index (nexthop derefs ARP, NOT L2) */
+	nh.dstVid = GW_VID_WAN;
+	nh.IPIndex = 0;			/* -> extIP[0] : the source-rewrite IP linkage */
+	nh.type = gw_wan_is_pppoe ? 1 : 0;	/* 1 = PPPoE encap via PPPoEIndex */
+	nh.PPPoEIndex = 0;		/* single WAN session -> PPPoE table row 0 */
+	rtl865x_asic_write_entry(ASIC_TYPE_NEXT_HOP, 0, &nh, true);
+	rtl865x_asic_write_entry(ASIC_TYPE_NEXT_HOP, 1, &nh, true);
+	return wan_nh;
+}
+
+/* Point the WAN at @gw_mac (ethernet next-hop or PPPoE AC), optionally as a
+ * PPPoE WAN with session @pppoe_sid. Shadow-compared: 0 = already live, 1 =
+ * identity changed and the chain was reprogrammed (caller must flush its
+ * per-flow NAPT rows), <0 error. The previous peer's L2 entry (a different
+ * MAC-hashed row) is left behind — nothing references it and it is identical
+ * to what plain L2 learning would hold. Caller holds rtl865x_hal_lock. */
+int rtl865x_wan_set_nexthop(const u8 *gw_mac, bool is_pppoe, u16 pppoe_sid)
+{
+	if (!gw_mac || (is_pppoe && (pppoe_sid == 0 || pppoe_sid == 0xffff)))
+		return -EINVAL;
+	if (!memcmp(gw_wan_gw_mac, gw_mac, 6) &&
+	    gw_wan_is_pppoe == is_pppoe &&
+	    gw_wan_pppoe_sid == (is_pppoe ? pppoe_sid : 0))
+		return 0;
+
+	memcpy(gw_wan_gw_mac, gw_mac, 6);
+	gw_wan_is_pppoe = is_pppoe;
+	gw_wan_pppoe_sid = is_pppoe ? pppoe_sid : 0;
+
+	gw_wan_netif_prog_locked();	/* netif[1] identity refresh (MTU pinned 1500 — stock parity) */
+	gw_wan_nexthop_prog_locked();
+	pr_info("rtl865x gw: WAN nexthop -> %pM %s(sid=%u)\n", gw_wan_gw_mac,
+		is_pppoe ? "PPPoE " : "ethernet ", pppoe_sid);
+	return 1;
+}
+
 static int gw_prog(struct seq_file *m, void *v)
 {
 	struct asic_vlan vlan;
@@ -321,7 +485,6 @@ static int gw_prog(struct seq_file *m, void *v)
 	struct asic_l3route_arp rt;
 	struct asic_l3route_l2 hr;
 	struct asic_l3route_nxthop nr;
-	struct asic_nexthop nh;
 	u32 mac_hi, mac_lo, rb[8];
 	u32 mscr0, mscr1, hal_nh, tiny_nh;
 	int rc, ok = 1;
@@ -335,10 +498,14 @@ static int gw_prog(struct seq_file *m, void *v)
 	/* 1. init: L3 engine + operation layer 4 (L2|L3|L4), ACL OFF */
 	rc = rtl865x_asic_l3_engine_enable();
 	mscr0 = REG32(MSCR);
-	/* M6.6: EN_IN_ACL OFF — with it ON, hal->tiny frames were dropped in the SoC
-	 * BEFORE routing (e0rx flat even with CPU in the nexthop egress = not routed,
-	 * not trapped = an ingress-ACL drop; the all-zero ACL entries evidently aren't
-	 * permit-all). Off => no ingress ACL check => permit-all default.
+	/* spec-napt-hit6: EN_IN_ACL now ON (see the MSCR write below). The earlier
+	 * "ON dropped hal->tiny frames BEFORE routing (e0rx flat = ingress-ACL drop)"
+	 * failure was because the all-zero ACL entries decode to pktOpApp=0 = "matches at
+	 * NO stage", so L3/L4 frames found no permit. Fixed by the pktOpApp=7 permit-all
+	 * ACL fill below. EN_IN_ACL is REQUIRED: it is the ingress classifier that marks a
+	 * WAN->LAN reply whose dst == our own WAN IP (the masquerade extIP) as a
+	 * reverse-NAPT candidate; without it that reply is treated as an outbound-routed
+	 * packet and floods back out the WAN.
 	 *
 	 * ★ EN_L4 OFF for the routing milestone: with L4 on and NO extIP/NAPT session
 	 * rows programmed, the L4 engine's inbound-session matching EATS unsolicited
@@ -361,9 +528,20 @@ static int gw_prog(struct seq_file *m, void *v)
 	 * TCP/UDP miss TRAPS TO CPU for software forwarding instead of being eaten),
 	 * NAPTF2CPU=1 (non-TCP/UDP L4 to CPU). ICMP keeps HW-routing via L3; TCP/UDP
 	 * run software until Phase 2 writes real extIP+NAPT rows (then per-flow HW). */
-	REG32(MSCR) = REG32(MSCR) | MSCR_EN_L2 | MSCR_EN_L3 | MSCR_EN_L4;
+	REG32(MSCR) = REG32(MSCR) | MSCR_EN_L2 | MSCR_EN_L3 | MSCR_EN_L4 | MSCR_EN_IN_ACL;	/* spec-acl-encoding:
+					 * EN_IN_ACL(bit4) ON — REQUIRED for WAN->LAN reverse-NAPT (the "dst==my WAN IP"
+					 * classifier is an ingress ACL rule). Agent traced the vendor encoder end-to-end:
+					 * the catch-all permit IS word7=0x07000000 (ruleType=MAC=0, actionType=PERMIT=0,
+					 * pktOpApp=ALL_LAYER=7 verbatim; RTL865X_ACL_* enums == ASIC field values, NO
+					 * translation) — so the entry encoding is vendor-exact. The earlier forward-drop
+					 * with that same word7 came from SUPPORTING register state, not the entry: (1) the
+					 * netif ingress-ACL RANGE landing in the ASIC, (2) DACLRCR (net-decision-miss
+					 * default) which we never programmed. This build sets DACLRCR (below) + reads both
+					 * back (gw dump) to bisect which was wrong. */
 	mscr1 = REG32(MSCR);
-	REG32(GW_ALECR) |= GW_ALECR_EN_TTL1;			/* TTL-decrement on route */
+	REG32(GW_ALECR) |= GW_ALECR_EN_TTL1 | GW_ALECR_EN_PPPOE;	/* TTL-- on route + M7.2 PPPoE
+									 * auto-encap/decap (idle unless a
+									 * nexthop is type=1) */
 	REG32(GW_CSCR) |= GW_CSCR_L3L4CHK;			/* ★ recompute L3/L4 cksum after TTL-- / NAT rewrite (else the peer drops it) */
 	/* SWTCR0: VLAN netdec + mcast-internal as before, PLUS explicit NAPT policy
 	 * (the old read-modify-write PRESERVED the reset defaults of bits 0-2 — i.e.
@@ -384,35 +562,83 @@ static int gw_prog(struct seq_file *m, void *v)
 	 * clears `valid` at 0 (EnNAPTAutoDelete). TEATCR = per-proto reload, 6-bit
 	 * differentiated timer 0x11 ≈ 100 s decay (ICMP[29:24] UDP[23:18] TCP-long[17:12]
 	 * TCP-med[11:6] TCP-short[5:0]). */
-	REG32(GW_TEACR) = 0x1;
+	REG32(GW_TEACR) = 0x1 | (1u << 2);	/* + bit2 PPPoEAgingDisable (M7.2): pin the PPPoE
+						 * session entry — pppd owns the session lifetime,
+						 * the ASIC must never age it out mid-session */
 	REG32(GW_TEATCR) = (RTL865X_NAPT_AGING_RELOAD << 24) | (RTL865X_NAPT_AGING_RELOAD << 18)
 			 | (RTL865X_NAPT_AGING_RELOAD << 12) | (RTL865X_NAPT_AGING_RELOAD << 6)
 			 | RTL865X_NAPT_AGING_RELOAD;
 	/* ★ INGRESS ACL permit-all: each netif references an ingress ACL range that
-	 * MUST hold a valid rule or the ASIC BLOCKS routing (stock ground truth,
-	 * STOCK-TABLES.md). MSCR EN_IN_ACL is set above; an all-zero ACL entry =
-	 * RULE_ETHERNET / ACTION_PERMIT (permit-all). Fill 0..255 so every netif's
-	 * ingress range resolves to permit. Egress ACL stays OFF (documented hw bug). */
+	 * MUST hold a valid permit rule or the ASIC BLOCKS routing (stock ground truth,
+	 * STOCK-TABLES.md). MSCR EN_IN_ACL is set above. NOTE: an all-zero ACL word is NOT
+	 * permit-all — its pktOpApp=0 means "applies at no stage" so L3/L4 frames match no
+	 * permit and DROP; we set word7 pktOpApp=7 (see below) for a true L2+L3+L4 permit.
+	 * Fill 0..255 so every netif's ingress range resolves to permit. Egress ACL stays
+	 * OFF (documented hw bug). */
 	{
-		u32 acl_permit[11] = { 0 };
+		u32 acl_permit[11] = { 0 };	/* catch-all Ethernet PERMIT (spec-acl-encoding, agent-
+						 * traced vendor-exact): words 0-6 = 0 (dstMac/srcMac/ethType all
+						 * don't-care, mask 0 => match ANY frame); word7 = 0x07000000 =
+						 * ruleType=MAC(0)@[3:0] | actionType=PERMIT(0)@[7:4] |
+						 * pktOpApp=ALL_LAYER(7)@[26:24]. Matches every frame, permits at
+						 * L2+L3+L4. Fill 0..255 so every netif ingress range resolves to it. */
 		int a;
+		acl_permit[7] = 0x07000000u;
 		for (a = 0; a < 256; a++)
 			rtl865x_asic_write_entry(ASIC_TYPE_ACL_RULE, a, acl_permit, true);
+		/* spec-acl-encoding: program DACLRCR (net-decision-miss default ACL range) — the
+		 * vendor's rtl865x_setDefACLForNetDecisionMiss (asicCom.c) writes
+		 * start_in | end_in<<7 | start_eg<<14 | end_eg<<21. We never set it; if a routed
+		 * packet's net-decision misses (VLAN->netif), the ASIC uses this range, and an
+		 * unprogrammed/DROP default kills forward before the permit is consulted. Point it
+		 * at ingress [0..3] (permit) + egress [253..253] (permit) so a miss still permits. */
+		REG32(GW_DACLRCR) = 0u | (3u << 7) | (253u << 14) | (253u << 21);
+
+		/* spec-acl-encoding RULE 2 — the WAN-ingress reverse-NAPT trigger. A frame whose
+		 * dst-MAC == our WAN MAC (00:e0:4c:81:96:c3) is "destined to me"; install a MAC-match
+		 * at the FIRST slot of the WAN netif's ingress range [4..6] so it is scanned BEFORE
+		 * the catch-all permit. action=TOCPU marks it for L3/L4 LOCAL processing => the L4
+		 * NAPT reverse-lookup runs (HW un-NAT for an established session; a miss falls to CPU
+		 * for software un-NAT). Without it the reply matches the catch-all permit and is
+		 * transit-routed back out the WAN (the 00:00:00:00:00:10 flood). Encoding (agent-
+		 * traced): w0/w1[15:0]=MAC value, w1[31:16]/w2=full mask, w7=pktOpApp7|TOCPU(3)|MAC(0).
+		 * (Bench-hardcoded WAN MAC; generalise from the WAN netif MAC later.) */
+		{
+			u32 acl_tome[11] = { 0 };
+			acl_tome[0] = 0x4c8196c3u;	/* dMacP31_16:dMacP15_0  = 4c:81 : 96:c3 */
+			acl_tome[1] = 0xffff00e0u;	/* dMacM15_0 : dMacP47_32 = mask : 00:e0 */
+			acl_tome[2] = 0xffffffffu;	/* dMacM47_32:dMacM31_16 = full 6-byte mask */
+			acl_tome[7] = 0x07000030u;	/* pktOpApp=7 | actionType=TOCPU(3)@[7:4] | ruleType=MAC(0) */
+			rtl865x_asic_write_entry(ASIC_TYPE_ACL_RULE, 4, acl_tome, true);
+		}
 	}
 	/*
 	 * M6.6 Fork A: NO source-port CPU-tag (it breaks the box's CPU RX). The SoC
 	 * classifies netifs purely by 802.1Q VID — rtl865x_start() already programs
 	 * SoC VLANs VID2(LAN)/VID1(WAN) members 0x7F (all ports incl CPU port6) +
 	 * PVID2, and the external RTL8367S tags each jack's frames with its VID and
-	 * sends them TAGGED up the trunk. So we do NOT touch P0GMIICR/PCRP0 or the
-	 * 8367S far-end, and we do NOT rewrite the SoC VLAN/PVID here (rtl865x_start
-	 * owns them coherently). (void) the CPU-tag/RGMII regs kept for Fork B.
+	 * sends them TAGGED up the trunk. So gw_prog does NOT touch P0GMIICR/PCRP0
+	 * or the 8367S far-end, and does NOT rewrite the SoC VLAN/PVID here
+	 * (rtl865x_start owns them coherently).
+	 * #14 UPDATE: the trunk/RGMII regs below (all except GW_CFG_CPUC_TAG) are
+	 * now programmed by rtl819x-eth.c rtl865x_start()'s FLASHED-boot cold path
+	 * (full init_97f_8367r replica, gated on PITCR bit0==0 / trunk_cold_force).
+	 * GW_CFG_CPUC_TAG (P0GMIICR bits[26:25]) stays deliberately UNUSED — Fork A.
+	 * The (void) markers remain because THIS file still only documents them.
 	 */
 	(void)GW_PCRP0; (void)GW_P0GMIICR; (void)GW_CFG_CPUC_TAG;
 	(void)GW_PITCR; (void)GW_MACCR; (void)GW_MACCR1; (void)GW_EXTPCR0; (void)GW_RGMII_PAD;
 	(void)vlan;
-	seq_printf(m, "L3 rc=%d  MSCR %08x -> %08x  ALECR=%08x SWTCR0=%08x  (Fork A: VID-based, NO CPU-tag)\n",
-		   rc, mscr0, mscr1, REG32(GW_ALECR), REG32(SWTCR0));
+	seq_printf(m, "L3 rc=%d  MSCR %08x -> %08x  ALECR=%08x SWTCR0=%08x SWTCR1=%08x(live,pre-set)  (Fork A: VID-based, NO CPU-tag)\n",
+		   rc, mscr0, mscr1, REG32(GW_ALECR), REG32(SWTCR0), REG32(SWTCR1));
+	{	/* spec-acl-encoding bisect: DACLRCR + ACL slot 0 (should be the catch-all permit
+		 * w7=0x07000000). If forward still drops with EN_IN_ACL on, this shows whether the
+		 * permit landed + whether DACLRCR points at the permit range. */
+		u32 acl0[11];
+		rtl865x_asic_read_entry(ASIC_TYPE_ACL_RULE, 0, acl0);
+		seq_printf(m, "  DACLRCR=%08x  ACL[0] w0=%08x w7=%08x (catch-all permit? w7 want 0x07000000)\n",
+			   REG32(GW_DACLRCR), acl0[0], acl0[7]);
+	}
 
 	/* 4. netif[0]=LAN, netif[1]=WAN (enHWRoute, 1 MAC => macMask 7, mtu 1500) */
 	memset(&nif, 0, sizeof(nif));
@@ -423,14 +649,7 @@ static int gw_prog(struct seq_file *m, void *v)
 	nif.inACLStartL = 0; nif.inACLStartH = 0; nif.inACLEnd = 3;	/* ingress ACL [0..3] permit-all */
 	nif.outACLStart = 253; nif.outACLEnd = 253;
 	rtl865x_asic_write_entry(ASIC_TYPE_NETIF, 0, &nif, true);
-	memset(&nif, 0, sizeof(nif));
-	mac_hi = (GW_MAC_WAN[0] << 21) | (GW_MAC_WAN[1] << 13) | (GW_MAC_WAN[2] << 5) | (GW_MAC_WAN[3] >> 3);
-	mac_lo = ((GW_MAC_WAN[3] & 0x7) << 16) | (GW_MAC_WAN[4] << 8) | GW_MAC_WAN[5];
-	nif.valid = 1; nif.vid = GW_VID_WAN; nif.mac18_0 = mac_lo; nif.mac47_19 = mac_hi;
-	nif.enHWRoute = 1; nif.macMaskL = 1; nif.macMaskH = 3; nif.mtu = 1500;
-	nif.inACLStartL = 0; nif.inACLStartH = 0; nif.inACLEnd = 3;	/* ingress ACL [0..3] permit-all */
-	nif.outACLStart = 253; nif.outACLEnd = 253;
-	rtl865x_asic_write_entry(ASIC_TYPE_NETIF, 1, &nif, true);
+	gw_wan_netif_prog_locked();	/* netif[1] = WAN; MTU pinned 1500 (stock parity — see gw_wan_netif_prog_locked) */
 
 	/* 5. direct routes: LAN 192.168.0.0/24 -> netif0; WAN 172.16.0.0/24 -> netif1
 	 *    process=ARP(2); ARP range 0..248 like stock. */
@@ -455,7 +674,9 @@ static int gw_prog(struct seq_file *m, void *v)
 	 * A: egress the TRUNK (flood ports 0-5; the routed frame carries the egress
 	 * netif's VID so the 8367S sends it to the right jack). CPU excluded (no loop). */
 	hal_nh  = gw_write_l2(GW_MAC_HALLAN,  0x3f, 0);	/* hal  -> trunk (LAN vid2), fid0 */
-	tiny_nh = gw_write_l2(GW_MAC_TINYWAN, 0x3f, 1);	/* tiny -> trunk (WAN vid1), fid1 — trunk-only egress (HW offload; CPU not in the path) */
+	tiny_nh = gw_wan_nexthop_prog_locked();	/* M7.2: WAN peer chain (L2 + ARP[64] + nexthop[0..1]
+						 * + PPPoE row) from the live shadows; boot default
+						 * = tiny -> trunk (WAN vid1), fid1, ethernet */
 
 	/* 5. Routes. /32 host routes FIRST (process=L2, nextHop = peer L2 idx directly —
 	 * bypasses the ARP-window hashing) so hal<->tiny resolves deterministically; the
@@ -473,30 +694,24 @@ static int gw_prog(struct seq_file *m, void *v)
 	 * (STOCK-TABLES.md:50/54/89; setter L3.c:109). Pointing it straight at the L2
 	 * entry made the ASIC walk a garbage ARP slot → fabric hang/watchdog. So add an
 	 * intermediate ARP entry {valid, nextHop=tiny_nh} and point the nexthop at IT. */
-	{
-		struct asic_arp a;
+	/* M7.2: the ARP[64] -> L2 chain and nexthop[0..1] (incl. PPPoE type=1 +
+	 * PPPoEIndex + session row) are programmed inside gw_wan_nexthop_prog_locked()
+	 * above, from the live WAN-identity shadows. */
 
-		memset(&a, 0, sizeof(a));
-		a.valid = 1;
-		a.nextHop = tiny_nh;		/* ARP → the L2 entry (tiny's MAC, trunk egress) */
-		a.aging = 0x1f;			/* max; TEACR bit0 below freezes aging anyway */
-		rtl865x_asic_write_entry(ASIC_TYPE_ARP, 64, &a, true);
-	}
-	memset(&nh, 0, sizeof(nh));
-	nh.nextHop = 64;			/* ★ ARP index (was tiny_nh = an L2 index = the hang) */
-	nh.dstVid = GW_VID_WAN;			/* egress VID 1 (WAN); NxtHopEntry has no netif field */
-	nh.IPIndex = 0;				/* -> extIP[0] : the source-rewrite IP linkage */
-	nh.type = 0;				/* ethernet (not PPPoE) */
-	rtl865x_asic_write_entry(ASIC_TYPE_NEXT_HOP, 0, &nh, true);
-	rtl865x_asic_write_entry(ASIC_TYPE_NEXT_HOP, 1, &nh, true);
-
-	/* Phase 3: WIDEN to the whole WAN /24 (was tiny /32) so ANY WAN-bound flow
-	 * engages the process=5 NAPT stage — per-flow NAT rows are now added dynamically
-	 * by the conntrack hook, not hard-coded for one dest. The nexthop group (→ARP[64]
-	 * →tiny_nh) still egresses via tiny as the single "WAN gateway" of this rig. */
+	/* M7 RETURN-PATH FIX: keep this WAN route at tiny's /32 (revert the Phase-3 /24
+	 * widening). The /24 shadowed the masquerade extIP (172.16.0.1 = the box's OWN WAN
+	 * IP): WAN->LAN replies (dst=extIP) matched this process=5,internal=0 route, were
+	 * classified OUTBOUND, and never reached the inbound reverse-NAPT stage — so the
+	 * reply was routed back out the WAN nexthop with a garbage L2 (flood, dst never
+	 * un-NAT'd), even though its outbound-hash coincidentally reloaded the inbound row's
+	 * age. At /32 the extIP matches no specific process=5 route, so the extIP-table
+	 * dst-match drives reverse-NAPT (stock topology: the WAN subnet is NOT a process=5
+	 * route). Forward hal->tiny (dst=172.16.0.2) still matches this /32 identically =>
+	 * same outbound NAT, zero forward-path risk. (Multi-dest internet still NATs via the
+	 * default routes [6]/[7]; only the bench's single WAN peer needs this /32.) */
 	memset(&nr, 0, sizeof(nr));
-	nr.ipAddr = 0xAC100000;			/* 172.16.0.0/24 = WAN subnet */
-	nr.ipMask = gw_asicmask(24); nr.valid = 1;
+	nr.ipAddr = 0xAC100002;			/* 172.16.0.2/32 = tiny (the lone WAN peer) */
+	nr.ipMask = gw_asicmask(32); nr.valid = 1;
 	nr.process = 5;				/* NAPT NextHop -> engages outbound NAT */
 	nr.internal = 0;			/* external dest => LAN->WAN direction detected */
 	nr.nhStart = 0; nr.nhNum = 0;		/* nexthop[0..1] (nhNum=0 encodes 2), nhStart<<1=0 */
@@ -523,18 +738,28 @@ static int gw_prog(struct seq_file *m, void *v)
 		u32 dead[3] = { 0 };
 		rtl865x_asic_write_entry(ASIC_TYPE_L3_ROUTING, 3, dead, true);
 	}
-	/* catch-all default route [7] -> CPU (stock has [7] 0/0 process=NxtHop; here
-	 * a plain process=CPU(4) trap so any unresolved frame reaches Linux instead
-	 * of being silently dropped — also the ingress-works probe). w0=ip0;
-	 * w1 = ipMask0 | valid(1<<5) | process=4(4<<6).
-	 * (Review note: by the gw_asicmask() convention ipMask=0 encodes /1, not /0 —
-	 * the exact /0 encoding is unconfirmed from the SDK snippets. Bench-proven to
-	 * work as the CPU trap; if a dst with top bit differing from 0.0.0.0 ever
-	 * bypasses it, this encoding is the suspect.) */
-	{
-		u32 ca[3] = { 0, (1u << 5) | (4u << 6), 0 };
-		rtl865x_asic_write_entry(ASIC_TYPE_L3_ROUTING, 7, ca, true);
-	}
+	/* M7.2: catch-all default routes [6]+[7] -> process=5 NAPT-NextHop (stock
+	 * ground truth: stock's [7] is 0/0 process=NxtHop, STOCK-TABLES.md:41). THIS
+	 * is what makes ARBITRARY internet destinations engage the L4 NAPT stage on a
+	 * real (PPPoE) WAN — without it only the bench 172.16.0.0/24 route[0] ever
+	 * NATs and every internet flow stays software-forwarded. A NAPT-row miss
+	 * still traps to the CPU (SWTCR0 NAPTR_NOT_FOUND_DROP=0), so first packets
+	 * and non-offloaded traffic keep working; the old process=CPU(4) trap at [7]
+	 * is superseded by that miss-trap path.
+	 * /0-encoding hedge: by the gw_asicmask() convention ipMask=0 encodes /1 and
+	 * the exact /0 encoding is unconfirmed (old review note kept) — so program
+	 * BOTH halves explicitly: [6]=128.0.0.0 + [7]=0.0.0.0, each ipMask=0. If
+	 * ipMask=0 really is /0, [6] is redundant but identical, hence harmless. */
+	memset(&nr, 0, sizeof(nr));
+	nr.ipAddr = 0x80000000;			/* 128.0.0.0 (top half) */
+	nr.ipMask = 0; nr.valid = 1;
+	nr.process = 5;				/* NAPT NextHop -> outbound NAT */
+	nr.internal = 0;
+	nr.nhStart = 0; nr.nhNum = 0;		/* nexthop[0..1], same proven group as route[0] */
+	nr.nhNxt = 0; nr.nhAlgo = 2; nr.IPDomain = 0;
+	rtl865x_asic_write_entry(ASIC_TYPE_L3_ROUTING, 6, &nr, true);
+	nr.ipAddr = 0;				/* 0.0.0.0 (bottom half / true default) */
+	rtl865x_asic_write_entry(ASIC_TYPE_L3_ROUTING, 7, &nr, true);
 	/* NOTE: the /32 host routes above use process=1(L2). With the RX cascade now
 	 * working, frames reach L3 but process=1 TRAPS to CPU (e0rx grows) instead of
 	 * HW-egressing to port4. Tried process=ARP(2) + static ARP entries here
@@ -559,10 +784,30 @@ static int gw_prog(struct seq_file *m, void *v)
 	{
 		struct asic_extintip ext;
 
-		REG32(SWTCR1) = 0;		/* EnL4WayH=0, L4EnHash1=0: deterministic flat table */
+		REG32(SWTCR1) = (1u << 9) | (1u << 13);	/* 0x2200 = EnL4WayH(bit9) | L4EnHash1(bit13):
+						 * VENDOR-EXACT. rtl865x_nat_init() enables enhanced-hash1
+						 * (_rtl8651_enableEnhancedHash1, nat.c:173) AND 4-way hash
+						 * (rtl865x_setNatFourWay(TRUE), nat.c:1779; "default enable in
+						 * system" == the loader's power-on SWTCR1=0x200 I measured).
+						 * Enhanced-hash1 is what makes the ASIC run INBOUND reverse-NAPT
+						 * (the verification row goes live). 4-way must ALSO stay set: the
+						 * silicon expects it (loader default) and clearing it wedged the
+						 * WHOLE L4 datapath (hwnat=1 killed even ICMP forward). Placement
+						 * is unaffected: the vendor writes rows at the plain HASH1 index
+						 * (naptTcpUdpTableIndex) in both modes, so gw_napt_hash1 stays the
+						 * physical index; 4-way only adds ways to search on lookup. Was
+						 * (1<<13) alone: clobbered EnL4WayH -> forward corruption; was 0:
+						 * enhanced-hash1 off -> replies never reverse-NAT'd, flooded the
+						 * WAN with a bogus nexthop MAC (00:00:00:00:00:10). */
 
 		memset(&ext, 0, sizeof(ext));
-		ext.externalIP = RTL865X_WAN_EXTIP;	/* 172.16.0.1 = the WAN/masquerade IP */
+		ext.externalIP = htonl(rtl865x_wan_extip);	/* NETWORK order (ASIC rewrite). M7.2 PPPoE: the LIVE masquerade IP
+							 * (rtl865x_set_wan_extip tracks the ppp0
+							 * local IP; = RTL865X_WAN_EXTIP for a
+							 * static WAN). Using the static constant
+							 * here re-stomped the dynamic extIP on
+							 * every gw_prog -> ASIC mis-NAT'd PPPoE
+							 * flows to 172.16.0.1 and they black-holed. */
 		ext.valid = 1;			/* internalIP=0 + isOne2One=0 => many-to-one */
 		ext.nextHop = 0;		/* -> nexthop[0] (tiny) for the reverse/inbound path */
 		rtl865x_asic_write_entry(ASIC_TYPE_EXT_INT_IP, 0, &ext, true);
@@ -575,9 +820,11 @@ static int gw_prog(struct seq_file *m, void *v)
 	rtl865x_asic_read_entry(ASIC_TYPE_VLAN, GW_VID_WAN, rb);
 	seq_printf(m, "  VLAN1  w0=%08x\n", rb[0]);
 	rtl865x_asic_read_entry(ASIC_TYPE_NETIF, 0, rb);
-	seq_printf(m, "  NETIF0 w0=%08x w1=%08x w3=%08x (LAN VID2)\n", rb[0], rb[1], rb[3]);
+	seq_printf(m, "  NETIF0 w0=%08x w1=%08x w2=%08x w3=%08x (LAN VID2; w2 inACLEnd=(w2>>7)&0xff want 3)\n", rb[0], rb[1], rb[2], rb[3]);
 	rtl865x_asic_read_entry(ASIC_TYPE_NETIF, 1, rb);
-	seq_printf(m, "  NETIF1 w0=%08x w1=%08x w3=%08x (WAN VID1)\n", rb[0], rb[1], rb[3]);
+	seq_printf(m, "  NETIF1 w0=%08x w1=%08x w2=%08x w3=%08x (WAN VID1; inACL[%u..%u] want [4..6])\n",
+		   rb[0], rb[1], rb[2], rb[3],
+		   (((rb[2] & 0x7f) << 1) | ((rb[1] >> 31) & 1)), ((rb[2] >> 7) & 0xff));
 	rtl865x_asic_read_entry(ASIC_TYPE_L3_ROUTING, 0, rb);
 	seq_printf(m, "  ROUTE0 w0=%08x w1=%08x (172.16.0.0/24 process=5 NAPT)\n", rb[0], rb[1]);
 	rtl865x_asic_read_entry(ASIC_TYPE_L3_ROUTING, 1, rb);
@@ -587,7 +834,17 @@ static int gw_prog(struct seq_file *m, void *v)
 	rtl865x_asic_read_entry(ASIC_TYPE_L2_SWITCH, hal_nh, rb);
 	seq_printf(m, "  L2[hal  nh=%u] w0=%08x w1=%08x\n", hal_nh, rb[0], rb[1]);
 	rtl865x_asic_read_entry(ASIC_TYPE_EXT_INT_IP, 0, rb);
-	seq_printf(m, "  EXTIP0 w0=%08x w1=%08x w2=%08x (want w1=ac100001 w2 bit0)\n", rb[0], rb[1], rb[2]);
+	seq_printf(m, "  EXTIP0 w0=%08x w1=%08x w2=%08x (want w1=%08x=live extIP, w2 bit0)\n",
+		   rb[0], rb[1], rb[2], rtl865x_wan_extip);
+	rtl865x_asic_read_entry(ASIC_TYPE_NEXT_HOP, 0, rb);
+	seq_printf(m, "  NH0    w0=%08x (type=%u pppoeIdx=%u dstVid=%u arp=%u)%s\n", rb[0],
+		   rb[0] & 1, (rb[0] >> 8) & 0x7, (rb[0] >> 5) & 0x7, (rb[0] >> 11) & 0x3ff,
+		   gw_wan_is_pppoe ? "  [PPPoE]" : "");
+	if (gw_wan_is_pppoe) {
+		rtl865x_asic_read_entry(ASIC_TYPE_PPPOE, 0, rb);
+		seq_printf(m, "  PPPOE0 w0=%08x (sid=%u age=%u)\n", rb[0],
+			   rb[0] & 0xffff, (rb[0] >> 16) & 0x7);
+	}
 	/* Phase 3: no static NAPT rows to read back — per-flow rows are dynamic (see
 	 * /proc/rtl865x_napt for a live scan of whatever the conntrack hook has installed). */
 
