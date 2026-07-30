@@ -874,3 +874,73 @@ driver uses that 5.8 removed is `mgmt_frame_register` → `update_mgmt_frame_reg
 — one shim, not a rewrite. (Consistent with what we hit: enabling the cfg80211 objects
 produced `cfg80211_inform_bss` signature errors and a `cfg80211_mgmt_tx_params`
 redefinition.)
+
+## ★★★ R4/G3 COMPLETE — the vendor driver LOADS AND RUNS on the hardware
+
+`rtl8192cd` is bound to the RTL8197F's on-SoC 2.4 GHz WMAC on real silicon, with the
+mainline rtw88 5 GHz AP still beaconing alongside it. Measured:
+
+    insmod rtl8192cd            -> rc 0
+    "Realtek WLAN driver - version 1.7", DFS 2.0.14, Adaptivity 9.3.4
+    6x rtl8192cd_init_one, RFE TYPE =0
+    netdevs: wlan0, wlan0-va0..va3, wlan0-vxd
+    /proc/interrupts:  6:  596  MIPS 6  wlan0     <- WMAC at 0xB8640000, IRQ 6, live
+
+`ifconfig wlan0 up` then ran genuine hardware init — no oops:
+
+    [97F] Bonding Type 97FS, PKG1      <- strap read by our own rtl819x_bond_option(),
+                                          independently matching the strap=10 the G2
+                                          driver measured months of analysis earlier
+    RFE type 0 ... clock 40MHz ... load efuse ok ... rom_progress
+    PHY_REG_PG_8197Fmp_Type0 ... rtl8197Ffw firmware handed to HW
+    Default BB Swing=30 ; rings allocated (RDSAR 0x01b96000, TMGDA 0x01b82000)
+
+**rtw88's 5 GHz AP is untouched** — `wlan1`/`phy1`, SSID `DIR842-OpenWrt`, ch36/80 MHz,
+and confirmed still beaconing *on air* by an external scan from the host's own WiFi
+adapter. The vendor driver never calls `pci_register_driver()` at all now (its device
+table index 0 is `TYPE_EMBEDDED`), so it cannot claim `10ec:b822`.
+
+**Image: 5.188 MB of the 7.9 MB partition** (65%), `kmod-rtl8192cd` 0.65 MB packaged.
+
+### Three findings that were load-bearing
+
+1. ★ **`CONFIG_BAND_2G_ON_WLAN0` was missing and is essential.** The on-SoC WMAC's
+   `wlan_device[]` entry is gated on it. Without it the table degenerates to three
+   all-zero `TYPE_PCI_BIOS` entries and `init_module()` only calls
+   `pci_register_driver()` — the embedded radio is never touched at all. With it:
+   `wlan_device[0] = {base 0xb8640000, irq 6}`, verified in the object file. It also
+   flips `WLANIDX` so the radio gets 2.4 GHz ring/buffer sizes.
+2. **New `8192cd_owrt_bsp.c`** supplies the two Realtek-BSP exports this tree lacks.
+   `rtl819x_bond_option()` is transcribed from the vendor's `arch/mips/rtl8197f/gpio.c`
+   and selects `ODM_CMNINFO_PACKAGE_TYPE`. `PCIE_reset_procedure_97F()` is a
+   **deliberate read-only stub** — the vendor version drives PERST# low for 300 ms,
+   which would drop the very bus rtw88's 8822BE sits on.
+3. ⚠ **Build trap:** `make modules` alone **silently skips** the undefined-symbol check
+   when `vmlinux` is absent — it returns rc=0 with undefineds present. Use
+   `make vmlinux modules`. Four undefineds were hiding behind this.
+
+### Not yet working
+
+The 2.4 GHz radio **does not beacon**: `up_flag=0`, `tx_packets=0`, and an external scan
+sees no BSS on 2412 MHz. It is *configured* (opmode 0x10 = AP, ch 1) but the vendor's
+userspace "start" step — normally driven by the vendor apmib tooling, and in our design
+by the `RTL8192CD.dat` + netifd handler already in the tree — has not been performed.
+That is the next milestone, not a regression.
+
+**Load ordering matters:** insmod *after* netifd brings the 5 GHz AP up, or the vendor
+root device grabs `wlan1` and netifd then configures the wrong interface.
+
+### Two PRE-EXISTING bench faults, both proven independent of this work
+
+- **Ethernet datapath is wedged** (100% loss, `rx_done=0`). Control: identical with
+  `rtl8192cd` **not loaded** on the same NOR image. This is the known M7 large-frame
+  CPU-RX wedge, not a driver regression.
+- ★ **The box kernel-panics every 45–90 s**, and the trigger is **traffic from the host
+  desktop**: KDE Connect (`kdeconnectd`, UDP 1716) at ~4000 pkt/s. A ~544-byte inbound
+  frame corrupts kernel memory → `Unhandled kernel unaligned access` in
+  `ep_send_events_proc`, or a SIGSEGV storm across ubusd/netifd/logd → "Attempted to
+  kill init". Proven independent two ways: it fired on a boot where the module was never
+  inserted, and with the module loaded the box survived 375 s while `eth0` was held
+  down, dying 1.1 s after `eth0` came back up. Capture in `scratchpad/bench.pcap`.
+  ⚠ Do **not** block udp 1714–1764 on the host OUTPUT chain — it also breaks the
+  loader's TFTP and ramboot stops working. Stop `kdeconnectd` instead.

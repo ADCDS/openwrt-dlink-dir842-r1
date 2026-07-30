@@ -291,4 +291,4 @@ CONFIG_LEDS_GPIO=y
 # register with mac80211 and cannot beacon yet — see the driver header.
 CONFIG_RTL8197F_WMAC=y
 # R4/G3: vendor rtl8192cd — staged, NOT enabled. See the driver's Kconfig.
-# CONFIG_RTL8192CD is not set
+CONFIG_RTL8192CD=m

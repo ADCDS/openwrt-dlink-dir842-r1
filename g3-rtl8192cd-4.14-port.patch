@@ -1,4 +1,12 @@
-# R4/G3 — rtl8192cd 3.18 -> 4.14 port. RESULT: rtl8192cd.ko LINKS (116 objects).
+# R4/G3 — rtl8192cd 3.18 -> 4.14 port for the RTL8197F on-SoC 2.4 GHz WMAC.
+# STATUS: builds, links, packages (1.9 MB stripped), and LOADS ON HARDWARE.
+#   insmod rc=0; 'Realtek WLAN driver - version 1.7'; 6x rtl8192cd_init_one
+#   /proc/interrupts: '6: 596 MIPS 6 wlan0'  <- on-SoC WMAC bound, servicing IRQs
+#   ifconfig wlan0 up -> real HW init: '[97F] Bonding Type 97FS, PKG1', RFE type 0,
+#   rtl8197Ffw firmware loaded, rings allocated, no oops.
+#   mainline rtw88 5 GHz AP UNAFFECTED (verified beaconing by external scan).
+# NOT YET: the 2.4 GHz radio does not beacon (up_flag=0) — the vendor userspace
+#   'start' step is still missing. That is the next milestone, not a regression.
 #
 # Apply against the 8devices v3.4.11e vendor tree:
 #   git clone --depth 1 --filter=blob:none --sparse \
@@ -7,19 +15,28 @@
 #   cd openwrt-8devices && git sparse-checkout set package/kernel/rtl8192cd
 #   patch -p1 < g3-rtl8192cd-4.14-port.patch
 #
-# ROOT CAUSE of the BSP_* symbol wall (measured via -E -dD on the real command
-# line, not inferred): the driver's #include <bspchip.h> sites are UNREACHABLE
-# DEAD CODE. 8192cd_osdep.c:168 gates them on CONFIG_RTL_819X, whose only
-# self-define site (8192cd_cfg.h:168) is nested under #if !defined(__LINUX_2_6__)
-# AND #if defined(CONFIG_RTL8196B|C|8198) - both false for 4.14/8197F. In the
-# vendor SDK the symbol comes from the KERNEL's .config. No -I could ever help.
-# 8192cd_hw.c uses a different dead gate, USE_RTL8186_SDK.
+# KEY POINTS
+# 1. The BSP_* wall was UNREACHABLE DEAD CODE: CONFIG_RTL_819X is never defined,
+#    so the #include <bspchip.h> sites never compile. No -I could help. Proven by
+#    preprocessing the real kbuild command line with -E -dD.
+# 2. <asm/uaccess.h> -> <linux/uaccess.h> in 14 files: 55 -> 101 objects.
+# 3. ★ CONFIG_BAND_2G_ON_WLAN0 is LOAD-BEARING. The on-SoC WMAC's wlan_device[]
+#    entry is gated on it; without it the table degenerates to all-zero TYPE_PCI_BIOS
+#    entries and init_module() only calls pci_register_driver() — the embedded radio
+#    is never touched. With it: wlan_device[0] = {base 0xb8640000, irq 6}.
+# 4. ★★ 8822BE support MUST stay compiled out. rtl8192cd_pci_tbl[] claims PCI
+#    10ec:b822; enabling it makes this driver steal the card from rtw88 and kill the
+#    working 5 GHz AP. CONFIG_PCI_HCI stays ON (descriptor/ring model, not a slot switch).
+# 5. Path B (WEXT) chosen: -DRTK_NL80211 and CONFIG_OPENWRT_SDK are OFF. Path A needs
+#    a real forward-port of 8192cd_cfg80211.c (~40 cfg80211 API errors vs backports-5.8).
+#    Stock itself is Path B — it ships NO hostapd; WPA2-PSK runs inside the driver.
+# 6. New file 8192cd_owrt_bsp.c supplies the two Realtek-BSP exports this tree lacks.
+#    PCIE_reset_procedure_97F() is a DELIBERATE read-only stub: the vendor version
+#    drives PERST# low for 300 ms, which would drop the bus rtw88's 8822BE lives on.
+# 7. ⚠ BUILD TRAP: 'make modules' alone SILENTLY SKIPS the undefined-symbol check when
+#    vmlinux is absent (reports rc=0 with undefineds present). Use 'make vmlinux modules'.
 #
-# Biggest single win: <asm/uaccess.h> -> <linux/uaccess.h> in 14 files (the
-# correct post-3.4 spelling, which pulls linux/thread_info.h first) => 55 -> 101
-# objects. Then two genuine vendor-rot fixes in Hal88XXTxDesc.c => 101 -> 116 + link.
-#
-diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192cd_cfg80211.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192cd_cfg80211.c
+diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192cd_cfg80211.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192cd_cfg80211.c
 --- a/package/kernel/rtl8192cd/8192cd_cfg80211.c	2026-07-30 13:32:13.755312079 -0300
 +++ b/package/kernel/rtl8192cd/8192cd_cfg80211.c	2026-07-30 17:28:07.495465215 -0300
 @@ -18,7 +18,7 @@
@@ -31,7 +48,7 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-
  #include <linux/unistd.h>
  #include <linux/file.h>
  #include <linux/fs.h>
-diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192cd_cfg.h /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192cd_cfg.h
+diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192cd_cfg.h /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192cd_cfg.h
 --- a/package/kernel/rtl8192cd/8192cd_cfg.h	2026-07-30 13:32:13.755312079 -0300
 +++ b/package/kernel/rtl8192cd/8192cd_cfg.h	2026-07-30 17:25:56.735559426 -0300
 @@ -202,12 +202,33 @@
@@ -108,7 +125,7 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-
 +
  #endif // _8192CD_CFG_H_
  
-diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192cd_comapi.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192cd_comapi.c
+diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192cd_comapi.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192cd_comapi.c
 --- a/package/kernel/rtl8192cd/8192cd_comapi.c	2026-07-30 13:32:13.759312068 -0300
 +++ b/package/kernel/rtl8192cd/8192cd_comapi.c	2026-07-30 17:28:07.495465215 -0300
 @@ -16,7 +16,7 @@
@@ -129,7 +146,22 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-
  	fp = filp_open(CFG_FILE_PATH, O_RDONLY, 0);
  	if(IS_ERR(fp)) {
  		ret = PTR_ERR(fp);
-diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192cd_host.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192cd_host.c
+diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192cd_dfs.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192cd_dfs.c
+--- a/package/kernel/rtl8192cd/8192cd_dfs.c	2026-07-30 13:32:13.759312068 -0300
++++ b/package/kernel/rtl8192cd/8192cd_dfs.c	2026-07-30 17:59:16.684079161 -0300
+@@ -855,7 +855,11 @@
+ 		if (timer_pending(&priv->ch_avail_chk_timer)) {
+ 			del_timer(&priv->ch_avail_chk_timer);
+ 			RTL_W8(TXPAUSE, 0xff);
++			/* R4/G3 Path B: see the identical site in 8192cd_osdep.c — the enum and
++			 * the notifier are both RTK_NL80211-only. Hardware write above is kept. */
++#ifdef RTK_NL80211
+ 			event_indicate_cfg80211(priv, NULL, CFG80211_RADAR_CAC_ABORTED, NULL);
++#endif
+ 		}
+ 		else
+ 			RTL_W8(TXPAUSE, 0xf);	/* disable transmitter */
+diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192cd_host.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192cd_host.c
 --- a/package/kernel/rtl8192cd/8192cd_host.c	2026-07-30 13:32:13.759312068 -0300
 +++ b/package/kernel/rtl8192cd/8192cd_host.c	2026-07-30 17:28:07.495465215 -0300
 @@ -22,7 +22,7 @@
@@ -141,7 +173,7 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-
  #endif
  
  #include "./8192cd_cfg.h"
-diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192cd_hw.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192cd_hw.c
+diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192cd_hw.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192cd_hw.c
 --- a/package/kernel/rtl8192cd/8192cd_hw.c	2026-07-30 13:32:13.763312057 -0300
 +++ b/package/kernel/rtl8192cd/8192cd_hw.c	2026-07-30 17:28:07.491465218 -0300
 @@ -17,7 +17,7 @@
@@ -153,7 +185,7 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-
  #include <linux/fcntl.h>
  #include <linux/fs.h>
  #include <linux/file.h>
-diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192cd_ioctl.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192cd_ioctl.c
+diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192cd_ioctl.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192cd_ioctl.c
 --- a/package/kernel/rtl8192cd/8192cd_ioctl.c	2026-07-30 13:32:13.763312057 -0300
 +++ b/package/kernel/rtl8192cd/8192cd_ioctl.c	2026-07-30 17:28:07.487465222 -0300
 @@ -15,7 +15,7 @@
@@ -165,7 +197,7 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-
  #include <linux/unistd.h>
  #include <linux/file.h>
  #include <linux/fs.h>
-diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192cd_net80211.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192cd_net80211.c
+diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192cd_net80211.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192cd_net80211.c
 --- a/package/kernel/rtl8192cd/8192cd_net80211.c	2026-07-30 13:32:13.763312057 -0300
 +++ b/package/kernel/rtl8192cd/8192cd_net80211.c	2026-07-30 17:28:07.483465225 -0300
 @@ -13,7 +13,7 @@
@@ -177,9 +209,9 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-
  #include <linux/unistd.h>
  #include <linux/file.h>
  #include <linux/fs.h>
-diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192cd_osdep.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192cd_osdep.c
+diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192cd_osdep.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192cd_osdep.c
 --- a/package/kernel/rtl8192cd/8192cd_osdep.c	2026-07-30 13:32:13.767312045 -0300
-+++ b/package/kernel/rtl8192cd/8192cd_osdep.c	2026-07-30 17:28:07.487465222 -0300
++++ b/package/kernel/rtl8192cd/8192cd_osdep.c	2026-07-30 17:58:48.524336332 -0300
 @@ -29,7 +29,7 @@
  #include <linux/major.h>
  #include <linux/fcntl.h>
@@ -189,7 +221,167 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-
  #include <linux/sched.h>
  #include <linux/kthread.h>
  #include <linux/reboot.h>
-diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192cd_proc.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192cd_proc.c
+@@ -9848,7 +9848,15 @@
+ 	if (timer_pending(&priv->ch_avail_chk_timer)) {
+ 		del_timer(&priv->ch_avail_chk_timer);
+ 		RTL_W8(TXPAUSE, 0xff);
++		/* R4/G3 Path B: event_indicate_cfg80211() lives in 8192cd_cfg80211.c and
++		 * CFG80211_RADAR_CAC_ABORTED is declared inside #ifdef RTK_NL80211
++		 * (8192cd.h). Both are absent in the WEXT build, so this notification —
++		 * which only tells the nl80211 stack a DFS CAC was aborted — is skipped.
++		 * The register write above (TXPAUSE) is the part that touches hardware and
++		 * it is unconditional. */
++#ifdef RTK_NL80211
+ 		event_indicate_cfg80211(priv, NULL, CFG80211_RADAR_CAC_ABORTED, NULL);
++#endif
+ 	}
+ 
+ #ifdef RTK_NL80211
+@@ -10640,11 +10648,22 @@
+ 	strcpy((char *)priv->pmib->dot11StationConfigEntry.dot11DesiredSSID, "RTL8186-default");
+ 	priv->pmib->dot11StationConfigEntry.dot11DesiredSSIDLen = strlen("RTL8186-default");
+ 
++	/* R4/G3 Path B: read_flash_hw_cal_data(), read_flash_hw_mac_vap() and
++	 * is_WRT_scan_iface() are all DEFINED IN 8192cd_cfg80211.c, and priv->rtk is
++	 * declared under #ifdef RTK_NL80211 (8192cd.h).  None of them exist in the WEXT
++	 * build.  The compile only warned (implicit-function-declaration is downgraded
++	 * for this driver), so without this guard they became modpost undefineds.
++	 * The #else leg restores the vendor's own pre-NL80211 default, which is the
++	 * commented-out memcpy that used to live right here.
++	 * ⚠ FOLLOW-UP: the MAC is therefore the Realtek default, not the board's. The
++	 * flash reader those functions used wants an MTD partition named "hwpart",
++	 * which does not exist in this OpenWrt layout anyway, so it would have failed
++	 * over to exactly this constant. Set the real MAC from userspace
++	 * (`ip link set wlanN address ...`) or wire it to the OpenWrt board MAC later. */
++#ifdef RTK_NL80211
+ 	if (IS_ROOT_INTERFACE(priv))
+ 		read_flash_hw_cal_data(priv);
+ 
+-//	memcpy(p, "\x00\xe0\x4c\x81\x86\x86", MACADDRLEN);
+-
+ 	name = priv->dev->name;
+ 	if (!is_WRT_scan_iface(name) && !IS_VXD_INTERFACE(priv)) {
+ 		if (IS_ROOT_INTERFACE(priv)) {
+@@ -10660,6 +10679,11 @@
+ 		else
+ 		        memcpy(p, mac, MACADDRLEN);
+ 	}
++#else
++	name = priv->dev->name;
++	(void)name; (void)mac; (void)vap_idx;
++	memcpy(p, "\x00\xe0\x4c\x81\x86\x86", MACADDRLEN);
++#endif
+ 
+ #if defined(DOT11D) || defined(DOT11H) || defined(DOT11K)
+ 	// set countryCode for 11d and 11h
+diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192cd_owrt_bsp.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192cd_owrt_bsp.c
+--- a/package/kernel/rtl8192cd/8192cd_owrt_bsp.c	1969-12-31 21:00:00.000000000 -0300
++++ b/package/kernel/rtl8192cd/8192cd_owrt_bsp.c	2026-07-30 18:06:55.696928884 -0300
+@@ -0,0 +1,103 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * 8192cd_owrt_bsp.c — R4/G3 Path B: the two Realtek-BSP entry points this vendor
++ * driver expects the *platform* to export, supplied here because this is mainline
++ * OpenWrt and not the Realtek rtl819x BSP.
++ *
++ * Both were modpost undefineds:
++ *     ERROR: "rtl819x_bond_option"     [rtl8192cd.ko] undefined!
++ *     ERROR: "PCIE_reset_procedure_97F" [rtl8192cd.ko] undefined!
++ *
++ * In the vendor SDK they live in arch/mips/rtl8197f/{gpio.c,pci.c} and are
++ * EXPORT_SYMBOL'd. This tree's arch code has neither, so they are provided here,
++ * scoped to this module.
++ */
++
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/io.h>
++#include <bspchip.h>
++
++/*
++ * rtl819x_bond_option() — read the SoC bonding strap and classify the package.
++ *
++ * Transcribed from the vendor BSP (sdk-rtl819x arch/mips/rtl8197f/gpio.c:356),
++ * byte for byte including the "no match -> 0" behaviour.
++ *
++ * This is LOAD-BEARING for RF: 8192cd_hw.c feeds the result to
++ * ODM_CmnInfoInit(ODM_CMNINFO_PACKAGE_TYPE, ...) — 97FN->2, 97FS->1, 97FB->0,
++ * anything else->1 — and package type selects which PHY/RF register set phydm
++ * programs. Getting it wrong picks a different-but-well-formed register set,
++ * which is the hardest kind of failure to spot afterwards.
++ *
++ * ★ Independently corroborated on THIS silicon: the mainline rtl8197f-wmac probe
++ * driver reads SR+0x0c[3:0] and printed 10 (0xa) => 97FS => package_type 1, which
++ * matches the RTL8197F*S* marking on the DIR-842 R1 board.
++ */
++unsigned int rtl819x_bond_option(void)
++{
++	unsigned int type, ret = 0;
++
++	type = __raw_readl((void __iomem *)BSP_BOND_OPTION) & 0xf;
++
++	switch (type) {
++	case 0x0:			/* 97FB */
++		ret = BSP_BOND_97FB;
++		break;
++	case 0x4:			/* 97FN */
++	case 0x5:
++	case 0x6:
++		ret = BSP_BOND_97FN;
++		break;
++	case 0xa:			/* 97FS  <- the DIR-842 R1 reads 0xa here */
++	case 0xb:
++	case 0xc:
++		ret = BSP_BOND_97FS;
++		break;
++	}
++
++	return ret;
++}
++
++/*
++ * PCIE_reset_procedure_97F() — DELIBERATELY NOT the vendor implementation.
++ *
++ * ★★ The vendor version (arch/mips/rtl8197f/pci.c:206) does a full PCIe bring-up:
++ * it re-clocks the PCIe IP, does an MDIO reset, resets the PCIe PHY twice, drives
++ * PERST# low for 300 ms, and then polls for link-up. On THIS box the PCIe bus
++ * carries the RTL8822BE that mainline rtw88 already owns and that serves the
++ * working 5 GHz AP. Running that sequence from this driver would drop the link and
++ * take rtw88's device out from under it — the single most destructive thing this
++ * port could do.
++ *
++ * So this is a READ-ONLY probe: it reports the current link state and never writes
++ * anything. Returning 1 means "link is up", which is exactly what the one live
++ * caller wants to hear.
++ *
++ * The only live call site is 8192cd_hw.c (~14728), inside
++ *   #if defined(CONFIG_WLAN_HAL_8197F) ... if (efuse_virtual_data.special) ...
++ *      if ((REG32(0xb8b00728) & 0x1f) != 0x11)      // link NOT up
++ *              if (PCIE_reset_procedure_97F(0,1) != 1) return -1;
++ * i.e. it is only reached when the link is already down. With rtw88 up the link IS
++ * 0x11, so that branch is not taken and this function is not called at all. The
++ * other textual call site (8192cd_osdep.c ~12533) is preprocessed out here: it
++ * needs !defined(CONFIG_NET_PCI), and 8192cd_cfg.h force-defines CONFIG_NET_PCI
++ * under NOT_RTK_BSP. Verified with nm — only 8192cd_hw.o references the symbol.
++ *
++ * If a future milestone genuinely needs the PCIe controller reset, port the vendor
++ * routine THEN, and only with rtw88 unbound first.
++ */
++int PCIE_reset_procedure_97F(unsigned int PCIeIdx, unsigned int mdioReset)
++{
++	unsigned int dbg;
++
++	dbg = __raw_readl((void __iomem *)(BSP_PCIE_RC_CFG + 0x728));
++
++	pr_warn("rtl8192cd: PCIE_reset_procedure_97F(%u,%u) called — refusing to reset "
++		"PCIe (mainline rtw88 owns the RTL8822BE on this bus). "
++		"Link state 0x%08x -> reporting %s\n",
++		PCIeIdx, mdioReset, dbg,
++		((dbg & 0x1f) == 0x11) ? "UP" : "DOWN");
++
++	return ((dbg & 0x1f) == 0x11) ? 1 : 0;
++}
+diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192cd_proc.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192cd_proc.c
 --- a/package/kernel/rtl8192cd/8192cd_proc.c	2026-07-30 13:32:13.767312045 -0300
 +++ b/package/kernel/rtl8192cd/8192cd_proc.c	2026-07-30 17:28:07.495465215 -0300
 @@ -40,7 +40,7 @@
@@ -201,7 +393,37 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-
  #endif
  
  #ifdef CONFIG_ARCH_LUNA_SLAVE
-diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192cd_security.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192cd_security.c
+diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192cd_rx.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192cd_rx.c
+--- a/package/kernel/rtl8192cd/8192cd_rx.c	2026-07-30 13:32:13.771312034 -0300
++++ b/package/kernel/rtl8192cd/8192cd_rx.c	2026-07-30 18:06:27.441080808 -0300
+@@ -6559,6 +6559,18 @@
+ 
+ }
+ 
++/* ── R4/G3 Path B ─────────────────────────────────────────────────────────────
++ * get_sta_nss() sat inside the enclosing `#if (BEAMFORMING_SUPPORT == 1)` block,
++ * but 8192cd_sme.c calls it UNCONDITIONALLY (OnAssocReq -> pstat->mimo_num).
++ * BEAMFORMING_SUPPORT is 1 only when one of CONFIG_{SLOT_0,SLOT_1,SOC}_TX_BEAMFORMING
++ * is set; this build has none (SLOT_0_TX_BEAMFORMING belonged to the 8822BE slot,
++ * which is deliberately compiled out), so the symbol vanished and modpost reported
++ * it undefined.  The function is a pure decoder of the peer's HT/VHT capability IEs
++ * — no beamforming hardware involved — so it is simply hoisted out of the guard.
++ * Closing and reopening the #if is the minimal edit that does that.
++ */
++#endif /* BEAMFORMING_SUPPORT == 1 — reopened right after get_sta_nss() */
++
+ //eric-6s
+ unsigned char get_sta_nss(struct rtl8192cd_priv *priv, struct stat_info *pstat)
+ {
+@@ -6592,6 +6604,7 @@
+ 	return nss;
+ 
+ }
++#if (BEAMFORMING_SUPPORT == 1)	/* R4/G3 Path B: reopen (see the #endif above) */
+ 
+ void check_csi_report_info(struct rtl8192cd_priv *priv, unsigned char *pframe, struct rx_frinfo *pfrinfo, unsigned int pktlen)
+ {
+diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192cd_security.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192cd_security.c
 --- a/package/kernel/rtl8192cd/8192cd_security.c	2026-07-30 13:32:13.771312034 -0300
 +++ b/package/kernel/rtl8192cd/8192cd_security.c	2026-07-30 17:28:07.483465225 -0300
 @@ -12,7 +12,7 @@
@@ -213,7 +435,7 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-
  #include <linux/module.h>
  #elif defined(__ECOS)
  #include <cyg/io/eth/rltk/819x/wrapper/sys_support.h>
-diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192cd_tx.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192cd_tx.c
+diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192cd_tx.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192cd_tx.c
 --- a/package/kernel/rtl8192cd/8192cd_tx.c	2026-07-30 13:32:13.775312022 -0300
 +++ b/package/kernel/rtl8192cd/8192cd_tx.c	2026-07-30 13:34:51.210862669 -0300
 @@ -11186,7 +11186,7 @@
@@ -234,7 +456,7 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-
  #endif
  
  	goto stop_proc;
-diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192cd_util.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192cd_util.c
+diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192cd_util.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192cd_util.c
 --- a/package/kernel/rtl8192cd/8192cd_util.c	2026-07-30 13:32:13.775312022 -0300
 +++ b/package/kernel/rtl8192cd/8192cd_util.c	2026-07-30 17:38:01.350885321 -0300
 @@ -18,6 +18,12 @@
@@ -250,7 +472,7 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-
  #include <linux/if_arp.h>
  #include <net/ipv6.h>
  #include <net/protocol.h>
-diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192d_hw.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192d_hw.c
+diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192d_hw.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192d_hw.c
 --- a/package/kernel/rtl8192cd/8192d_hw.c	2026-07-30 13:32:13.779312011 -0300
 +++ b/package/kernel/rtl8192cd/8192d_hw.c	2026-07-30 17:28:07.487465222 -0300
 @@ -5,7 +5,7 @@
@@ -262,7 +484,7 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-
  #include <asm/unistd.h>
  #endif
  
-diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/efuse_97f/string.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/efuse_97f/string.c
+diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/efuse_97f/string.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/efuse_97f/string.c
 --- a/package/kernel/rtl8192cd/efuse_97f/string.c	2026-07-30 13:32:13.819311898 -0300
 +++ b/package/kernel/rtl8192cd/efuse_97f/string.c	2026-07-30 13:34:42.174888535 -0300
 @@ -20,7 +20,7 @@
@@ -274,7 +496,7 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-
  {
  	/* Yes, Virginia, it had better be unsigned */
  	unsigned char c1, c2;
-diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/Hal8192CDMOutSrc.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/Hal8192CDMOutSrc.c
+diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/Hal8192CDMOutSrc.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/Hal8192CDMOutSrc.c
 --- a/package/kernel/rtl8192cd/Hal8192CDMOutSrc.c	2026-07-30 13:32:13.779312011 -0300
 +++ b/package/kernel/rtl8192cd/Hal8192CDMOutSrc.c	2026-07-30 17:28:07.499465212 -0300
 @@ -16,7 +16,7 @@
@@ -286,7 +508,7 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-
  #include <linux/fcntl.h>
  #include <linux/fs.h>
  #include <linux/file.h>
-diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/HalDMOutSrc.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/HalDMOutSrc.c
+diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/HalDMOutSrc.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/HalDMOutSrc.c
 --- a/package/kernel/rtl8192cd/HalDMOutSrc.c	2026-07-30 13:32:13.779312011 -0300
 +++ b/package/kernel/rtl8192cd/HalDMOutSrc.c	2026-07-30 17:28:07.495465215 -0300
 @@ -16,7 +16,7 @@
@@ -298,7 +520,7 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-
  #include <linux/fcntl.h>
  #include <linux/fs.h>
  #include <linux/file.h>
-diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/Kconfig /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/Kconfig
+diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/Kconfig /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/Kconfig
 --- a/package/kernel/rtl8192cd/Kconfig	2026-07-30 13:32:13.779312011 -0300
 +++ b/package/kernel/rtl8192cd/Kconfig	2026-07-30 13:35:34.370739016 -0300
 @@ -1,1117 +1,20 @@
@@ -1436,10 +1658,46 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-
 +	  making the two coexist is the open G4 question.
  
 +	  Say N unless you are actively working on that port.
-diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/Makefile /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/Makefile
+diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/Makefile /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/Makefile
 --- a/package/kernel/rtl8192cd/Makefile	2026-07-30 13:32:13.779312011 -0300
-+++ b/package/kernel/rtl8192cd/Makefile	2026-07-30 17:36:50.798962646 -0300
-@@ -1,3 +1,127 @@
++++ b/package/kernel/rtl8192cd/Makefile	2026-07-30 18:14:39.998865486 -0300
+@@ -1,15 +1,197 @@
++# ★★★ R4/G3 — PATH B (WEXT). This build does NOT use the vendor cfg80211 layer.
++#
++# History: -DRTK_NL80211 (further down, now off) enables the CALL SITES of the
++# vendor cfg80211/net80211 layer, while the OBJECTS carrying those definitions are
++# added only under the MAKE variable CONFIG_OPENWRT_SDK. With the flag on and the
++# make var off the module "linked" but failed modpost with ~12 undefined symbols
++# (realtek_cfg80211_*, rtk_remove_dev, psk_indicate_evt, ...). Turning the make var
++# ON did add 8192cd_net80211.o / 8192cd_psk_hapd.o / 8192cd_cfg80211.o — and then
++# 8192cd_cfg80211.c hit ~40 hard errors from cfg80211 API drift between the vendor's
++# 3.18 target and this tree's backports-5.8 headers (MEASURED, /kb-baseline.log):
++#   redefinition of 'struct cfg80211_mgmt_tx_params'
++#   cfg80211_inform_bss / cfg80211_disconnected / cfg80211_ibss_joined /
++#     cfg80211_cac_event  — signatures all changed
++#   STATION_INFO_* and SURVEY_INFO_CHANNEL_TIME* enums removed (→ NL80211_STA_INFO_*,
++#     SURVEY_INFO_TIME*), struct survey_info::channel_time* renamed to ::time*
++#   RATE_INFO_FLAGS_{40,80,160}_MHZ_WIDTH removed (→ rate_info::bw)
++# That is a real forward-port of a 5,000-line file, not a flag fix.
++#
++# ★ PATH B instead: run the driver the way STOCK runs it — a pure WEXT netdev with
++# the WPA2-PSK 4-way handshake INSIDE the driver (INCLUDE_WPA_PSK, 8192cd_psk.o +
++# 1x_*.o). Confirmed by inspection of the stock rootfs: it ships NO hostapd at all.
++# So -DRTK_NL80211 is off and CONFIG_OPENWRT_SDK stays unset; the three cfg80211
++# objects are not built and nothing references them.
++#   ⚠ Dropping RTK_NL80211 re-exposes a handful of use-sites in 8192cd_osdep.c whose
++#     DEFINITIONS are gated on it but whose USES are not. Those are now individually
++#     guarded with #ifdef RTK_NL80211 in that file — grep it for "R4/G3 Path B".
++# CONFIG_OPENWRT_SDK=y
++
++# ★★ R4/G4 CRITICAL: the 8822BE support is REMOVED from this build.
++# rtl8192cd_pci_tbl[] claims PCI 10ec:b822 under CONFIG_WLAN_HAL_8822BE, and
++# MODULE_DEVICE_TABLE + pci_register_driver are live (CONFIG_NET_PCI is force-set
++# by 8192cd_cfg.h under NOT_RTK_BSP). Leaving it on means this driver STEALS the
++# RTL8822BE from mainline rtw88 and silently kills the working 5 GHz AP — the exact
++# opposite of what R4 wants. This driver must own ONLY the on-SoC 2.4 GHz WMAC;
++# rtw88 keeps 5 GHz. CONFIG_PCI_HCI stays ON (it is the descriptor/ring model the
++# on-SoC WMAC also uses, NOT a "PCIe card present" switch).
 +# ── R4/G3 port flags ────────────────────────────────────────────────────────────
 +# Placement matters: these must come BEFORE the vendor's own EXTRA_CFLAGS blocks.
 +# Appending them at the end instead breaks the vendor's -I$(src)/WlanHAL/... paths
@@ -1512,14 +1770,17 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-
 +#    (wifi.h's NOT_RTK_BSP branch now carries wlan_amsdullcsnaphdr_t, added by this
 +#    port, so taking that branch is safe.)
 +ccflags-y += -DNOT_RTK_BSP
-+# 6) RTK_NL80211 — the vendor cfg80211/nl80211 layer. Its DEFINITIONS are gated on
-+#    this macro (struct rtl8192cd_priv::rtk at 8192cd.h:5638, the CFG80211_* enum at
-+#    :1057) while their USE sites in 8192cd_osdep.c are not, so without it the file
-+#    references members and enumerators that were never declared.
-+#    Enabling it is also the right direction for R4/G4: a WEXT-only driver cannot
-+#    share userspace with the mac80211/rtw88 stack already serving 5 GHz here, and
-+#    this layer is what gives the vendor driver a cfg80211 face.
-+ccflags-y += -DRTK_NL80211
++# 6) ✗ RTK_NL80211 — OFF (Path B, see the header). The vendor cfg80211/nl80211 layer.
++#    Its DEFINITIONS are gated on this macro (struct rtl8192cd_priv::rtk at
++#    8192cd.h:5638, the CFG80211_* enum at :1057, is_WRT_scan_iface() and
++#    event_indicate_cfg80211() in 8192cd_cfg80211.c) while a few of its USE sites in
++#    8192cd_osdep.c were not — those are now guarded in-place (see "R4/G3 Path B"
++#    markers in that file). With the macro off, the driver registers a plain WEXT
++#    netdev and does WPA2-PSK in-driver, which is exactly how stock runs (stock's
++#    rootfs has no hostapd). Coexistence with rtw88's cfg80211 5 GHz phy is not a
++#    problem: they are separate netdevs, and WEXT ioctls are still compiled into this
++#    kernel (CONFIG_WIRELESS_EXT / CONFIG_WEXT_PRIV).
++# ccflags-y += -DRTK_NL80211
 +# 7) cfg80211 band enum rename. Kernel 4.7 renamed IEEE80211_BAND_* to NL80211_BAND_*
 +#    (and IEEE80211_NUM_BANDS to NUM_NL80211_BANDS); the vendor targets 3.18 and still
 +#    uses the old spellings. Map them rather than editing the vendor sources.
@@ -1567,7 +1828,126 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-
  #
  # drivers/net/rtl8192cd
  #
-diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/Makefile.vendor /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/Makefile.vendor
+ # Makefile for the Linux Wireless network device drivers.
+ #
+ 
+-CONFIG_BAND_5G_ON_WLAN0=y
++# (G4) CONFIG_BAND_5G_ON_WLAN0=y
++# ★★★ CONFIG_BAND_2G_ON_WLAN0 — REQUIRED, and it is not cosmetic. It is what puts the
++# ON-SOC WMAC into the driver's device table at all. In 8192cd_osdep.c the only entry
++# describing the embedded radio is
++#     #if defined(CONFIG_WLAN_HAL_8197F) && defined(CONFIG_BAND_2G_ON_WLAN0)
++#     { TYPE_EMBEDDED | ACCESS_SWAP_MEM, BSP_WLAN_CONF_ADDR, BSP_WLAN_BASE_ADDR,
++#       BSP_WLAN_MAC_IRQ, NULL },
++# (there is a twin under BAND_5G_ON_WLAN0, but that one is emitted LAST — it describes
++# a board where the SoC radio is wlan1 behind a 5 GHz PCIe card in wlan0).
++# Without either macro, wlan_device[] degenerates to the three all-zero TYPE_PCI_BIOS
++# entries from the `#elif defined(NOT_RTK_BSP)` leg, and rtl8192cd_init_module() —
++# which for a MODULE build (CONFIG_WIRELESS_LAN_MODULE, RTK_NL80211 off) uses the
++# single-shot `if (wlan_index < ARRAY_SIZE(wlan_device))` with wlan_index==0 — would
++# see TYPE_PCI_BIOS at index 0 and do nothing but pci_register_driver(). The embedded
++# radio would never be touched. With this macro the SoC entry IS index 0.
++# Second effect, also correct here: 8192cd_cfg.h sets WLANIDX=1, which flips the
++# RX_BUF_LEN / RX_DESC_NUM / RX_MAX_SKB_NUM selectors so that wlandev_idx 0 (our
++# radio) gets the 2.4 GHz sizes (MAX_RX_BUF_LEN_1 / NUM_RX_DESC_2G / MAX_SKB_NUM_1)
++# instead of the 5 GHz ones. Without it a 2.4 GHz radio would be given 5 GHz rings.
++CONFIG_BAND_2G_ON_WLAN0=y
+ CONFIG_FREE_WBB_PIN=y
+ CONFIG_MAC_PHY_RF_Parameter_V702B_Skyworth=y
+ CONFIG_PCI_HCI=y
+ CONFIG_PHY_EAT_40MHZ=y
+-CONFIG_RTL_5G_SLOT_0=y
++# (G4) CONFIG_RTL_5G_SLOT_0=y
+ CONFIG_RTL_CLIENT_MODE_SUPPORT=y
+ CONFIG_RTL_COMAPI_WLTOOLS=y
+ CONFIG_RTL_DFS_SUPPORT=y
+@@ -19,29 +201,40 @@
+ CONFIG_RTL_TDLS_SUPPORT=y
+ CONFIG_RTL_VAP_SUPPORT=y
+ CONFIG_RTL_WPS2_SUPPORT=y
+-CONFIG_SLOT_0_8822BE=y
+-CONFIG_SLOT_0_RFE_TYPE_10=y
+-CONFIG_SLOT_0_TX_BEAMFORMING=y
++# (G4) CONFIG_SLOT_0_8822BE=y
++# (G4) CONFIG_SLOT_0_RFE_TYPE_10=y
++# (G4) CONFIG_SLOT_0_TX_BEAMFORMING=y
+ CONFIG_SOC_RFE_TYPE_0=y
+ CONFIG_SOC_WIFI=y
+ CONFIG_TXPWR_LMT=y
+-CONFIG_USE_PCIE_SLOT_0=y
++# (G4) CONFIG_USE_PCIE_SLOT_0=y
+ CONFIG_WIRELESS_LAN_MODULE=y
+ CONFIG_WLAN_HAL=y
+ CONFIG_WLAN_HAL_8197F=y
+-CONFIG_WLAN_HAL_8822BE=y
++# (G4) CONFIG_WLAN_HAL_8822BE=y
+ CONFIG_WLAN_HAL_88XX=y
+-CONFIG_WLAN_MACHAL_API=y
++# ★ (G4) CONFIG_WLAN_MACHAL_API=y — OFF, and it MUST follow CONFIG_WLAN_HAL_8822BE.
++# "halmac" is the RTL8822B MAC abstraction library. In the vendor Makefile its
++# objects (WlanHAL/HalMac88XX/**, incl. halmac_8822b/*) are added inside
++# `ifeq ($(CONFIG_WLAN_HAL_8822BE),y)`, so switching 8822BE off drops the whole
++# library — while this flag left the CALL alive:
++#   8192cd_osdep.c:11248  Wlan_HAL_Link() -> halmac_init_adapter(...)
++# guarded only by `if (GET_CHIP_VER(priv)==VERSION_8822B)`, i.e. dead at RUNTIME on
++# the 8197F but still a link-time reference => modpost "halmac_init_adapter undefined".
++# Verified safe to drop: grep finds ZERO halmac references under
++# WlanHAL/RTL88XX/RTL8197F/, so the on-SoC radio's HAL never uses it.
++# CONFIG_WLAN_MACHAL_API=y
+ CONFIG_RTL_819X_SWCORE=y
+ CONFIG_RTL_NO_BR_SHORTCUT=y
+ 
+ ccflags-y += -DCONFIG_RTL_COMAPI_WLTOOLS
+-ccflags-y += -DCONFIG_BAND_5G_ON_WLAN0
++# (G4) ccflags-y += -DCONFIG_BAND_5G_ON_WLAN0
++ccflags-y += -DCONFIG_BAND_2G_ON_WLAN0
+ ccflags-y += -DCONFIG_FREE_WBB_PIN
+ ccflags-y += -DCONFIG_MAC_PHY_RF_Parameter_V702B_Skyworth
+ ccflags-y += -DCONFIG_PCI_HCI
+ ccflags-y += -DCONFIG_PHY_EAT_40MHZ
+-ccflags-y += -DCONFIG_RTL_5G_SLOT_0
++# (G4) ccflags-y += -DCONFIG_RTL_5G_SLOT_0
+ ccflags-y += -DCONFIG_RTL_CLIENT_MODE_SUPPORT
+ ccflags-y += -DCONFIG_RTL_DFS_SUPPORT
+ ccflags-y += -DCONFIG_RTL_DISABLE_WLAN_MIPS16
+@@ -50,19 +243,19 @@
+ ccflags-y += -DCONFIG_RTL_TDLS_SUPPORT
+ ccflags-y += -DCONFIG_RTL_VAP_SUPPORT
+ ccflags-y += -DCONFIG_RTL_WPS2_SUPPORT
+-ccflags-y += -DCONFIG_SLOT_0_8822BE
+-ccflags-y += -DCONFIG_SLOT_0_RFE_TYPE_10
+-ccflags-y += -DCONFIG_SLOT_0_TX_BEAMFORMING
++# (G4) ccflags-y += -DCONFIG_SLOT_0_8822BE
++# (G4) ccflags-y += -DCONFIG_SLOT_0_RFE_TYPE_10
++# (G4) ccflags-y += -DCONFIG_SLOT_0_TX_BEAMFORMING
+ ccflags-y += -DCONFIG_SOC_RFE_TYPE_0
+ ccflags-y += -DCONFIG_SOC_WIFI
+ ccflags-y += -DCONFIG_TXPWR_LMT
+-ccflags-y += -DCONFIG_USE_PCIE_SLOT_0
++# (G4) ccflags-y += -DCONFIG_USE_PCIE_SLOT_0
+ ccflags-y += -DCONFIG_WIRELESS_LAN_MODULE
+ ccflags-y += -DCONFIG_WLAN_HAL
+ ccflags-y += -DCONFIG_WLAN_HAL_8197F
+-ccflags-y += -DCONFIG_WLAN_HAL_8822BE
++# (G4) ccflags-y += -DCONFIG_WLAN_HAL_8822BE
+ ccflags-y += -DCONFIG_WLAN_HAL_88XX
+-ccflags-y += -DCONFIG_WLAN_MACHAL_API
++# (G4) ccflags-y += -DCONFIG_WLAN_MACHAL_API   <- see the make-var block above
+ ccflags-y += -DCONFIG_RTL_819X_SWCORE
+ ccflags-y += -DCONFIG_RTL_NO_BR_SHORTCUT
+ 
+@@ -350,6 +543,10 @@
+ 	endif
+ endif
+ 
++# R4/G3 Path B: replacements for the two Realtek-BSP exports this tree's arch code
++# does not have (rtl819x_bond_option, PCIE_reset_procedure_97F). See the file header.
++rtl8192cd-objs += 8192cd_owrt_bsp.o
++
+ rtl8192cd-objs +=\
+ 	8192cd_tx.o\
+ 	8192cd_rx.o\
+diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/Makefile.vendor /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/Makefile.vendor
 --- a/package/kernel/rtl8192cd/Makefile.vendor	1969-12-31 21:00:00.000000000 -0300
 +++ b/package/kernel/rtl8192cd/Makefile.vendor	2026-07-30 13:35:34.370739016 -0300
 @@ -0,0 +1,663 @@
@@ -2234,7 +2614,7 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-
 +	@echo $(TXPWR_LMT_FNAME_92D) > $(obj)/tmp_TXPWR
 +	$(obj)/tplmt2h.pl < $(obj)/tmp_TXPWR > $@
 +	rm -f $(obj)/tmp_TXPWR	
-diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/mesh_ext/mesh_proc.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/mesh_ext/mesh_proc.c
+diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/mesh_ext/mesh_proc.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/mesh_ext/mesh_proc.c
 --- a/package/kernel/rtl8192cd/mesh_ext/mesh_proc.c	2026-07-30 13:32:13.819311898 -0300
 +++ b/package/kernel/rtl8192cd/mesh_ext/mesh_proc.c	2026-07-30 17:28:07.499465212 -0300
 @@ -18,14 +18,14 @@
@@ -2254,7 +2634,7 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-
  #endif
  #include <linux/module.h>
  #endif
-diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/mesh_ext/mesh_tx.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/mesh_ext/mesh_tx.c
+diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/mesh_ext/mesh_tx.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/mesh_ext/mesh_tx.c
 --- a/package/kernel/rtl8192cd/mesh_ext/mesh_tx.c	2026-07-30 13:32:13.819311898 -0300
 +++ b/package/kernel/rtl8192cd/mesh_ext/mesh_tx.c	2026-07-30 13:34:51.214862657 -0300
 @@ -161,7 +161,7 @@
@@ -2266,7 +2646,7 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-
  #endif
  
  	return 1;
-diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/romeperf.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/romeperf.c
+diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/romeperf.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/romeperf.c
 --- a/package/kernel/rtl8192cd/romeperf.c	2026-07-30 13:32:13.879311726 -0300
 +++ b/package/kernel/rtl8192cd/romeperf.c	2026-07-30 17:28:07.483465225 -0300
 @@ -19,7 +19,7 @@
@@ -2278,7 +2658,7 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-
  #include <asm/rlxregs.h>
  #ifdef CONFIG_WIRELESS_LAN_MODULE
  #define __IRAM
-diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/rtw_android.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/rtw_android.c
+diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/rtw_android.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/rtw_android.c
 --- a/package/kernel/rtl8192cd/rtw_android.c	2026-07-30 13:32:13.879311726 -0300
 +++ b/package/kernel/rtl8192cd/rtw_android.c	2026-07-30 13:34:42.174888535 -0300
 @@ -276,7 +276,7 @@
@@ -2290,7 +2670,7 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-
  			break;
  
  	return cmd_num;
-diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/wifi.h /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/wifi.h
+diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/wifi.h /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/wifi.h
 --- a/package/kernel/rtl8192cd/wifi.h	2026-07-30 13:32:13.879311726 -0300
 +++ b/package/kernel/rtl8192cd/wifi.h	2026-07-30 16:25:30.591335674 -0300
 @@ -1,3 +1,13 @@
@@ -2356,7 +2736,7 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-
  __PACK struct ht_cap_elmt
  {
  	UINT16	ht_cap_info					__WLAN_ATTRIB_PACK__;
-diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/WlanHAL/RTL88XX/Hal88XXTxDesc.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/WlanHAL/RTL88XX/Hal88XXTxDesc.c
+diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/WlanHAL/RTL88XX/Hal88XXTxDesc.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/WlanHAL/RTL88XX/Hal88XXTxDesc.c
 --- a/package/kernel/rtl8192cd/WlanHAL/RTL88XX/Hal88XXTxDesc.c	2026-07-30 13:32:13.811311920 -0300
 +++ b/package/kernel/rtl8192cd/WlanHAL/RTL88XX/Hal88XXTxDesc.c	2026-07-30 17:30:52.003324834 -0300
 @@ -464,10 +464,15 @@
