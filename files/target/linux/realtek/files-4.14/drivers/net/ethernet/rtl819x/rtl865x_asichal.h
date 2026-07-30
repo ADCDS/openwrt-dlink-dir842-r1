@@ -29,7 +29,13 @@
 #define RTL865X_WAN_EXTIP	0xAC100001	/* 172.16.0.1 = BOOT-DEFAULT masquerade IP (extIP[0]);
 						 * M7.2: the LIVE value is rtl865x_wan_extip — dynamic,
 						 * = the WAN (ppp0) local IPv4, learned per-flow */
-#define RTL865X_NAPT_ROWS	1024		/* flat 1-way L4 table depth (SWTCR1 EnL4WayH=0) */
+#define RTL865X_NAPT_ROWS	1024		/* L4 flow-table depth. ★ Software addresses this table FLAT (0..1023)
+						 * REGARDLESS of SWTCR1 EnL4WayH: the vendor never transforms the
+						 * index for 4-way (rtl865x_asicL4.c:227 just bounds-checks against
+						 * 1024), and _Is4WayHashEnabled() has no callers at all. The 4-way
+						 * associativity is internal to the ASIC lookup. The old text here
+						 * said "EnL4WayH=0", which is wrong (the code sets bit 9, matching
+						 * stock) and cost a wrong-turn hypothesis. */
 #define RTL865X_PPPOE_TBL_SIZE	8		/* type-11 PPPoE session table depth (vendor RTL8651_PPPOETBL_SIZE) */
 /* 6-bit "differentiated timer" reload value written to every TEATCR proto field and
  * to a freshly-added row's agingTime. 0x11 ≈ 102 s of idle life before the ASIC

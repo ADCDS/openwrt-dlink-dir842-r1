@@ -557,3 +557,57 @@ Next step for whoever picks this up: determine, from `rtl865x_asicL4.c`'s four-w
 helpers in the preserved SDK (`dir842-build/sdk-rtl819x/`), how a 10-bit index maps to
 (set, way) when `EnL4WayH=1`, and whether `rtl819x_hwnat.c` should be writing the
 inbound row at a different physical row than it currently computes.
+
+### The 4-way candidate is FALSIFIED too — from vendor source
+
+The previous entry proposed that `EnL4WayH=1` makes the L4 table 4-way (256 sets ×
+4 ways) so a 10-bit index should decompose into set+way, and that this port writing
+rows "as if flat" was the remaining bug. **That is wrong**, settled from the vendor
+source rather than by another hardware experiment:
+
+- `EnL4WayH` is `(1 << 9)` (`AsicDriver/rtl865xc_asicregs.h:1587`) — the port's bit
+  position is correct.
+- `_Is4WayHashEnabled()` (`AsicDriver/rtl865x_asicL4.c:63`) exists but has **no callers
+  anywhere in the SDK**. Nothing in the vendor driver ever branches on it.
+- `rtl8651_setAsicNaptTcpUdpTable()` (`rtl865x_asicL4.c:227`) does **not** transform the
+  index for 4-way at all. It bounds-checks `index >= RTL8651_TCPUDPTBL_SIZE` (1024) and
+  writes that row directly.
+
+So the vendor addresses the flow table as a **flat 1024-entry array regardless of the
+4-way bit** — the associativity is internal to the ASIC's *lookup*, not to how software
+addresses rows. This port's flat addressing is therefore already stock-identical, and
+the "flat vs set/way mismatch" theory is dead. The stale comment on
+`RTL865X_NAPT_ROWS` (which says `EnL4WayH=0`) is simply out of date; the code setting
+bit 9 is correct and matches stock.
+
+### R6 — where this genuinely leaves things
+
+Everything reachable from stock's flow-creation path has now been decoded, implemented
+and measured, and every candidate is exhausted:
+
+| candidate | status |
+|---|---|
+| row encoding / hash / index / byte order / aging / commit | proven IDENTICAL to stock |
+| extIP `/32` process=2 route | falsified (early, later shown confounded) |
+| dst-MAC→TOCPU ACL rule | falsified |
+| extIP `nextHop` | falsified (stock writes 0 too) |
+| `SWTCR0.WANRouteMode=ToCpu` | falsified (stock uses Forward too) |
+| B1 WAN connected route as `RT_ARP` | implemented — no effect |
+| B2 LAN-host ARP entry (index = `arpsta + host`) | implemented — no effect |
+| B3 collision prefill, init-only | implemented — no effect (harmful only if applied to teardown) |
+| B4 SWTCR1 trap bits | implemented — no effect |
+| 4-way set/way index mapping | **falsified from source — vendor addresses flat** |
+
+Forward offload is healthy throughout (147 vs 382 CPU pkt/MB = −61%).
+
+**The honest conclusion: the reason inbound does not engage is not visible anywhere in
+the vendor's software path.** Software-side, this port now does what stock does. What
+has never been observed is stock's *hardware* behaviour with a live inbound flow — the
+one thing static analysis cannot supply. That means the original plan was right after
+all about the last resort, and it is now the ONLY remaining step: boot stock from the
+8 MB backup with a real NAT flow running and dump the live L4 table to see what its
+inbound row actually looks like in silicon versus what we write.
+
+⚠ That step overwrites the working OpenWrt install on NOR (stock exists only in the
+backup), so it needs an explicit decision from the operator rather than being done
+opportunistically. Everything short of it has been done.
