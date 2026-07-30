@@ -35,6 +35,14 @@ DEFINE_MUTEX(rtl865x_hal_lock);
 /* R6: SWTCR0 WANRouteMode (bits[4:3]) — 0=Forward, 1=ToCpu, 2=Drop. Default 0 =
  * the known-good configuration this tree has run on. See the write site in gw_prog()
  * for the full rationale and the A/B procedure. */
+/* R6/B1: restore the WAN CONNECTED route (172.16.0.0/24, process=RT_ARP) that stock
+ * always programs for a netif's own subnet. Default 0 = the known-good forward-path
+ * config this tree has run on; 1 = the R6 candidate. See the write site in gw_prog(). */
+static int wan_connected_route;
+module_param(wan_connected_route, int, 0644);
+MODULE_PARM_DESC(wan_connected_route,
+		 "R6: program the WAN connected /24 as process=RT_ARP at route idx3 (0=off default, 1=on). Re-run `cat /proc/rtl865x_gw` to apply.");
+
 static int wan_route_mode;
 module_param(wan_route_mode, int, 0644);
 MODULE_PARM_DESC(wan_route_mode,
@@ -814,10 +822,66 @@ static int gw_prog(struct seq_file *m, void *v)
 	rt.ipMask = gw_asicmask(24); rt.valid = 1; rt.process = 2; rt.netif = 0;
 	rt.internal = 1; rt.ARPStart = 0; rt.ARPEnd = 31;
 	rtl865x_asic_write_entry(ASIC_TYPE_L3_ROUTING, 2, &rt, true);
-	/* Phase 3: the WAN 172.16.0.0/24 is now the process=5 NAPT route at idx0 (above);
-	 * the old process=2 direct WAN /24 that used to live at idx3 is REMOVED so it can't
-	 * shadow NAPT. Force-invalidate idx3 in case a warm reload left the stale entry. */
-	{
+	/* ── R6/B1: the WAN CONNECTED route, in stock's shape ────────────────────────
+	 * ★★★ This is the leading hypothesis for why inbound (WAN->LAN) reverse-NAPT
+	 * never engages, and it comes from diffing stock's route construction against
+	 * ours rather than from guessing another mode bit.
+	 *
+	 * The problem: nothing here matches the box's OWN masquerade IP (the extIP,
+	 * 172.16.0.1). It therefore falls through to the catch-all [6]/[7], which are
+	 * `process=5 (NxtHop), internal=0`. This port has ALREADY PROVEN on hardware
+	 * what that does (commit 9562db2): a WAN->LAN reply whose dst is the extIP
+	 * matches a process=5/internal=0 route, gets classified OUTBOUND, and so never
+	 * reaches the inbound reverse-NAPT stage at all. The /24 was narrowed to a /32
+	 * to kill that shadow — and then [6]/[7] re-introduced exactly the same shadow,
+	 * which is why inbound has not worked since.
+	 *
+	 * Stock never has that shadow. For an ethernet netif with a connected subnet the
+	 * vendor always uses process=RT_ARP(2), never RT_NEXTHOP(5)
+	 * (l3Driver/rtl865x_route.c:621-653): it sets process=RT_ARP, allocates a real
+	 * ARP range, and stores ARPIpIdx = the ext/int-IP table row for that subnet. So
+	 * on stock the subnet CONTAINING the box's own WAN IP is process=2/internal=0
+	 * and the extIP-table dst-match drives reverse-NAPT.
+	 *
+	 * Restored here at idx3 — more specific than [6]/[7], less specific than the
+	 * peer /32 at idx0, so the proven forward path is untouched (route[0] still wins
+	 * for 172.16.0.2).
+	 *
+	 * ⚠ ARPStart/ARPEnd are stored SHIFTED >>3 (asicL3.c:190-191), so 0..31 here
+	 * means raw ARP rows 0..255 — which is what stock's live route reads back as
+	 * (ARPSTART 0 / ARPEND 248). The existing value was already stock-equivalent.
+	 *
+	 * ⚠ Companion gap NOT fixed here (R6/B2): stock tears NAPT rows down with the
+	 * ARP entry because a process=2 route DROPS unless its ARP range holds a
+	 * resolved entry for the destination. This port programs exactly one ARP row
+	 * (64 = the WAN peer) and none for any LAN host, so after a reverse-NAPT hit the
+	 * dst becomes 192.168.0.2 and there is no HW path to it — route[1] is process=1
+	 * and traps to the CPU instead. Placing that entry needs the ASIC's ARP hash,
+	 * which is not yet decoded (a previous attempt at static ARP rows made frames
+	 * drop outright). So B1 alone may move the classification without yet giving a
+	 * fully HW-forwarded return path.
+	 *
+	 * Runtime knob, default OFF, because this rewrites a slot on the proven forward
+	 * datapath. A/B it in one boot:
+	 *   echo 1 > /sys/module/rtl819x/parameters/wan_connected_route
+	 *   cat /proc/rtl865x_gw >/dev/null        # re-runs gw_prog
+	 * R6 signal: eth0.1 rx_packets delta during a sustained inbound transfer
+	 * collapsing toward 0 (measure warm; see bench confound #5).
+	 */
+	if (wan_connected_route) {
+		memset(&rt, 0, sizeof(rt));
+		rt.ipAddr = 0xAC100000;		/* 172.16.0.0/24 — CONTAINS the extIP .1 */
+		rt.ipMask = gw_asicmask(24);
+		rt.valid = 1;
+		rt.process = 2;			/* RT_ARP: stock's connected-subnet process */
+		rt.netif = 1;			/* WAN netif */
+		rt.internal = 0;		/* WAN side = external */
+		rt.ARPStart = 0; rt.ARPEnd = 31;	/* stored >>3 => raw rows 0..255 */
+		rt.ARPIpIdx = 0;		/* extIP table row holding the WAN IP */
+		rtl865x_asic_write_entry(ASIC_TYPE_L3_ROUTING, 3, &rt, true);
+	} else {
+		/* Phase 3 default: keep idx3 dead so a stale warm-reload entry cannot
+		 * shadow the process=5 NAPT route at idx0. */
 		u32 dead[3] = { 0 };
 		rtl865x_asic_write_entry(ASIC_TYPE_L3_ROUTING, 3, dead, true);
 	}
@@ -912,6 +976,13 @@ static int gw_prog(struct seq_file *m, void *v)
 	seq_printf(m, "  ROUTE0 w0=%08x w1=%08x (172.16.0.0/24 process=5 NAPT)\n", rb[0], rb[1]);
 	rtl865x_asic_read_entry(ASIC_TYPE_L3_ROUTING, 1, rb);
 	seq_printf(m, "  ROUTE1 w0=%08x w1=%08x (192.168.0.2/32 hal)\n", rb[0], rb[1]);
+	/* R6/B1 readback: slot 3 is the WAN connected route (process=RT_ARP) when the
+	 * wan_connected_route knob is armed, and must read back valid for any inbound
+	 * measurement to mean anything. w1 bits: valid|process<<1|... — process 2 and a
+	 * non-zero w0 = the route landed. */
+	rtl865x_asic_read_entry(ASIC_TYPE_L3_ROUTING, 3, rb);
+	seq_printf(m, "  ROUTE3 w0=%08x w1=%08x (WAN connected /24 process=ARP; knob=%d)\n",
+		   rb[0], rb[1], wan_connected_route);
 	rtl865x_asic_read_entry(ASIC_TYPE_L2_SWITCH, tiny_nh, rb);
 	seq_printf(m, "  L2[tiny nh=%u] w0=%08x w1=%08x\n", tiny_nh, rb[0], rb[1]);
 	rtl865x_asic_read_entry(ASIC_TYPE_L2_SWITCH, hal_nh, rb);

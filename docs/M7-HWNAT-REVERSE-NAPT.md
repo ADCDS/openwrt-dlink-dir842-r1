@@ -349,3 +349,67 @@ from the 8 MB backup with a real NAT flow running and dump the live MSCR / SWTCR
 SWTCR1 / DACLRCR plus an actual inbound L4 row, then diff against what this port
 programs. Every register-level guess is now exhausted; the remaining unknown is what
 stock's inbound row actually looks like.
+
+## R6 ground truth WITHOUT booting stock — the row encoding is NOT the bug
+
+The plan said the remaining path was a live stock register dump. That turned out to
+be unnecessary: the row *construction* is in the stock binary, so the encoding can be
+decoded statically. It was, function by function, and diffed against this port.
+
+**Well-evidenced negative first.** The inbound row's layout, its hash, its index, its
+byte order, its aging seed and its commit protocol are **identical** between stock and
+this port. Specifically confirmed:
+- Row packing `rtl8651_setAsicNaptTcpUdpTable` @`0x8019e1e4` — every field matches
+  `rtl819x_hwnat.c:244-292`. `collision`/`collision2` are hardwired 1 by `ori 0x4002`.
+- Stock writes exactly TWO rows per flow (`rtl865x_addNaptConnection` @`0x801ae830`):
+  outbound at index `out`, inbound at index `in`, with
+  `offset_o = extPort>>10`, `selE_o = extPort & 0x3ff`, and inbound
+  `offset_i = extPort & 0x3f`, `selIP_i = (extPort>>6) & 0xf`,
+  `selE_i = very & 0x3ff` where `very = HASH(proto|2, htonl(remIp), htons(remPort),0,0)`.
+  TCPFlag 3 outbound / 2 inbound. This is exactly what the port already programs.
+- All hash inputs are NETWORK order; `gw_napt_hash1()` is a verbatim correct
+  transcription of `rtl8651_naptTcpUdpTableIndex` @`0x8019df88`.
+- There is **no** separate NAPTR table, no per-flow ACL entry, no per-entry
+  inbound-enable bit, and no per-row nexthop in use (`NHIDX`/`NHIDXValid` are 0).
+
+So four falsified candidates plus this: the row is not where the bug lives.
+
+**What actually differs (the roadmap):**
+
+| # | item | stock | this port |
+|---|---|---|---|
+| B1 ★★★ | route matching the **extIP** | WAN connected /24, `process=2 (RT_ARP)`, `internal=0`, `ARPIpIdx`=extIP row (`rtl865x_route.c:621-653`) | falls through to `[6]/[7]` `process=5, internal=0` |
+| B2 ★★ | ARP entry for the **LAN host** | always resolved; NAPT rows torn down with the ARP | only ARP row 64 = the WAN peer; none for any LAN host |
+| B3 ★★ | L4 table init | prefills all 1024 rows `collision=1, collision2=1, valid=0` (`0x801af5d8`) | never initialised; clear writes an all-zero row |
+| B4 ★ | SWTCR1 | read-modify-write, ends ⊇ `0x2E00` (adds EnNATT2LOG 0x400, ENFRAGTOACLPT 0x800) | absolute `= 0x2200`, clearing bits 10/11 |
+
+B1 matters because this port has **already proven on hardware** (commit `9562db2`)
+that a `process=5, internal=0` route on the extIP classifies a WAN→LAN reply as
+OUTBOUND, so the reverse stage never runs. The /24 was narrowed to a /32 to kill that
+shadow — and `[6]`/`[7]` then re-introduced it.
+
+**B1 implemented and tested — insufficient ALONE.** Added as a runtime knob
+(`/sys/module/rtl819x/parameters/wan_connected_route`, default 0) writing the WAN
+connected /24 as `process=2` at route idx3. Measured, warm, same method both arms:
+
+    B1 off : 23,420 CPU pkt / 61.2 MB = 382 CPU pkt/MB
+    B1 on  : 22,593 CPU pkt / 61.2 MB = 369 CPU pkt/MB
+
+~3% — noise, not the collapse toward 0 that hardware reverse would produce. It does
+NOT break anything (LAN and NAT both 0% with it armed), which incidentally confirms
+the old "extIP /32 process=2 black-holed" note was itself confounded.
+
+⚠ Caveat on this negative: **B2 is a stated prerequisite, not an independent item.**
+A `process=2` route DROPS unless its ARP range holds a resolved entry for the
+destination, and this port has no LAN-host ARP entry at all — so B1 alone cannot
+produce a fully hardware-forwarded return path. Testing B1+B2 together needs the
+ASIC's ARP hash, which is still undecoded (an earlier static-ARP attempt made frames
+drop outright). Treat B1 as "necessary, not sufficient — retest with B2".
+
+**Two doc corrections** from the same pass: `ASIC-ENGINE.md` §3 has
+`_rtl8651_addAsicEntry` (`0x801910c8`, SWTACR=3) and `_rtl8651_forceAddAsicEntry`
+(`0x80191188`, SWTACR=9) **swapped**; and `0xBB804418` is SWTCR0 (ALE_BASE+0x18) whose
+bits 18/19 are `EN_STOP_TLU`/`STOP_TLU_READY`, not a generic trigger/done pair.
+
+The full vendor SDK used as documentation is preserved at `dir842-build/sdk-rtl819x/`
+(529 MB); stock disassembly dumps are in `dir842-build/ke/`.
