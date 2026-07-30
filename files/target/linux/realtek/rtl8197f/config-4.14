@@ -270,3 +270,19 @@ CONFIG_PCI=y
 CONFIG_PCI_DRIVERS_LEGACY=y
 CONFIG_PCI_DOMAINS=y
 # CONFIG_PCI_DRIVERS_GENERIC is not set
+# R3: LED provider. The trigger infrastructure was already on (LEDS_CLASS,
+# LEDS_TRIGGERS, LEDS_TRIGGER_NETDEV/TIMER/DEFAULT_ON, SWCONFIG_LEDS,
+# LED_TRIGGER_PHY) but there was NO GPIO LED driver, so the board had zero usable
+# LEDs and the gpio-leds DT node could not bind even when uncommented.
+CONFIG_LEDS_GPIO=y
+# R1: CRASHLOG OFF. ⚠ This line alone is NOT sufficient — the real switch is
+# `# CONFIG_KERNEL_CRASHLOG is not set` in the top-level .config (and the seed), because
+# CONFIG_KERNEL_* knobs are injected AFTER this merge and silently win. Kept here so the
+# intent is visible where the kernel config lives.
+# OpenWrt's crashlog handler (hack-4.14/930-crashlog.patch) itself faults on this SoC —
+# crashlog_printf() dies on a bogus 0x00000c00 access from inside die(), so the FIRST
+# oops is never printed: instead the box emits an unbounded recursion (observed
+# "Oops[#448]", PID 0, task.stack=NULL) that fills the console and hangs the boot. That
+# recursion is what has been masking the real flash-boot crash (#11). With this off the
+# genuine first trace reaches the console and can be root-caused.
+# CONFIG_CRASHLOG is not set

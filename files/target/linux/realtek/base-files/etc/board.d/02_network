@@ -7,7 +7,14 @@
 board_config_update
 board=$(cat /tmp/sysinfo/board_name)
 
-ucidef_set_interfaces_lan_wan "eth0" "eth1"
+# R3: this used to say "eth0" "eth1". There IS no eth1 on the DIR-842 R1 — the SoC has a
+# single CPU-port netdev and Linux splits it into eth0.2 (LAN, VID2) / eth0.1 (WAN, VID1).
+# The phantom eth1 had a real consequence: config_generate emitted a wan_eth1_dev device
+# section and hung the per-unit WAN MAC off a device that never appears, so eth0.1 silently
+# inherited eth0's (LAN) MAC. The ASIC programs its WAN netif from eth0.1's live MAC and
+# rewrites HW-routed egress src to it, so LAN==WAN MAC breaks the LAN=WAN+1 invariant and
+# blackholes CPU<->WAN traffic while HW-routed frames still work. Name the real devices.
+ucidef_set_interfaces_lan_wan "eth0.2" "eth0.1"
 
 lan_mac=""
 wan_mac=""
@@ -24,9 +31,19 @@ case $board in
     lan_mac=$(macaddr_add "$wan_mac" 1)
     ;;
   gwr1200ac-v1)
-    # DIR-842: MAC lives in the dedicated read-only MAC partition (abs 0x20013
-    # = MAC-relative 0x13). Was 'boot 131091' under the old single-boot map.
-    wan_mac=$(mtd_get_mac_binary MAC 19)
+    # DIR-842 R1: the mtd1 "MAC" partition carries TWO overlaid schemas.
+    #   0x00: D-Link per-unit base MAC as an 17-byte ASCII string ("e0:1c:fc:51:c9:ee")
+    #         = the WAN MAC; LAN = WAN + 1. This is what stock uses (libhwdata.so).
+    #   0x13: the Realtek vendor DEFAULT binary macAddr[] block (00:e0:4c:81:96:c1..c8),
+    #         identical on every unit.
+    # We used to read offset 19 (=0x13), i.e. the shared Realtek default, so every board
+    # came up with the same MAC. Read the ASCII field instead and fall back to the old
+    # behaviour if it is missing/garbage (some units may have an unprogrammed partition).
+    wan_mac=$(dd if=/dev/mtd1 bs=1 count=17 2>/dev/null)
+    case "$wan_mac" in
+      [0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]) ;;
+      *) wan_mac=$(mtd_get_mac_binary MAC 19) ;;
+    esac
     lan_mac=$(macaddr_add "$wan_mac" 1)
     ;;
   gwr1200ac-v2)

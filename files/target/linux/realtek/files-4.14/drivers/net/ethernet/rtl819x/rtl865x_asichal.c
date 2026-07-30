@@ -15,6 +15,8 @@
 #include <linux/seq_file.h>
 #include <linux/string.h>
 #include <linux/mutex.h>
+#include <linux/netdevice.h>	/* R3: read the live netif MACs (see gw_netif_mac) */
+#include <linux/etherdevice.h>
 
 #include "rtl819x_regs.h"
 #include "rtl865x_asichal.h"
@@ -180,9 +182,40 @@ int rtl865x_asic_read_entry(u32 type, u32 idx, void *entry)
 
 #define GW_VID_LAN		RTL865X_VID_LAN		/* 2 (shared w/ rtl819x_hwnat.c) */
 #define GW_VID_WAN		RTL865X_VID_WAN		/* 1 */
-/* box LAN MAC = OpenWrt eth0 (00:e0:4c:81:96:c2); WAN MAC = +1 */
+/* FALLBACK MACs only — the Realtek vendor defaults from mtd1+0x13. Real units carry a
+ * per-unit MAC as an ASCII string at mtd1+0x00 (e.g. e0:1c:fc:51:c9:ee, with LAN = +1),
+ * which stock reads via libhwdata.so; see docs/VENDOR-PARITY-INVENTORY.md. */
 static const u8 GW_MAC_LAN[6] = { 0x00,0xe0,0x4c,0x81,0x96,0xc2 };
 static const u8 GW_MAC_WAN[6] = { 0x00,0xe0,0x4c,0x81,0x96,0xc3 };
+
+/*
+ * R3: program the ASIC netif from the LIVE Linux interface MAC, falling back to the
+ * constants above.
+ *
+ * The ASIC netif MAC is what the L3 engine matches to decide "this frame is addressed to
+ * me" (routing/NAT vs bridging). It MUST equal the Linux interface MAC — if the two
+ * disagree, every CPU<->WAN packet blackholes. Previously both sides were pinned to the
+ * compiled-in Realtek defaults (and uci-defaults re-asserted the same values), which is
+ * why the per-unit MAC could never be used. Reading the netdev here means whatever
+ * userspace configures — including a MAC derived from flash by board.d — automatically
+ * becomes the ASIC's netif MAC, keeping the two consistent by construction.
+ */
+static void gw_netif_mac(const char *ifname, const u8 *fallback, u8 out[ETH_ALEN])
+{
+	struct net_device *dev = dev_get_by_name(&init_net, ifname);
+
+	if (dev) {
+		if (is_valid_ether_addr(dev->dev_addr))
+			ether_addr_copy(out, dev->dev_addr);
+		else
+			ether_addr_copy(out, fallback);
+		dev_put(dev);
+	} else {
+		/* gw_prog can run before the VLAN netdevs exist (e.g. the rc.local
+		 * read at boot); the fallback keeps that path working unchanged. */
+		ether_addr_copy(out, fallback);
+	}
+}
 
 static void gw_set_pvid(u32 port, u32 pvid)
 {
@@ -401,10 +434,12 @@ static void gw_wan_netif_prog_locked(void)
 {
 	struct asic_netif nif;
 	u32 mac_hi, mac_lo;
+	u8 mac[ETH_ALEN];
 
 	memset(&nif, 0, sizeof(nif));
-	mac_hi = (GW_MAC_WAN[0] << 21) | (GW_MAC_WAN[1] << 13) | (GW_MAC_WAN[2] << 5) | (GW_MAC_WAN[3] >> 3);
-	mac_lo = ((GW_MAC_WAN[3] & 0x7) << 16) | (GW_MAC_WAN[4] << 8) | GW_MAC_WAN[5];
+	gw_netif_mac("eth0.1", GW_MAC_WAN, mac);	/* R3: per-unit MAC if userspace set one */
+	mac_hi = (mac[0] << 21) | (mac[1] << 13) | (mac[2] << 5) | (mac[3] >> 3);
+	mac_lo = ((mac[3] & 0x7) << 16) | (mac[4] << 8) | mac[5];
 	nif.valid = 1; nif.vid = GW_VID_WAN; nif.mac18_0 = mac_lo; nif.mac47_19 = mac_hi;
 	nif.enHWRoute = 1; nif.macMaskL = 1; nif.macMaskH = 3;
 	nif.mtu = 1500;	/* ALWAYS 1500, even on PPPoE — stock parity (encap fix; see header comment) */
@@ -642,8 +677,13 @@ static int gw_prog(struct seq_file *m, void *v)
 
 	/* 4. netif[0]=LAN, netif[1]=WAN (enHWRoute, 1 MAC => macMask 7, mtu 1500) */
 	memset(&nif, 0, sizeof(nif));
-	mac_hi = (GW_MAC_LAN[0] << 21) | (GW_MAC_LAN[1] << 13) | (GW_MAC_LAN[2] << 5) | (GW_MAC_LAN[3] >> 3);
-	mac_lo = ((GW_MAC_LAN[3] & 0x7) << 16) | (GW_MAC_LAN[4] << 8) | GW_MAC_LAN[5];
+	{	/* R3: per-unit MAC from the live LAN netif if userspace set one */
+		u8 lmac[ETH_ALEN];
+
+		gw_netif_mac("eth0.2", GW_MAC_LAN, lmac);
+		mac_hi = (lmac[0] << 21) | (lmac[1] << 13) | (lmac[2] << 5) | (lmac[3] >> 3);
+		mac_lo = ((lmac[3] & 0x7) << 16) | (lmac[4] << 8) | lmac[5];
+	}
 	nif.valid = 1; nif.vid = GW_VID_LAN; nif.mac18_0 = mac_lo; nif.mac47_19 = mac_hi;
 	nif.enHWRoute = 1; nif.macMaskL = 1; nif.macMaskH = 3; nif.mtu = 1500;
 	nif.inACLStartL = 0; nif.inACLStartH = 0; nif.inACLEnd = 3;	/* ingress ACL [0..3] permit-all */

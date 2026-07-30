@@ -16,7 +16,14 @@
 	};
 
 	chosen {
-		bootargs = "console=ttyS0,38400 ipv6.disable=1";
+		/* R3: rtl819x.hwnat=1 — the rtl865x offload driver is built-in and its
+		 * `hwnat` param defaults to 0 with nothing in userspace setting it, so
+		 * hardware NAT was silently OFF on every unattended boot even though fw3
+		 * emits the `-j FLOWOFFLOAD --hw` rule. A kernel-cmdline param is the only
+		 * thing that lands before the first packet for a built-in driver.
+		 * R5: ipv6.disable=1 removed — odhcpd/odhcp6c/ip6tables were already in the
+		 * image but inert while v6 was disabled at the kernel. */
+		bootargs = "console=ttyS0,38400 rtl819x.hwnat=1";
 	};
 
 	gpio-keys-polled {

@@ -224,6 +224,21 @@ define Device/GWR1200AC-V1
   CVIMG_LOADER_START_ADDR := 0x81000000
   IMAGE/factory.bin = append-kernel | append-fake-rootfs | append-rootfs | cvimg-kernel-cr6b | cvimg-pad-rootfs | dlink-md5-sign
   IMAGE/sysupgrade.bin = append-kernel | append-fake-rootfs | append-rootfs | cvimg-kernel-cr6b | pad-rootfs | dlink-md5-sign
+  # R3: declare the board's package set per-device instead of relying on a
+  # hand-maintained seed config — a clean `make menuconfig` for this profile now
+  # yields a working router (WiFi, PPPoE, LEDs, switch, diagnostics) instead of an
+  # image with no wireless at all.
+  DEVICE_PACKAGES := kmod-rtw88 rtl8822be-firmware wpad-basic iw \
+	kmod-leds-gpio kmod-gpio-button-hotplug swconfig \
+	ppp ppp-mod-pppoe kmod-nf-flow kmod-ipt-offload iperf3
+  # R3: rtl819x.hwnat=1 — the offload driver is built-in and its `hwnat` module
+  # param defaults to 0, and nothing in userspace ever set it, so hardware NAT was
+  # silently OFF on every unattended boot even though fw3 emits the
+  # `-j FLOWOFFLOAD --hw` rule. Setting it on the kernel command line is the only
+  # place that works for a built-in driver before the first packet.
+  # R5: ipv6.disable=1 dropped — the v6 packages (odhcpd/odhcp6c/ip6tables) were
+  # already shipped but dead weight while the kernel had v6 compiled out at boot.
+  CMDLINE := console=ttyS0,38400 rtl819x.hwnat=1
 endef
 TARGET_DEVICES += GWR1200AC-V1
 
