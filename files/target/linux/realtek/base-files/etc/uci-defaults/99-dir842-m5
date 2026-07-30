@@ -112,6 +112,45 @@ case "$DIR842_BASE_MAC" in
 esac
 logger -t dir842 "wifi BSSID MAC: $DIR842_WIFI_MAC"
 
+# --- R3: per-unit crystal cap for the blank-efuse RTL8822BE ------------------------
+# This board's 8822BE efuse is blank, so rtw88 falls back to crystal_cap = 0 — the
+# MINIMUM load capacitance, not this unit's calibrated value. That mistunes the RF
+# synthesiser badly enough that RF registers stop answering, which surfaces as
+# `write RF mode table fail` and a hung bring-up (see the radio0.disabled note below).
+#
+# The calibrated value lives in the read-only "MAC" partition. mtd1+0x13e is the byte
+# that works on this unit (39); the surrounding bytes 0x13e..0x141 = 39,49,35,24 are
+# two plausible 6-bit xcap values and two inside the vendor's 7..50 thermal range, and
+# the field ORDER was never resolved from the binary — 0x13e is EMPIRICAL, confirmed by
+# the radio initialising cleanly with it. If a future unit fails to bring the radio up,
+# sweep the other candidates:
+#     echo N > /sys/module/rtw88_core/parameters/xtal_cap_override
+#     rmmod rtw88_8822be; modprobe rtw88_8822be; wifi up
+#
+# Written as a modprobe option so it applies before rtw88 probes on every subsequent
+# boot; the module is also reloaded here so it takes effect on THIS boot.
+# NB: `hexdump` (/usr/bin/hexdump) IS in this image; `od` is NOT. I had that backwards
+# once and "fixed" a working line into a broken one — the missing tool yields an empty
+# string, which falls silently into the fallback branch and looks like a flash-read
+# failure. Verified on the box: dd reads mtd1 fine and this pipeline returns 39.
+DIR842_XCAP=$(dd if=/dev/mtd1 bs=1 skip=318 count=1 2>/dev/null | hexdump -e '"%d"')
+case "$DIR842_XCAP" in
+[0-9]|[1-5][0-9]|6[0-3])
+	mkdir -p /etc/modprobe.d
+	echo "options rtw88_core xtal_cap_override=$DIR842_XCAP" > /etc/modprobe.d/10-rtw88-xtal.conf
+	logger -t dir842 "rtw88 crystal_cap from flash: $DIR842_XCAP"
+	# apply on this boot too (efuse info is read at probe, so the module must re-probe)
+	if [ -d /sys/module/rtw88_8822be ]; then
+		rmmod rtw88_8822be 2>/dev/null
+		sleep 1
+		modprobe rtw88_8822be 2>/dev/null
+	fi
+	;;
+*)
+	logger -t dir842 "rtw88 crystal_cap: mtd1+0x13e unreadable/out of range ($DIR842_XCAP), leaving rtw88 default"
+	;;
+esac
+
 # --- 5 GHz AP on the PCIe RTL8822BE (rtw88); 2x2 VHT80. hwmode 11a = 5 GHz on
 #     this 4.14-era netifd. country BR unlocks the UNII-1 channels for beaconing
 #     (world/'00' marks them no-IR). macaddr set because the efuse is blank. ---
@@ -123,17 +162,19 @@ set wireless.radio0.hwmode='11a'
 set wireless.radio0.channel='36'
 set wireless.radio0.htmode='VHT80'
 set wireless.radio0.country='BR'
-# ★ radio stays DISABLED by default, and this is deliberate — do not "fix" it again.
-# R3 briefly set this to '0'. Result, measured: the box HANGS during rtw88 bring-up. The
-# boot log shows `write RF mode table fail` + a WARN from `iw` (rtw88_8822be), then the
-# console goes silent and every datapath reads 100% packet loss — which is easy to
-# misdiagnose as a switch/ASIC regression, because that is exactly what it looks like.
-# Cause is the BLANK EFUSE on this board: rtw88 has no RF cal to program. The real fix is
-# R3's remaining item — feed the calibration from mtd1 (5 GHz tables at 0x171/0x235) and
-# use RFE type 0 as stock does, instead of our patch's forced RFE 2 — after which this can
-# be flipped to '0'. Until then bring WiFi up by hand when you want it:
-#     uci set wireless.radio0.disabled=0 && wifi up
-set wireless.radio0.disabled='1'
+# ★ R3 RESOLVED — the radio is ENABLED. It used to be forced off because bringing it up
+# hung the box: rtw88 logged `write RF mode table fail` and the console went silent, which
+# looked exactly like a switch/ASIC regression. That WARN comes from
+# rtw8822b_set_channel_bb(), which writes RF path A and then polls RF reg 0x33 for 0x00001
+# a hundred times and never gets it — i.e. RF REGISTER ACCESS failing, NOT a missing power
+# table as previously assumed.
+# Root cause: this board's RTL8822BE efuse is blank, so rtw88 fell back to crystal_cap = 0
+# (the MINIMUM load capacitance) instead of this unit's calibrated value. A mistuned
+# crystal puts the RF synthesiser off-frequency, so the RF registers never answer.
+# Fix: feed the per-unit crystal cap from the "MAC" mtd partition (see the modprobe.d
+# stanza written below). Measured with it applied: no WARN, wlan1 reaches forwarding
+# state, and `iw dev wlan1 info` reports an AP on channel 36 @ 80 MHz, 17 dBm.
+set wireless.radio0.disabled='0'
 set wireless.default_radio0='wifi-iface'
 set wireless.default_radio0.device='radio0'
 set wireless.default_radio0.network='lan'

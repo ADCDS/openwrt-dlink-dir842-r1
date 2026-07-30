@@ -16,3 +16,53 @@
  	efuse->rf_board_option = map->rf_board_option;
  	efuse->crystal_cap = map->xtal_k;
  	efuse->pa_type_2g = map->pa_type;
+--- a/drivers/net/wireless/realtek/rtw88/main.c
++++ b/drivers/net/wireless/realtek/rtw88/main.c
+@@ -31,6 +31,31 @@
+ MODULE_PARM_DESC(support_bf, "Set Y to enable beamformee support");
+ MODULE_PARM_DESC(debug_mask, "Debugging mask");
+ 
++/* DIR-842 / blank-efuse boards: crystal load capacitance override.
++ *
++ * When the efuse is blank rtw88 falls back to crystal_cap = 0, i.e. the MINIMUM
++ * load capacitance rather than this unit's calibrated value. On the DIR-842 that
++ * is a plausible cause of the failure that keeps the 5 GHz radio disabled:
++ * rtw8822b_set_channel_bb() writes RF path A then polls RF reg 0x33 for 0x00001
++ * a hundred times, never gets it, and bails with WARN("write RF mode table
++ * fail"). That is RF REGISTER ACCESS failing, not a power-table problem, which
++ * is consistent with the RF synthesiser being off-frequency from a mistuned
++ * crystal.
++ *
++ * The per-unit value lives in the read-only "MAC" mtd partition, which exports
++ * both 11N_XCAP_2G and 11N_XCAP_5G (lib/librlx_wifi_mibs.so in the stock
++ * rootfs). mtd1+0x13e..0x141 reads 39, 49, 35, 24 - two plausible 6-bit xcap
++ * values (39, 35) and two inside the vendor's 7..50 thermal range (49, 24) - but
++ * the field ORDER could not be resolved from four bytes, so nothing is
++ * hardcoded. Sweep it instead of guessing:
++ *     echo N > /sys/module/rtw88_core/parameters/xtal_cap_override
++ *     uci set wireless.radio0.disabled=0 && wifi up
++ * -1 keeps rtw88's stock behaviour.
++ */
++static int rtw_xtal_cap_override = -1;
++module_param_named(xtal_cap_override, rtw_xtal_cap_override, int, 0644);
++MODULE_PARM_DESC(xtal_cap_override, "crystal load cap for blank-efuse boards (0-63), -1 = rtw88 default");
++
+ static struct ieee80211_channel rtw_channeltable_2g[] = {
+ 	{.center_freq = 2412, .hw_value = 1,},
+ 	{.center_freq = 2417, .hw_value = 2,},
+@@ -1309,8 +1334,14 @@
+ 	if (ret)
+ 		goto out_disable;
+ 
+-	if (efuse->crystal_cap == 0xff)
++	if (efuse->crystal_cap == 0xff) {
+ 		efuse->crystal_cap = 0;
++		if (rtw_xtal_cap_override >= 0 && rtw_xtal_cap_override <= 63) {
++			efuse->crystal_cap = rtw_xtal_cap_override;
++			rtw_info(rtwdev, "blank efuse: crystal_cap override -> %u\n",
++				 efuse->crystal_cap);
++		}
++	}
+ 	if (efuse->pa_type_2g == 0xff)
+ 		efuse->pa_type_2g = 0;
+ 	if (efuse->pa_type_5g == 0xff)
