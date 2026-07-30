@@ -653,3 +653,54 @@ build must define and in what order — rather than more one-off flag experiment
 is the next session's task, and it is bounded work on a known surface, not a search.
 
 Driver left `# CONFIG_RTL8192CD is not set`; image builds at 4.75 MB of 7.9 MB.
+
+#### R4/G3 — session close: 52 objects, ONE error remaining
+
+Final state: **52 of the driver's objects compile** against 4.14.187. One error class
+left, and it is a header interaction rather than a driver problem:
+
+    ./arch/mips/include/asm/uaccess.h:73:40: error: invalid type argument of '->' (have 'int')
+
+i.e. `get_fs()`'s `current_thread_info()->addr_limit` — `current_thread_info()` is
+resolving to `int` in one translation unit (the failure appears around
+`8192cd_proc.o`). The driver defines neither `current_thread_info` nor `thread_info`,
+so something it pulls in is shadowing it indirectly.
+
+**The complete working flag set** (preserved verbatim as `g3-rtl8192cd-portflags.mk`
+in this repo — it is the real deliverable, since reconstructing it took the whole
+session):
+
+| # | flag | why |
+|---|---|---|
+| 1 | five `-Wno-error=` classes | vendor targets gcc 4.x/7.x; tree is 8.4 |
+| 2 | `-DCONFIG_RTL_8197F` | vendor's SoC selector; tree names it `CONFIG_SOC_RTL8197F` |
+| 3 | `-DNOT_RTK_BSP` | auto-defined only when `CONFIG_RTL_8197F` is *unset*, so (2) silently disabled it and re-enabled the `pskb->__unused` paths |
+| 4 | `-DRTK_NL80211` | the `rtk` member and `CFG80211_*` enum are gated on it while their use sites are not |
+| 5 | `IEEE80211_BAND_* → NL80211_BAND_*` | renamed in kernel 4.7 |
+| 6 | six `BSP_*` constants by `-D` | see below |
+| 7 | `CONFIG_RTL_CUSTOM_PASSTHRU` disabled (header) | removes the `srcPhyPort` paths, avoiding a core `sk_buff` patch |
+| 8 | `wlan_amsdullcsnaphdr_t` added to `wifi.h`'s `NOT_RTK_BSP` branch | the original bug |
+
+★ On (6): the BSP constants are supplied by `-D` rather than by including
+`bspchip.h`, because that header is only reachable on some branches of the
+`NOT_RTK_BSP` / `CONFIG_OPENWRT_SDK` / `CONFIG_RTL_8197F` matrix, and force-including
+it lands it ahead of the kernel's own headers. **Every value matches what R4/G1
+decoded from the stock binary and what the `rtl8197f-wmac` driver then read on
+silicon** — WMAC base `0xB8640000`, IRQ 6, plus the PCIe entry (`0xB8B10000`,
+`0xB9000000`, IRQ 5) that G1 used as its self-check. Three independent sources agree,
+which is the strongest validation the hardware map has had.
+
+**Measured traps — do not repeat:**
+- `-DCONFIG_OPENWRT_SDK`: fixes `__unused` but breaks `<bspchip.h>` resolution and adds
+  the uaccess.h error. Net worse.
+- clearing `CONFIG_PCI_HCI`: collapses to 5 objects. It selects the PCI-style
+  descriptor/ring model the **on-SoC** WMAC also uses — not a "PCIe card" switch.
+- port flags appended at the END of the Makefile: collapses to 2 objects by breaking
+  the vendor's own `-I$(src)/WlanHAL/...` paths. They must come first.
+- force-including `bspchip.h` with `-include`: breaks `arch/mips` `uaccess.h` and
+  `thread_info.h`.
+
+**Next step, and it is one command, not a search:** preprocess the failing unit with
+the real build flags (`-save-temps` on `8192cd_proc.o`, or re-run its exact `make V=s`
+command line with `-E -dD`) and grep the output for `current_thread_info`. That shows
+what is shadowing it. Every remaining unknown here is now a single lookup.
