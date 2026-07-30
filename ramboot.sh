@@ -14,6 +14,7 @@ PORT=/dev/ttyUSB0
 LOG=/home/agiu/dir842-r1-bootlog.txt
 FLAG=/tmp/ramboot-spam.flag
 TOMADA="${TOMADA:-/home/agiu/.local/bin/tomada}"
+IFACE="${IFACE:-enx00e04c125990}"	# host USB-eth cabled to the DIR-842 LAN
 IMG="${1:-$(ls /home/agiu/dir842-build/openwrt/bin/targets/realtek/rtl8197f/*initramfs-kernel.bin | head -1)}"
 
 sr() { stty -F "$PORT" 38400 cs8 -parenb -cstopb -crtscts -ixon clocal raw -echo 2>/dev/null; }
@@ -45,6 +46,15 @@ for round in 1 2 3; do
   echo "  ★ caught; TFTP upload"
 
   sleep 2; sr; tftp_ok=0
+  # ★ Re-assert the host address EVERY round. NetworkManager repeatedly strips the manual
+  # IPv4 off this USB NIC (and a re-enumeration clears it too); when that happens the
+  # catcher keeps catching the loader while curl silently fails, which looks like an
+  # infinite "stuck at <RealTek>" loop. Unmanage + re-add before touching TFTP.
+  sudo nmcli device set "$IFACE" managed no 2>/dev/null
+  sudo ip link set "$IFACE" up 2>/dev/null
+  ip -4 addr show "$IFACE" | grep -q 192.168.0.2 || sudo ip addr add 192.168.0.2/24 dev "$IFACE" 2>/dev/null
+  sudo ip neigh flush dev "$IFACE" 2>/dev/null   # loader answers on the STOCK MAC
+  ping -c1 -W2 192.168.0.1 >/dev/null 2>&1 || echo "  !! loader unreachable at 192.168.0.1"
   # ★ The loader's own IP lives in nvram and resets to the 192.168.1.6 factory default;
   # our bench link is 192.168.0.0/24, so pin it every time. (Also: the loader answers on
   # the STOCK MAC e0:1c:fc:51:c9:ef, NOT the Linux driver's 00:e0:4c:81:96:c2 — never

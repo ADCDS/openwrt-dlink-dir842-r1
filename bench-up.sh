@@ -38,6 +38,17 @@ say 'for i in 1 2 3; do ping -c3 -W1 192.168.0.2 >/dev/null 2>&1; ping -c3 -W1 1
 # 5. Offload on.
 say 'echo 1 > /sys/module/rtl819x/parameters/hwnat; echo HW=$(cat /sys/module/rtl819x/parameters/hwnat)' 3
 
-echo "=== verify ==="
+# 6. ★ RE-ASSERT the host route + tiny's address IMMEDIATELY BEFORE measuring. Both drift
+#    away on their own (NetworkManager re-adds a default via the house gateway, so
+#    172.16.0.0/24 silently starts routing out enp3s0; tiny's br0 loses 172.16.0.2 on any
+#    reconfigure). When that happens EVERY path reads "100% packet loss" and it looks like
+#    a driver regression — it cost a wrong conclusion about SWTCR0 WANRouteMode once.
+#    Verify these two lines before believing ANY negative bench result.
+sudo ip route replace 172.16.0.0/24 via 192.168.0.1 dev "$IF"
+ssh -o ConnectTimeout=8 tiny 'ip addr show br0 | grep -q "172.16.0.2" || sudo ip addr add 172.16.0.2/24 dev br0' 2>/dev/null
+
+echo "=== verify (route + tiny addr re-asserted above) ==="
+ip route get 172.16.0.2 | head -1
 ping -c3 -W2 192.168.0.1 2>&1 | grep -E 'packet loss'
 ping -c3 -W2 172.16.0.2 2>&1 | grep -E 'packet loss'
+ping -c3 -W2 -s1400 192.168.0.1 2>&1 | grep -E 'packet loss'   # large-frame wedge check

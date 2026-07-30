@@ -103,3 +103,68 @@ for gigabit-down, fix A instead.)
 - Vendor SDK (readable): `~/…/scratchpad/sdk-rtl819x/…/drivers/net/rtl819x/`.
 - Stock decoded tables: `~/dir842-build/m6.6-hwnat/STOCK-TABLES.md` (NO WAN cable when
   captured → live ACL/NAPT tables empty; that's the evidence gap fix A/the dump closes).
+
+---
+
+# Session 2 (2026-07-21/29) — uploads offloaded; three reverse-path candidates falsified
+
+## Result
+**LAN→WAN (upload) is hardware-offloaded: ~90% of data packets bypass the CPU**
+(measured `eth0.2` rx delta = 5670 vs ~54000 data packets over an 8 s flow), at
+78.8 Mbit/s = line rate for the 100 Mb WAN link. Committed `2ba78be`, pushed as
+`5556d00`.
+
+**WAN→LAN (download) is still CPU-bound** and, worse, a sustained download
+*wedges the box outright* (every reply is trapped to the CPU, and large frames
+hammering the CPU is exactly the M7 large-frame-wedge trigger; recovery =
+`echo 3 > /sys/module/rtl819x/parameters/fabric_reset`). So HW reverse-NAPT is
+**required**, not an optimisation.
+
+## What fixed the upload path
+`WAN netif ingress ACL range [0..3] -> [4..6]` (stock's layout). The
+dst-MAC==WAN-MAC classifier lives at slot 4, so with the range at [0..3] it was
+never scanned; every reply fell through to the catch-all permit, was
+transit-routed on its un-rewritten dst, and left the WAN with an unresolved
+nexthop DMAC. Peer-side garbage-DMAC frames went **13-21 per flow -> 0**.
+
+## Three reverse-path candidates, all falsified on hardware
+| # | change | result | what it rules out |
+|---|---|---|---|
+| 1 | extIP `/32` route, `process=2` (ARP/direct) | reply **black-holed** (~0 pkts) | The extIP-table match does **not** pre-empt the route lookup. Routing happens first; the extIP entry alone never triggers the reverse rewrite. Kills the whole "fix it with routes" family. |
+| 2 | dst-MAC==WAN-MAC -> **TOCPU** ACL rule at slot 4 | works, but traps **every** WAN frame (`WAN_RX` == every ACK) -> software-speed downloads, and wedges under sustained load | Correctness via CPU trap is achievable but is the opposite of the goal. |
+| 3 | `SWTCR0` bits[4:3] `WANRouteMode` Forward(0) -> **ToCpu(1)** | WAN path appeared dead both ways | ⚠️ **LIKELY CONFOUNDED — retest.** During that run tiny had silently lost `172.16.0.2` and the host's `172.16.0.0/24` route had reverted to the house gateway. Both faults read as "100% packet loss" identically. |
+
+### Why candidate 3 is still the best lead
+`WANRouteMode` (`rtl865xc_asicregs.h:1563-1571`, "Route WAN packets":
+Forward=0 / ToCpu=1 / Drop=2) sits at the silicon reset default **Forward**, and
+**nothing in the entire vendor SDK ever writes it**. Forward is precisely the
+observed flood: a WAN-ingress reply that does not come out of the L4
+reverse-NAPT stage gets *transit-routed*. Transit routing from the WAN is
+meaningless on a NAT gateway. `ToCpu` should divert **only** the packets that
+MISS reverse-NAPT, leaving hits on the hardware path — unlike candidate 2, which
+blanket-traps everything. Verified live as `SWTCR0=0x000847ec` (bits[4:3]=01).
+**Retest it with the bench-drift guards below in place before drawing any
+conclusion.**
+
+## ★ Bench-drift trap (cost one wrong conclusion — read before trusting a negative)
+Three things silently revert and each one makes EVERY path read 100% loss:
+1. **Host USB-eth loses its IPv4** — NetworkManager strips it (`nmcli device set
+   <if> managed no`).
+2. **Host route `172.16.0.0/24` reverts** to the house gateway via `enp3s0`
+   (`ip route get 172.16.0.2` must show the USB NIC).
+3. **tiny's br0 loses `172.16.0.2`** (its bench WAN address; `eth0` is a br0
+   SLAVE, the address is on br0).
+Plus: `cat /proc/rtl865x_gw` **wipes the ASIC L2 tables**, so warming must come
+after it, never before. `bench-up.sh` now re-asserts all of this immediately
+before measuring and prints `ip route get` so the guard is visible.
+
+## Next step
+Re-run candidate 3 (`WANRouteMode=ToCpu`, TOCPU ACL rule removed) with
+`bench-up.sh` guards, and measure `eth0.1` rx delta during an `iperf3 -R`
+download: near-zero => hardware reverse-NAPT; ~every packet => still trapped.
+Also still open from session 1: the extIP entry's `nextHop` field semantics (we
+set 0, which may be why a rewritten reply tries to egress via the WAN nexthop
+chain).
+
+⚠️ The WAN link negotiated **100 Mb/s** (tiny's NIC advertises gigabit, so it is
+the cable). Gigabit cannot be demonstrated until that is replaced.
