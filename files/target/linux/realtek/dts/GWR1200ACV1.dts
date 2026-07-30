@@ -71,6 +71,16 @@
 
 };
 
+/* R4/G2: enable the on-SoC 2.4 GHz WMAC so the bring-up driver can probe it.
+ * See RTL8197F.dtsi for the full decode (base 0x18640000, IRQ 6, and the
+ * SR+0x64 enable gate). ⚠ This does NOT give you 2.4 GHz WiFi yet: the driver
+ * probes the block, lifts the gate and verifies the register window responds,
+ * but performs no PHY/RF init and does not register with mac80211. It is safe
+ * to leave enabled — pcie1, which shares cpuintc IRQ 6, stays disabled. */
+&wmac {
+	status = "okay";
+};
+
 &gpio0 {
 	status = "okay";
 };

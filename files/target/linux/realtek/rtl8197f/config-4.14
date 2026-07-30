@@ -286,3 +286,7 @@ CONFIG_LEDS_GPIO=y
 # recursion is what has been masking the real flash-boot crash (#11). With this off the
 # genuine first trace reaches the console and can be root-caused.
 # CONFIG_CRASHLOG is not set
+# R4/G2: on-SoC 2.4 GHz WMAC bring-up driver. Probes the block, lifts the
+# SR+0x64 enable gate and verifies the register window responds. Does NOT
+# register with mac80211 and cannot beacon yet — see the driver header.
+CONFIG_RTL8197F_WMAC=y

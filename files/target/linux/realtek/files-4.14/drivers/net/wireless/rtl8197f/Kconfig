@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: GPL-2.0
+config RTL8197F_WMAC
+	tristate "Realtek RTL8197F on-SoC 2.4 GHz WMAC (bring-up)"
+	depends on SOC_RTL8197F || COMPILE_TEST
+	depends on OF
+	help
+	  Bring-up driver for the RTL8197F's integrated 2.4 GHz MAC/PHY, the
+	  radio mainline has never had a driver for.  Without it this platform
+	  is single-band, because the PCIe RTL8822BE is one radio serving 2.4
+	  OR 5 GHz, not both.
+
+	  ⚠ This is R4/G2 and is NOT a working WiFi driver yet: it probes the
+	  block, lifts the undocumented enable gate at SR+0x64, and verifies the
+	  register window responds.  It performs no PHY/RF initialisation and
+	  deliberately does NOT register with mac80211, so it cannot beacon and
+	  no client can associate.  Enabling it is safe but gains you no WiFi.
+
+	  If unsure, say N.
