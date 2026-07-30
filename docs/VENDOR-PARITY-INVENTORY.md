@@ -424,3 +424,47 @@ Reproduce the fetch:
       -b v3.4.11e/openwrt-18.06-rtkmipsel-3.18 \
       https://github.com/8devices/openwrt-8devices.git
     cd openwrt-8devices && git sparse-checkout set package/kernel/rtl8192cd
+
+### R4/G3 — the driver now COMPILES (partially); blocked on one characterised issue
+
+Real progress past "source staged". The vendor headers turned out to be a non-problem,
+and the driver builds objects.
+
+**`asm/rtl865x/*` is NOT needed — all five references are dead for this config:**
+
+| site | guard | verdict |
+|---|---|---|
+| `8192cd_osdep.c:158` | `!CONFIG_NET_PCI && CONFIG_RTL8196B` | dead (we are 8197F, PCI_HCI=y) |
+| `8192cd_osdep.c:163` | `!CONFIG_NET_PCI && CONFIG_RTL8196C` | dead |
+| `8192cd_util.h:34` | inside the `#else` of `#if defined(__LINUX_2_6__)` | dead — we take the `__LINUX_2_6__` leg |
+| `8192cd_hw.c:96` | same `#else`; the live leg is `#include <bspchip.h>` for `CONFIG_RTL_8197F` | dead |
+| `romeperf.c:18` | commented out | dead |
+
+Same pattern as `create_proc_entry`. What IS required is `bspchip.h` plus the `net/rtl`
+headers, and both exist: `bspchip.h` in the 8devices target tree at
+`arch/mips/include/asm/mach-rtl8197f/`, and 28 `net/rtl` headers (`rtl_types.h`,
+`rtl_glue.h`, `features/fast_bridge.h`, …). All staged into `files-4.14/`.
+
+**Result: the driver compiles.** With `CONFIG_RTL8192CD=m` it builds phydm objects
+(`phydm.o`, `phydm_dig.o`, `phydm_edcaturbocheck.o`, …) against kernel 4.14.187.
+
+**One blocker, precisely characterised.** A circular-include tangle around
+`wlan_amsdullcsnaphdr_t`:
+
+- the struct lives in `wifi.h`, originally gated on `SUPPORT_TX_AMSDU_SHORTCUT`
+- that macro is defined in `8192cd_cfg.h:1125`
+- but `8192cd_cfg.h` **includes `wifi.h`**, so on the inner pass the macro is not yet
+  defined, `wifi.h`'s `_WIFI_H_` guard latches, and the struct is skipped for good
+- the *use* in `8192cd.h` is reached later with the macro defined, so it compiles →
+  `field 'amsdullcsnaphdr' has incomplete type`
+- main driver units survive by pulling `wifi.h` in first through another path; the
+  `phydm/` units include only `8192cd.h` and fail
+
+Making the struct unconditional (kept — it is correct and costs nothing) is not
+sufficient on its own, and simply adding `#include "wifi.h"` to `8192cd.h` makes it
+worse: it hoists `wifi.h` ahead of the headers defining `UINT8`/`__PACK`/
+`__WLAN_ATTRIB_PACK__`, so the struct body itself no longer parses. The fix is to
+untangle the `wifi.h` ↔ `8192cd_cfg.h` cycle properly — e.g. split the feature macros
+into a leaf header both can include, or move the type definitions ahead of the cycle.
+
+Driver left `# CONFIG_RTL8192CD is not set` so the image builds; re-enable to resume.
