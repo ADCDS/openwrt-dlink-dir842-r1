@@ -944,3 +944,80 @@ root device grabs `wlan1` and netifd then configures the wrong interface.
   down, dying 1.1 s after `eth0` came back up. Capture in `scratchpad/bench.pcap`.
   ⚠ Do **not** block udp 1714–1764 on the host OUTPUT chain — it also breaks the
   loader's TFTP and ramboot stops working. Stop `kdeconnectd` instead.
+
+# ★★★ R4 COMPLETE — CONCURRENT DUAL-BAND WORKS
+
+Verified by an external scan from a separate host adapter (not the box's self-report):
+
+    BSS e0:1c:fc:51:c9:f0 (on wlp4s0)   freq 5180.0   SSID: DIR842-OpenWrt
+    BSS 00:e0:4c:81:86:86 (on wlp4s0)   freq 2412.0   SSID: DIR842-2G
+                                        RSN: CCMP / PSK, beacon interval 100 TUs
+
+**Both radios beacon simultaneously** — mainline **rtw88** on the PCIe RTL8822BE at
+5 GHz, and the **vendor `rtl8192cd`** on the SoC's integrated WMAC at 2.4 GHz. PCI
+`01:00.0` stays bound to `rtw_8822be` throughout.
+
+Client association proven on the 2.4 GHz radio:
+- **Open, ch 1** — associated, ping 6/6, 0% loss.
+- **WPA2-PSK** — associated at HT MCS4 43.3 Mbit/s, **DHCP lease obtained from the box
+  over the air** (192.168.0.226/24), ping 8/8 0% loss avg 3.9 ms, `total_psk_fail: 0`.
+  The 4-way handshake runs **inside the driver** — no hostapd, exactly as stock does it.
+
+This is the goal the whole R4 milestone was defined around, and it closes the port's
+last functional gap against vendor firmware.
+
+## ★ The bug that kept it silent: the wrong crystal
+
+The AP "start" step was never missing — that premise was wrong. `/proc/wlan0/stats`
+showed `beacon_ok` climbing at exactly the TBTT rate (10/s at 100 TU), i.e. the MAC was
+already beaconing on `ifconfig up`. (`up_flag` is a red herring: it is `CLIENT_MODE`-only,
+set when a *station* associates, never in AP mode.) The failure was **RF**.
+
+`8192cd_hw.c:14672` selects the 8197F WLAN crystal *solely* from `CONFIG_PHY_EAT_40MHZ`.
+The vendor's strap-reading alternative immediately above it is dead code here — gated on
+`CONFIG_AUTO_PCIE_PHY_SCAN`, which is only defined for `CONFIG_RTL_8196E`/`__OSK__`.
+Our Makefile had the flag set, so `XTAL_CLK_SEL_40M` went into `InitPONHandler()` and the
+WLAN PLL came up for a 40 MHz part. **LO off by 40/25 = 1.6×** → MAC, BB and firmware all
+report success, IQK completes, and nothing is on air; RX equally deaf (`rx_packets: 0`).
+
+Three independent sources say 25 MHz, and one of them is our own earlier work:
+1. stock firmware's boot log on this unit prints `clock 25MHz`;
+2. **our mainline `rtl8197f-wmac` bring-up driver reads bootstrap `SR+0x08 BIT(24)` and
+   prints `xtal 25MHz`** — the G2 stub written long before this driver existed;
+3. the radio went from silent to loud when the flag was cleared.
+
+(Stock's `clock 40MHz` line belongs to the 8822B — a different chip.)
+
+## Second silent failure: the config path was compiled out
+
+`CONFIG_RTL_COMAPI_CFGFILE` had **never** been set, so `CfgFileProc()` *and* its call site
+at `8192cd_osdep.c:7691` were both preprocessed away — the netifd handler already in the
+tree would have been a silent no-op. Additionally `CfgFileRead()` called `fp->f_op->read`
+directly, which is NULL on tmpfs (and `/etc/Wireless` → `/tmp`); it now uses 4.14's
+`kernel_read()`.
+
+## Remaining polish (none of it blocks the milestone)
+
+- ★ **Interface-naming hazard.** Measured on two boots *before* any insmod: rtw88's 5 GHz
+  is **`wlan1`** and the vendor root device is **`wlan0`** — the opposite of what
+  `uci-defaults/09_wireless-dualband-dir842` and `rtl8192cd.sh` currently assume. As
+  shipped, a netifd bring-up would down and reconfigure rtw88's interface. Fixing it
+  properly means pinning load order first (e.g. `AUTOLOAD` the module).
+- The radio was driven **by hand**, not through netifd — `wifi up` is not yet exercised
+  for it. The MIB names the handler emits *are* validated (`Set MIB from … Success`).
+- The handler writes `${phy}_regdomain=$country`; that MIB is numeric, so a real code
+  like `BR` would be rejected. Works today only because the uci-default sets `country='1'`.
+- **TX power is uncalibrated** — `pwrlevelCCK_A/B` and `pwrlevelHT40_1S_A/B` read zeros.
+  The per-unit tables are in mtd1 "MAC" (CCK_A `0x0d8`, CCK_B `0x0e6`, HT40_1S_A/B
+  `0x0f4`/`0x102`, xcap/ther at `0x13e`). Running on driver defaults; obvious next win.
+- `iwinfo` cannot see this radio (WEXT `SIOCGIWNAME` handler is NULL) — expected for a
+  WEXT driver, not a fault. `iwpriv`/`iwconfig` work.
+
+## Bench note
+
+RAM-boot panics ~50 s in: `/etc/rc.local` and `/etc/init.d/dir842-asic` both write
+`fabric_reset=3`, and on an initramfs boot the first RX frame after that full fabric
+reset corrupts memory (simultaneous SIGSEGV across logd/ubusd/netifd/procd → "Attempted
+to kill init"). NOR boots survive it. Worked around at runtime only (no tree change) by
+killing those two scripts early and setting `fabric_autoreset=0`.
+Also: keep serial command lines under ~100 chars — a 210-char line lost bytes at 38400.

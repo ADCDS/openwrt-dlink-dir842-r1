@@ -1,12 +1,27 @@
-# R4/G3 — rtl8192cd 3.18 -> 4.14 port for the RTL8197F on-SoC 2.4 GHz WMAC.
-# STATUS: builds, links, packages (1.9 MB stripped), and LOADS ON HARDWARE.
-#   insmod rc=0; 'Realtek WLAN driver - version 1.7'; 6x rtl8192cd_init_one
-#   /proc/interrupts: '6: 596 MIPS 6 wlan0'  <- on-SoC WMAC bound, servicing IRQs
-#   ifconfig wlan0 up -> real HW init: '[97F] Bonding Type 97FS, PKG1', RFE type 0,
-#   rtl8197Ffw firmware loaded, rings allocated, no oops.
-#   mainline rtw88 5 GHz AP UNAFFECTED (verified beaconing by external scan).
-# NOT YET: the 2.4 GHz radio does not beacon (up_flag=0) — the vendor userspace
-#   'start' step is still missing. That is the next milestone, not a regression.
+# R4 — rtl8192cd 3.18 -> 4.14 port for the RTL8197F on-SoC 2.4 GHz WMAC.
+#
+# ★★★ RESULT: CONCURRENT DUAL-BAND WORKS. Both radios beacon simultaneously,
+# verified by an external scan from a separate host adapter:
+#   BSS e0:1c:fc:51:c9:f0  freq 5180.0  SSID DIR842-OpenWrt   <- mainline rtw88
+#   BSS 00:e0:4c:81:86:86  freq 2412.0  SSID DIR842-2G        <- this driver
+# Client associated on 2.4 GHz with WPA2-PSK (4-way handshake IN-DRIVER, no
+# hostapd), DHCP lease over the air, ping 8/8 0% loss @3.9ms, HT MCS4 43.3 Mbit/s.
+# PCI 01:00.0 remains bound to rtw_8822be throughout.
+#
+# ★ THE BUG THAT KEPT IT SILENT: WRONG CRYSTAL (40 MHz vs 25 MHz).
+# 8192cd_hw.c:14672 picks the WLAN crystal solely from CONFIG_PHY_EAT_40MHZ; the
+# vendor's strap-reading alternative just above is dead code here (gated on
+# CONFIG_AUTO_PCIE_PHY_SCAN, defined only for 8196E/__OSK__). With the flag set,
+# XTAL_CLK_SEL_40M went into InitPONHandler() and the PLL came up for a 40 MHz part.
+# LO off by 40/25 = 1.6x -> MAC/BB/firmware all report success, IQK completes,
+# and NOTHING is on air; RX equally deaf (rx_packets 0). Three independent sources
+# say 25 MHz: stock's own boot log on this unit, our mainline rtl8197f-wmac stub
+# reading bootstrap SR+0x08 BIT(24), and the radio going loud when changed.
+#
+# ★ SECOND SILENT FAILURE: CONFIG_RTL_COMAPI_CFGFILE was NEVER set, so CfgFileProc()
+# and its call site were both preprocessed away — the netifd handler that writes
+# /etc/Wireless/RTL8192CD.dat would have been a silent no-op. Also CfgFileRead()
+# called fp->f_op->read directly, which is NULL on tmpfs; now uses kernel_read().
 #
 # Apply against the 8devices v3.4.11e vendor tree:
 #   git clone --depth 1 --filter=blob:none --sparse \
@@ -15,26 +30,18 @@
 #   cd openwrt-8devices && git sparse-checkout set package/kernel/rtl8192cd
 #   patch -p1 < g3-rtl8192cd-4.14-port.patch
 #
-# KEY POINTS
-# 1. The BSP_* wall was UNREACHABLE DEAD CODE: CONFIG_RTL_819X is never defined,
-#    so the #include <bspchip.h> sites never compile. No -I could help. Proven by
-#    preprocessing the real kbuild command line with -E -dD.
-# 2. <asm/uaccess.h> -> <linux/uaccess.h> in 14 files: 55 -> 101 objects.
-# 3. ★ CONFIG_BAND_2G_ON_WLAN0 is LOAD-BEARING. The on-SoC WMAC's wlan_device[]
-#    entry is gated on it; without it the table degenerates to all-zero TYPE_PCI_BIOS
-#    entries and init_module() only calls pci_register_driver() — the embedded radio
-#    is never touched. With it: wlan_device[0] = {base 0xb8640000, irq 6}.
-# 4. ★★ 8822BE support MUST stay compiled out. rtl8192cd_pci_tbl[] claims PCI
-#    10ec:b822; enabling it makes this driver steal the card from rtw88 and kill the
-#    working 5 GHz AP. CONFIG_PCI_HCI stays ON (descriptor/ring model, not a slot switch).
-# 5. Path B (WEXT) chosen: -DRTK_NL80211 and CONFIG_OPENWRT_SDK are OFF. Path A needs
-#    a real forward-port of 8192cd_cfg80211.c (~40 cfg80211 API errors vs backports-5.8).
-#    Stock itself is Path B — it ships NO hostapd; WPA2-PSK runs inside the driver.
-# 6. New file 8192cd_owrt_bsp.c supplies the two Realtek-BSP exports this tree lacks.
-#    PCIE_reset_procedure_97F() is a DELIBERATE read-only stub: the vendor version
-#    drives PERST# low for 300 ms, which would drop the bus rtw88's 8822BE lives on.
-# 7. ⚠ BUILD TRAP: 'make modules' alone SILENTLY SKIPS the undefined-symbol check when
-#    vmlinux is absent (reports rc=0 with undefineds present). Use 'make vmlinux modules'.
+# OTHER LOAD-BEARING POINTS
+# - The BSP_* wall was UNREACHABLE DEAD CODE (CONFIG_RTL_819X never defined).
+# - <asm/uaccess.h> -> <linux/uaccess.h> in 14 files: 55 -> 101 objects.
+# - CONFIG_BAND_2G_ON_WLAN0 is essential: without it wlan_device[] degenerates to
+#   all-zero TYPE_PCI_BIOS entries and the embedded radio is never touched.
+# - ★★ 8822BE support MUST stay compiled out or this driver steals PCI 10ec:b822
+#   from rtw88 and kills the 5 GHz AP. CONFIG_PCI_HCI stays ON.
+# - Path B (WEXT): RTK_NL80211 / CONFIG_OPENWRT_SDK off. Stock is Path B too.
+# - 8192cd_owrt_bsp.c supplies the two Realtek-BSP exports this tree lacks;
+#   PCIE_reset_procedure_97F() is a deliberate read-only stub (the real one drives
+#   PERST# low for 300ms and would drop the bus rtw88 lives on).
+# - ⚠ 'make modules' alone SILENTLY SKIPS undefined-symbol checks without vmlinux.
 #
 diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192cd_cfg80211.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192cd_cfg80211.c
 --- a/package/kernel/rtl8192cd/8192cd_cfg80211.c	2026-07-30 13:32:13.755312079 -0300
@@ -127,7 +134,7 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c
  
 diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192cd_comapi.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192cd_comapi.c
 --- a/package/kernel/rtl8192cd/8192cd_comapi.c	2026-07-30 13:32:13.759312068 -0300
-+++ b/package/kernel/rtl8192cd/8192cd_comapi.c	2026-07-30 17:28:07.495465215 -0300
++++ b/package/kernel/rtl8192cd/8192cd_comapi.c	2026-07-30 20:05:59.044662243 -0300
 @@ -16,7 +16,7 @@
  #ifdef __KERNEL__
  #include <linux/module.h>
@@ -146,6 +153,31 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c
  	fp = filp_open(CFG_FILE_PATH, O_RDONLY, 0);
  	if(IS_ERR(fp)) {
  		ret = PTR_ERR(fp);
+@@ -3488,13 +3488,17 @@
+ 		goto err_exit;
+ 	}
+ 	
+-	if (!(fp->f_op && fp->f_op->read)) {
+-		printk("Fail to support file ops: read\n");
+-		ret = -1;
+-		goto err_close;
+-	}
+-	
+-	if ((ret = fp->f_op->read(fp, buf, MAX_CONFIG_FILE_SIZE, &fp->f_pos))< 0){
++	/*
++	 * ★ R4/G3 4.14 port. The vendor code called fp->f_op->read() directly. Since
++	 * ~3.16 filesystems implement .read_iter and leave .read NULL (tmpfs/shmem —
++	 * which is exactly what /etc/Wireless -> /tmp is — as well as jffs2/squashfs),
++	 * so the vendor's `if (!(fp->f_op && fp->f_op->read))` guard fires and the
++	 * config file is never read: "Fail to support file ops: read". kernel_read()
++	 * is the supported in-kernel reader and dispatches to .read or .read_iter.
++	 * (4.14 signature: ssize_t kernel_read(struct file *, void *, size_t, loff_t *)
++	 *  — it changed in 4.14, so this form is tied to this kernel.)
++	 */
++	if ((ret = kernel_read(fp, buf, MAX_CONFIG_FILE_SIZE, &fp->f_pos)) < 0){
+ 		printk("Fail to read file. (%d)\n", ret);
+ 		goto err_close;
+ 	}
 diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/8192cd_dfs.c /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/8192cd_dfs.c
 --- a/package/kernel/rtl8192cd/8192cd_dfs.c	2026-07-30 13:32:13.759312068 -0300
 +++ b/package/kernel/rtl8192cd/8192cd_dfs.c	2026-07-30 17:59:16.684079161 -0300
@@ -1660,8 +1692,8 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c
 +	  Say N unless you are actively working on that port.
 diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c' '--exclude=modules.order' '--exclude=Module.symvers' /tmp/claude-1000/-home-agiu/c31b4b54-2d0c-437d-be58-71151bbba809/scratchpad/g3src/dev8/package/kernel/rtl8192cd/Makefile /home/agiu/dir842-build/openwrt/target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/Makefile
 --- a/package/kernel/rtl8192cd/Makefile	2026-07-30 13:32:13.779312011 -0300
-+++ b/package/kernel/rtl8192cd/Makefile	2026-07-30 18:14:39.998865486 -0300
-@@ -1,15 +1,197 @@
++++ b/package/kernel/rtl8192cd/Makefile	2026-07-30 20:11:34.023193965 -0300
+@@ -1,16 +1,236 @@
 +# ★★★ R4/G3 — PATH B (WEXT). This build does NOT use the vendor cfg80211 layer.
 +#
 +# History: -DRTK_NL80211 (further down, now off) enables the CALL SITES of the
@@ -1855,13 +1887,53 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c
  CONFIG_FREE_WBB_PIN=y
  CONFIG_MAC_PHY_RF_Parameter_V702B_Skyworth=y
  CONFIG_PCI_HCI=y
- CONFIG_PHY_EAT_40MHZ=y
+-CONFIG_PHY_EAT_40MHZ=y
 -CONFIG_RTL_5G_SLOT_0=y
++# ★★★ R4/G3 CRYSTAL — MUST STAY OFF ON THIS BOARD. Despite the "PHY"/"40MHZ" name
++# this is NOT a channel-bandwidth switch: for the 8197F it is the ONLY input that
++# picks the WLAN crystal, at 8192cd_hw.c:14672-14679
++#     if (GET_CHIP_VER(priv) == VERSION_8197F) {
++#         #ifdef CONFIG_PHY_EAT_40MHZ
++#             ClkSel = XTAL_CLK_SEL_40M;
++#         #else
++#             ClkSel = XTAL_CLK_SEL_25M;
++#         #endif
++#     }
++# and ClkSel is handed straight to InitPONHandler() — the WLAN power-on/PLL setup.
++# The vendor's strap-reading alternative right above it is dead here: it sits under
++# `#if defined(CONFIG_AUTO_PCIE_PHY_SCAN)`, which 8192cd_cfg.h:3535 only defines for
++# CONFIG_RTL_819X && __OSK__ && CONFIG_RTL_8196E — none of which this port defines.
++# So with the flag on, the Kconfig value silently WINS over the hardware.
++#
++# MEASURED, three independent sources say this board's WLAN crystal is 25 MHz:
++#   1. stock firmware on this exact unit    -> "[13.710000] clock 25MHz"
++#      (recon/bootlog-38400.txt:288, right after "[97F] Bonding Type 97FS, PKG1")
++#   2. our own mainline platform stub reads the bootstrap bit SR+0x08 BIT(24)
++#      (REALTEK_SR_BS_40MHZ) and prints "xtal 25MHz" -> the bit is CLEAR here
++#      (rtl8197f-wmac.c:254)
++#   3. with the flag ON we printed "clock 40MHz" and the radio was silent
++# Symptom when wrong: everything ABOVE the synthesiser looks perfect — firmware
++# loads, IQK completes, BDOK fires every TBTT (beacon_ok climbs at exactly the
++# beacon rate) — but the LO is off by 40/25 = 1.6x, so nothing lands in the 2.4 GHz
++# band and RX is stone deaf. Easy to misread as "the AP was never started".
++#
++# The flag's other uses are all in 8192cd_host.c's PCIe ROOT-COMPLEX MDIO PHY
++# setup, which this port does not use (mainline realtek-pci owns the RC) and which
++# is additionally gated on CONFIG_RTL_8198C / 819XD / 8196E / 88E — none defined.
++# CONFIG_PHY_EAT_40MHZ=y
 +# (G4) CONFIG_RTL_5G_SLOT_0=y
  CONFIG_RTL_CLIENT_MODE_SUPPORT=y
++# ★ R4/G3: the config-file MIB ingest. Without it CfgFileProc() and its call site
++# (8192cd_osdep.c:7691, on root-device open) are BOTH preprocessed away, so
++# /etc/Wireless/RTL8192CD.dat is silently ignored — which would make
++# base-files/lib/netifd/wireless/rtl8192cd.sh a no-op. It only selects
++# 8192cd_comapi.o, which CONFIG_RTL_COMAPI_WLTOOLS already links in, so this adds
++# no new objects. It also enables the "cfgfile" private ioctl (reload on demand).
++CONFIG_RTL_COMAPI_CFGFILE=y
  CONFIG_RTL_COMAPI_WLTOOLS=y
  CONFIG_RTL_DFS_SUPPORT=y
-@@ -19,29 +201,40 @@
+ CONFIG_RTL_DISABLE_WLAN_MIPS16=y
+@@ -19,29 +239,43 @@
  CONFIG_RTL_TDLS_SUPPORT=y
  CONFIG_RTL_VAP_SUPPORT=y
  CONFIG_RTL_WPS2_SUPPORT=y
@@ -1897,6 +1969,7 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c
  CONFIG_RTL_819X_SWCORE=y
  CONFIG_RTL_NO_BR_SHORTCUT=y
  
++ccflags-y += -DCONFIG_RTL_COMAPI_CFGFILE
  ccflags-y += -DCONFIG_RTL_COMAPI_WLTOOLS
 -ccflags-y += -DCONFIG_BAND_5G_ON_WLAN0
 +# (G4) ccflags-y += -DCONFIG_BAND_5G_ON_WLAN0
@@ -1904,13 +1977,16 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c
  ccflags-y += -DCONFIG_FREE_WBB_PIN
  ccflags-y += -DCONFIG_MAC_PHY_RF_Parameter_V702B_Skyworth
  ccflags-y += -DCONFIG_PCI_HCI
- ccflags-y += -DCONFIG_PHY_EAT_40MHZ
+-ccflags-y += -DCONFIG_PHY_EAT_40MHZ
 -ccflags-y += -DCONFIG_RTL_5G_SLOT_0
++# ✗ OFF — see the CONFIG_PHY_EAT_40MHZ block above. This board's WLAN crystal is
++#   25 MHz; asserting this made the 8197F PLL come up for a 40 MHz crystal.
++# ccflags-y += -DCONFIG_PHY_EAT_40MHZ
 +# (G4) ccflags-y += -DCONFIG_RTL_5G_SLOT_0
  ccflags-y += -DCONFIG_RTL_CLIENT_MODE_SUPPORT
  ccflags-y += -DCONFIG_RTL_DFS_SUPPORT
  ccflags-y += -DCONFIG_RTL_DISABLE_WLAN_MIPS16
-@@ -50,19 +243,19 @@
+@@ -50,19 +284,19 @@
  ccflags-y += -DCONFIG_RTL_TDLS_SUPPORT
  ccflags-y += -DCONFIG_RTL_VAP_SUPPORT
  ccflags-y += -DCONFIG_RTL_WPS2_SUPPORT
@@ -1936,7 +2012,7 @@ diff -ruN '--exclude=*.o' '--exclude=*.cmd' '--exclude=.tmp*' '--exclude=*.mod.c
  ccflags-y += -DCONFIG_RTL_819X_SWCORE
  ccflags-y += -DCONFIG_RTL_NO_BR_SHORTCUT
  
-@@ -350,6 +543,10 @@
+@@ -350,6 +584,10 @@
  	endif
  endif
  
