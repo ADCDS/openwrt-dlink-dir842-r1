@@ -91,6 +91,27 @@ set firewall.@defaults[0].flow_offloading_hw='1'
 commit firewall
 EOF
 
+# macaddr: the RTL8822BE efuse is blank, so rtw88 invents a RANDOM MAC every boot
+# ("efuse MAC invalid, using random ..." in the log) — a different BSSID on every
+# reboot, which is exactly what R3 asked to stop.
+# R3: derive it from the PER-UNIT base MAC in mtd1+0x00 (base+2, keeping base+0 =
+# WAN and base+1 = LAN as board.d assigns them), so the BSSID is stable AND unique
+# per unit. Falls back to a fixed locally-administered address if the field is
+# unprogrammed, so the radio still comes up deterministically.
+#
+# Unlike the ethernet MACs, reading mtd1 here is safe: this only sets the WiFi
+# BSSID. It is NOT a second writer for the ethernet MAC (board.d remains the sole
+# source for those, see above), so it cannot reintroduce the ASIC-vs-Linux mismatch
+# that a competing ethernet-MAC writer caused.
+DIR842_BASE_MAC=$(dd if=/dev/mtd1 bs=1 count=17 2>/dev/null)
+case "$DIR842_BASE_MAC" in
+[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F])
+	DIR842_WIFI_MAC=$(macaddr_add "$DIR842_BASE_MAC" 2) ;;
+*)
+	DIR842_WIFI_MAC='02:11:22:33:44:56' ;;
+esac
+logger -t dir842 "wifi BSSID MAC: $DIR842_WIFI_MAC"
+
 # --- 5 GHz AP on the PCIe RTL8822BE (rtw88); 2x2 VHT80. hwmode 11a = 5 GHz on
 #     this 4.14-era netifd. country BR unlocks the UNII-1 channels for beaconing
 #     (world/'00' marks them no-IR). macaddr set because the efuse is blank. ---
@@ -125,12 +146,10 @@ set wireless.default_radio0.ssid='DIR842-OpenWrt'
 # (added in R5) prompts for it on first login. Do NOT re-add a default key.
 set wireless.default_radio0.encryption='none'
 delete wireless.default_radio0.key
-# macaddr: the RTL8822BE efuse is blank so rtw88 invents a RANDOM MAC every boot
-# (see the boot log: "efuse MAC invalid, using random ..."). A fixed
-# locally-administered address at least makes the BSSID stable across reboots.
-# Proper fix (R3, pending): derive it from the per-unit MAC in mtd1+0x00, which is
-# where stock keeps it — see docs/VENDOR-PARITY-INVENTORY.md.
-set wireless.default_radio0.macaddr='02:11:22:33:44:56'
+EOF
+
+uci -q batch <<EOF
+set wireless.default_radio0.macaddr="$DIR842_WIFI_MAC"
 commit wireless
 EOF
 
