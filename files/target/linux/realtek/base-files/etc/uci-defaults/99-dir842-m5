@@ -30,20 +30,14 @@
 # box still comes up consistently with what gw_prog's fallback constants expect.
 . /lib/functions.sh
 . /lib/functions/system.sh
-# ⚠ KNOWN LIMITATION — read this before "fixing" it again.
-# Reading the per-unit MAC here does NOT work reliably: at uci-defaults time /dev/mtd1 is
-# not consistently readable yet, so the `dd` silently returns nothing and the fallback is
-# used. Worse, the failure is NON-DETERMINISTIC — one boot came up with the real per-unit
-# MACs (e0:1c:fc:51:c9:ef / :ee, confirmed also programmed into the ASIC netif) and a later
-# identical boot came up on the fallback. Since gw_prog copies whatever MAC the interface
-# has at that moment into the ASIC netif, a half-applied MAC is worse than a fixed one: if
-# Linux and the ASIC disagree the datapath blackholes entirely.
-# So: pin the deterministic pair for now. The ASCII per-unit MAC in mtd1+0x00 is real and
-# board.d/02_network reads it correctly for board.json; wiring it end-to-end needs the MAC
-# to be set BEFORE userspace — i.e. from the DT (an nvmem-cell on the MAC partition, if
-# 4.14's mtd exposes one here) or an early preinit hook — not from uci-defaults.
-DIR842_WAN_MAC='00:e0:4c:81:96:c3'
-DIR842_LAN_MAC='00:e0:4c:81:96:c2'
+# ★ The MAC is NOT set here — board.d/02_network is the SINGLE source of truth.
+# It reads the per-unit ASCII MAC from mtd1+0x00 and publishes it via board.json
+# before netifd configures the interfaces. This file used to ALSO pin
+# network.lan/wan.macaddr, and having two independent writers is exactly what made
+# the MAC non-deterministic: some boots came up per-unit, identical later boots on
+# the fallback, depending which won. Do not re-add a pin here.
+# The driver follows automatically — gw_netif_mac() programs the ASIC netif from the
+# interface's LIVE MAC, so the software and hardware datapaths cannot disagree.
 
 # NOTE: this heredoc is deliberately UNQUOTED (<<EOF, not <<'EOF') so the two MAC
 # variables above expand. Keep any literal '$' out of this block.
@@ -67,35 +61,21 @@ set network.lan.proto='static'
 set network.lan.ipaddr='192.168.0.1'
 set network.lan.netmask='255.255.255.0'
 delete network.lan.ip6assign
-# ★ Pin the LAN MAC to the ASIC's LAN netif MAC (gw_prog GW_MAC_LAN = ...c2). The
-# eth driver falls back to a RANDOM MAC when DT provides none, so on a fresh boot
-# LAN clients would ARP-resolve 192.168.0.1 to the random MAC — which never matches
-# ASIC netif[0], so the outbound hardware path silently never engages (everything
-# traps to the CPU). Same failure class as the wan.macaddr pin below, LAN side.
-# R3: no longer a hardcoded Realtek default — set from the PER-UNIT MAC in flash
-# ($DIR842_LAN_MAC, computed above from mtd1+0x00). gw_prog reads the live netif MACs via
-# gw_netif_mac() and programs the ASIC to match, so the two datapaths stay consistent.
-set network.lan.macaddr="$DIR842_LAN_MAC"
 set network.wan='interface'
 set network.wan.ifname='eth0.1'
 set network.wan.proto='static'
 set network.wan.ipaddr='172.16.0.1'
 set network.wan.netmask='255.255.255.0'
 delete network.wan6
-# ★ M6.6 Phase 3 CRITICAL: pin eth0.1's MAC to the ASIC's WAN netif MAC. gw_prog
-# programs the WAN L3 interface with GW_MAC_WAN = LAN-MAC+1 = ...c3, and the ASIC
-# rewrites HW-routed egress frames' src MAC to c3. But eth0.1 is a VLAN that inherits
-# eth0's ...c2, so CPU-path (software-masqueraded / box-originated) WAN frames go out
-# as c2 while the WAN peer's ARP + all HW-routed frames use c3. That mismatch silently
-# blackholes EVERY CPU<->WAN packet (the miss-path handshake, ICMP, box-originated),
-# while HW-routed traffic works — which is exactly the confusing failure it caused.
-# Aligning eth0.1 to c3 makes the software and hardware datapaths agree.
-# R3: per-unit WAN MAC = the flash base MAC ($DIR842_WAN_MAC). This MUST stay exactly
-# LAN-1 (equivalently LAN = WAN+1): the ASIC programs its WAN netif from eth0.1's live MAC
-# and rewrites HW-routed egress src to it, so if the software and hardware MACs disagree
-# every CPU<->WAN packet blackholes while HW-routed traffic still works — a genuinely
-# confusing failure mode. eth0.1 is a VLAN of eth0 and would otherwise inherit the LAN MAC.
-set network.wan.macaddr="$DIR842_WAN_MAC"
+# ★ MAC constraint that still matters, even though nothing here sets a MAC:
+# WAN must be exactly LAN-1 (equivalently LAN = WAN+1). gw_prog programs the ASIC's
+# WAN netif from eth0.1's LIVE MAC and rewrites HW-routed egress frames' source to
+# it. eth0.1 is a VLAN of eth0 and would otherwise just inherit the LAN MAC, so if
+# the software and hardware MACs disagree, every CPU<->WAN packet blackholes (the
+# miss-path handshake, ICMP, anything box-originated) while HW-routed traffic keeps
+# working — a genuinely confusing failure mode that cost real debugging time.
+# board.d/02_network satisfies this: it derives lan = wan + 1 from the single
+# per-unit base MAC in mtd1+0x00 and publishes BOTH via board.json.
 commit network
 EOF
 

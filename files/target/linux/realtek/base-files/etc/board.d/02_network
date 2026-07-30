@@ -39,26 +39,28 @@ case $board in
     # We used to read offset 19 (=0x13), i.e. the shared Realtek default, so every board
     # came up with the same MAC. Read the ASCII field instead and fall back to the old
     # behaviour if it is missing/garbage (some units may have an unprogrammed partition).
-    # Currently reads the Realtek DEFAULT block (offset 19), i.e. the MAC that is
-    # identical on every unit. Reading the per-unit ASCII MAC at 0x00 is what stock
-    # does and is the correct end state.
+    # DIR-842 R1: the mtd1 "MAC" partition carries TWO overlaid schemas.
+    #   0x00: D-Link per-unit base MAC as a 17-byte ASCII string ("e0:1c:fc:51:c9:ee")
+    #         = the WAN MAC; LAN = WAN + 1. This is what stock uses (libhwdata.so).
+    #   0x13: the Realtek vendor DEFAULT binary macAddr[] block (00:e0:4c:81:96:c1..c8),
+    #         identical on every unit.
+    # Reading offset 19 (=0x13) gives every board the same MAC, so read the ASCII
+    # field and fall back only if it is missing/garbage.
     #
-    # ⚠ It was reverted to this during a bisect of an apparent datapath regression
-    # (100% loss on every path). That regression was NOT REAL: the test harness ran
-    # `ip neigh flush` on the host immediately before each ping, recreating the
-    # cold-unicast condition from task #13 (ASIC L2 entries start empty; cold
-    # unicast is not delivered until traffic has flowed). The same box measured 0%
-    # loss on 56 B, 1400 B and the NAT path once traffic had warmed the tables. So
-    # the per-unit MAC is NOT known to break anything — that finding is retracted.
-    #
-    # It is still left reverted here for a different and unrelated reason, which
-    # does stand: applying the per-unit MAC from userspace is non-deterministic
-    # (/dev/mtd1 is not reliably readable that early, and one boot came up on the
-    # real MAC while an identical later boot came up on the fallback). Doing it
-    # properly means setting the MAC BEFORE userspace — a DT nvmem-cell on the MAC
-    # partition, or a preinit hook — not from board.d/uci-defaults. See
-    # uci-defaults/99-dir842-m5.
-    wan_mac=$(mtd_get_mac_binary MAC 19)
+    # ★ THIS IS THE SINGLE SOURCE OF TRUTH FOR THE MAC — do not add a second one.
+    # An earlier attempt ALSO pinned network.lan/wan.macaddr from uci-defaults. Two
+    # independent sources is what made the MAC non-deterministic: some boots came up
+    # on the per-unit MAC and identical later boots on the fallback, depending on
+    # which writer won. board.d is the right place because it runs before netifd
+    # configures the interfaces, and this read is proven to work here (a boot with
+    # this code brought eth0.2 up as e0:1c:fc:51:c9:ef).
+    # The driver side follows automatically: gw_netif_mac() programs the ASIC netif
+    # from the interface's LIVE MAC, so Linux and the ASIC cannot disagree.
+    wan_mac=$(dd if=/dev/mtd1 bs=1 count=17 2>/dev/null)
+    case "$wan_mac" in
+      [0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]) ;;
+      *) wan_mac=$(mtd_get_mac_binary MAC 19) ;;
+    esac
     lan_mac=$(macaddr_add "$wan_mac" 1)
     ;;
   gwr1200ac-v2)

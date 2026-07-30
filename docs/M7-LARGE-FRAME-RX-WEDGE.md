@@ -394,3 +394,31 @@ Running total of bench confounds, all of which produce a false "100% packet loss
 host USB-eth loses its IPv4; the `172.16.0.0/24` route reverts; tiny's `br0` loses
 `172.16.0.2`; the box rebooted out of the volatile RAM image (#4); and now — the
 ARP flush in the measurement itself (#5).
+
+### R2 gate result (2026-07-30) — PASSED, with stated coverage limits
+
+Run with `mbuf_runout_ie=0` (CPUIIMR bit16 masked = shipped-stock 0x807E31FE):
+
+    888,569 x 1400 B box-terminating frames, 9 min continuous saturation
+      0% packet loss
+      0 fabric resets            <- the gate criterion
+      0 FCS wedge detections     <- self-heal detector never armed
+      post-run: 56 B 0% / 1400 B 0% / NAT 0% (NAT after re-warming, see confound #5)
+
+Large box-terminating traffic is exactly this wedge's documented trigger (task #15),
+so this is the right load to gate on. `mbuf_runout_ie=0` is now the default.
+
+**What this establishes:** masking bit16 is safe — it does not break RX. The earlier
+claim that it left the RX engine dead is retracted (confound #5).
+
+**What it does NOT establish** — stated plainly so nobody over-reads it:
+- It does not prove the candidate *fixed* the wedge. The wedge reproduces only
+  ~1 in 3–4 heavy attempts, so one clean run is equally consistent with "fixed" and
+  "did not fire this time". Closing this properly needs several runs per setting.
+- No A/B baseline at `mbuf_runout_ie=1` was run for comparison.
+- **Coverage gap:** the load was box-terminating ICMP, not bidirectional *forwarded*
+  saturation. M6.3b's original reason for arming bit16 was napi falling behind under
+  forwarded load with the Rx ring running out of CPU-owned slots — that scenario is
+  still untested. (iperf3's server would not stay resident on the WAN peer; note also
+  that `ssh tiny` routes over Tailscale, NOT through the box, so any load driven that
+  way never traverses the device — target `172.16.0.2` explicitly.)

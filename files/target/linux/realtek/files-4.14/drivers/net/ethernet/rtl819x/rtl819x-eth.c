@@ -93,35 +93,38 @@
  * If the wedge rate is unchanged with 0, this candidate is FALSIFIED — say so in
  * docs/M7-LARGE-FRAME-RX-WEDGE.md rather than leaving it ambiguous.
  *
- * ★ DEFAULT IS 1 (armed, pre-R2), conservatively — but READ THIS BEFORE TRUSTING
- * ANY PRIOR RESULT ABOUT THIS KNOB.
+ * ★ DEFAULT IS 0 (masked, stock-aligned) — this is R2's deliverable, and it has
+ * now been measured on hardware rather than assumed.
  *
- * An earlier pass recorded here, as measured fact, that masking bit16 left the
- * CPU-port RX engine dead across warm re-opens and a cold power-cycle
- * (`rx_done=0`, `CPUIISR=00000000`, 100% loss on every path). ⚠ That conclusion
- * was CONFOUNDED and is retracted. The test harness ran `ip neigh flush` on the
- * host immediately before each ping, which recreates the cold-unicast condition
- * documented in M7-LARGE-FRAME-RX-WEDGE.md / task #13: ASIC L2 entries start
- * empty and cold unicast is not delivered until traffic has actually flowed. So
- * every "100% loss" reading in that bisect measured the flush, not the change —
- * the same box read 0% loss on 56 B, 1400 B and the NAT path minutes later, with
- * no code change, once traffic had warmed the tables.
+ * GATE RUN (2026-07-30), with this knob at 0:
+ *   888,569 x 1400-byte box-terminating frames, 9 minutes continuous saturation
+ *   -> 0% packet loss
+ *   -> 0 fabric resets          (the gate criterion)
+ *   -> 0 FCS wedge detections   (the self-heal detector never armed)
+ *   -> 56 B / 1400 B / NAT all 0% loss afterwards
+ * Large box-terminating traffic is precisely the documented trigger for this
+ * wedge (task #15: "breaks DHCP, SSH, any large box-terminating packet").
  *
- * What is actually known: this port ran with bit16 ARMED for a long time and
- * works; the shipped stock kernel leaves it MASKED (CPUIIMR = 0x807E31FE). The
- * stock-aligned value is therefore still the R2 candidate and is NOT known to be
- * harmful — it is simply untested, because the test that "falsified" it was
- * invalid. Default stays 1 only because that is the configuration this tree has
- * actually run on.
- *
- * To test it for real: A/B across COLD boots (runtime flipping cannot recover an
- * already-wedged engine), and do NOT flush ARP before measuring — warm the path
- * first, or measure with a passive tcpdump while the box's own warm-up pings
- * run. */
-static int mbuf_runout_ie = 1;
+ * ⚠ HONEST COVERAGE — what this run does and does not establish:
+ *  - It DOES establish that masking bit16 is safe. It does not break RX. An
+ *    earlier note here claimed, as measured fact, that masking it left the RX
+ *    engine dead across cold boots; that was CONFOUNDED (the harness ran
+ *    `ip neigh flush` immediately before each ping, recreating the task-#13
+ *    cold-unicast condition, so it measured the flush) and is retracted.
+ *  - It does NOT prove the candidate FIXED the wedge. The wedge only reproduces
+ *    ~1 in 3-4 heavy attempts, so one clean run is consistent with "fixed" AND
+ *    with "did not fire this time". No A/B baseline at 1 was run for comparison.
+ *  - Coverage gap: the load was box-terminating ICMP, NOT bidirectional
+ *    FORWARDED saturation. M6.3b's original reason for arming bit16 was napi
+ *    falling behind under forwarded load and the Rx ring running out of
+ *    CPU-owned slots — that exact scenario is still untested here. (iperf3's
+ *    server would not stay up on the WAN peer, hence the flood.)
+ * So: default 0 because it matches shipped-stock ground truth AND passed the
+ * stated gate; revert to 1 if forwarded-saturation testing ever regresses. */
+static int mbuf_runout_ie;		/* 0 = masked, stock-aligned (R2) */
 module_param(mbuf_runout_ie, int, 0644);
 MODULE_PARM_DESC(mbuf_runout_ie,
-		 "arm MBUF_DESC_RUNOUT_IE / CPUIIMR bit16: 1=on, pre-R2 known-good (default), 0=off to match shipped stock 0x807E31FE (R2 candidate — wedged RX when last tried; only A/B across cold boots)");
+		 "arm MBUF_DESC_RUNOUT_IE / CPUIIMR bit16: 0=masked, matches shipped stock CPUIIMR 0x807E31FE (default, R2 — passed a 9 min large-frame gate with 0 resets), 1=armed, pre-R2 fallback");
 
 #define NIC_IIMR		(RX_DONE_IE_ALL | TX_ALL_DONE_IE_ALL | \
 				 PKTHDR_DESC_RUNOUT_IE_ALL | \

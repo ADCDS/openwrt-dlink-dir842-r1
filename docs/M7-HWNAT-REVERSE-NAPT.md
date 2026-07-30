@@ -255,3 +255,52 @@ believing any negative result:
 Rule of thumb that would have saved all three runs: **never measure without first
 proving the box is up.** Carrier and a fresh `Linux version` are two cheap reads;
 a wrong conclusion costs a rebuild-and-boot cycle plus the bad inference it seeds.
+
+## R6 gate measurement (2026-07-30) — baseline taken, hardware reverse NOT engaging
+
+The plan's R6 gate is: *`eth0.1` rx delta ≈ 0 during a reverse transfer (hardware
+reverse) vs ≈ every packet (still trapped).* That measurement had never actually
+been taken. It has now.
+
+**Method.** iperf3 was unusable — its server would not stay resident on the WAN peer
+across a tool invocation. Reverse-path bulk traffic was driven instead with a plain
+ssh stream to the peer's WAN address, which traverses the box as an established
+NAT flow with data going WAN→LAN:
+
+    ssh -i <key> agiu@172.16.0.2 "dd if=/dev/zero bs=1M count=300" | dd of=/dev/null
+
+⚠ Two bench traps worth recording: `ssh tiny` resolves over Tailscale (100.64.0.14)
+and does NOT traverse the box — always target `172.16.0.2` explicitly. And ssh to the
+raw IP does not pick up the `Host tiny` config block, so it needs `-i <key>
+-o BatchMode=yes` or it hangs on auth and looks like a network failure.
+
+**Result:**
+
+    eth0.1 rx_packets  before 70  ->  after 55063
+    CPU-seen WAN rx delta = 54,993 packets for ~300 MB downloaded
+
+That is the "still trapped" signature: essentially every inbound packet is taken by
+the CPU. **Hardware reverse-NAPT is not engaging** — confirmed by measurement now,
+not inferred. (`hwnat` was N for this run, so this is the honest software baseline
+against which any future hardware-reverse attempt must be compared.)
+
+**The documented consequence reproduced.** After ~180 s of sustained download the box
+wedged: 75% loss on small frames, 100% on 1400 B and on the NAT path, and it did NOT
+recover by warming. This is the "a sustained download wedges the box" behaviour, and
+it is exactly why R6 matters beyond throughput — the CPU-trapped reverse path is what
+makes downloads destabilise the box.
+
+**Detector gap confirmed.** The FCS wedge detector did NOT fire (`resets=0`), so no
+self-heal occurred; the box needed a manual `echo 3 > .../fabric_reset` (+ gw re-arm
++ warm), which restored all three paths to 0% loss. This is precisely residual
+follow-up (2) recorded above — a box wedged without enough large-frame arrivals to
+arm the detector stays wedged. Worth raising in priority: it is now observed, not
+hypothetical.
+
+**Status: R6's objective (make the ASIC do the reverse) is NOT achieved.** Per the
+plan this is the time-boxed stretch, so it aborts cleanly here with the falsified
+candidates recorded. What R6 gained this pass: the gate baseline is measured, the
+wedge-on-download is reproduced end-to-end, and the detector gap is confirmed.
+Still-open candidates are unchanged — `SWTCR0.WANRouteMode=ToCpu` retest under the
+now-known confounds (#4 reboot, #5 ARP flush), and the live stock register dump as
+ground truth.
