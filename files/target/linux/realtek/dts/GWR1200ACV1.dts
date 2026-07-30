@@ -16,14 +16,18 @@
 	};
 
 	chosen {
-		/* R3: rtl819x.hwnat=1 — the rtl865x offload driver is built-in and its
-		 * `hwnat` param defaults to 0 with nothing in userspace setting it, so
-		 * hardware NAT was silently OFF on every unattended boot even though fw3
-		 * emits the `-j FLOWOFFLOAD --hw` rule. A kernel-cmdline param is the only
-		 * thing that lands before the first packet for a built-in driver.
+		/* R3: hwnat is deliberately NOT enabled here. Measured on hardware: setting
+		 * rtl819x.hwnat=1 on the cmdline turns hardware NAT on before the ASIC's L2/L3
+		 * tables are warm, and the datapath then fails completely — host<->box was 100%
+		 * loss and returned to 0% the instant `echo 0 > .../parameters/hwnat` + a
+		 * fabric_reset ran. Same interaction seen earlier when hwnat=1 killed even ICMP
+		 * forwarding on a cold ASIC. Offload must be armed AFTER bring-up (gw_prog + L2
+		 * warm), so it belongs in the boot script, not the kernel command line — and it
+		 * stays off until the WAN->LAN reverse path is fixed, because a sustained
+		 * download with offload on wedges the box.
 		 * R5: ipv6.disable=1 removed — odhcpd/odhcp6c/ip6tables were already in the
 		 * image but inert while v6 was disabled at the kernel. */
-		bootargs = "console=ttyS0,38400 rtl819x.hwnat=1";
+		bootargs = "console=ttyS0,38400";
 	};
 
 	gpio-keys-polled {

@@ -587,7 +587,25 @@ static int gw_prog(struct seq_file *m, void *v)
 	 *   bit2 EnNAPTAutoDelete     = 1  (Phase 3: HW clears valid at age-0; the aging
 	 *                                   worker reads valid==0 as "flow idle/dead")
 	 *   bit14 NAPTF2CPU           = 1  (non-TCP/UDP L4 protos -> CPU) */
-	REG32(SWTCR0) = ((REG32(SWTCR0) & ~(3u << 16) & ~0x7u) | (0x3Fu << 5)) | (1u << 14) | (1u << 2);
+	/* R6: bits[4:3] WANRouteMode = ToCpu(1). asicregs.h:1563-1571 defines it as "Route WAN
+	 * packets": Forward(0) / ToCpu(1) / Drop(2). It sat at the silicon reset default
+	 * FORWARD and NOTHING in the vendor SDK ever writes it — and Forward is exactly the
+	 * reverse-path flood: a WAN-ingress reply that does not come out of the L4
+	 * reverse-NAPT stage gets TRANSIT-ROUTED, so it left the WAN again with an unresolved
+	 * nexthop DMAC (00:00:00:00:00:10 on the peer's wire). Transit routing from the WAN is
+	 * meaningless on a NAT gateway. ToCpu diverts ONLY the packets that MISS reverse-NAPT
+	 * (software un-NAT, the correct fallback) while a packet that HITS its inbound row
+	 * stays on the hardware path — unlike the dst-MAC->TOCPU ACL rule this replaces, which
+	 * blanket-trapped EVERY WAN frame and so capped downloads at software speed (measured:
+	 * WAN_RX == every ACK) and wedged the box under sustained load.
+	 * NOTE: an earlier attempt at this read as "WAN dead both ways", but that run was
+	 * CONFOUNDED — tiny had silently lost 172.16.0.2 and the host route had reverted to the
+	 * house gateway, which both present as 100% loss. Retest only via bench-up.sh. */
+	/* R6 BISECT: WANRouteMode left at Forward(0) for now — bits[4:3] explicitly cleared so
+	 * the value is deliberate rather than inherited. Flip `| (1u << 3)` back on to retest
+	 * ToCpu (see the analysis above) once the datapath is known-good on this image. */
+	REG32(SWTCR0) = ((REG32(SWTCR0) & ~(3u << 16) & ~(3u << 3) & ~0x7u) | (0x3Fu << 5))
+		      | (1u << 14) | (1u << 2);
 	REG32(GW_MACCR1) |= (1u << 0);	/* M6.6 PORT0_ROUTER_MODE: put the trunk (SoC port0) in router mode — test whether it permits the L3-routed U-turn (egress back out the single trunk) that source-port filtering otherwise blocks, since hal(LAN)+tiny(WAN) are both behind port0 */
 	/* Phase 3 aging: TEACR bit0 L2/ARP aging OFF (keeps the static ARP[64] nexthop
 	 * chain from aging→invalid mid-flow, which re-triggered the bad-pointer hang);
@@ -638,14 +656,14 @@ static int gw_prog(struct seq_file *m, void *v)
 		 * transit-routed back out the WAN (the 00:00:00:00:00:10 flood). Encoding (agent-
 		 * traced): w0/w1[15:0]=MAC value, w1[31:16]/w2=full mask, w7=pktOpApp7|TOCPU(3)|MAC(0).
 		 * (Bench-hardcoded WAN MAC; generalise from the WAN netif MAC later.) */
-		{
-			u32 acl_tome[11] = { 0 };
-			acl_tome[0] = 0x4c8196c3u;	/* dMacP31_16:dMacP15_0  = 4c:81 : 96:c3 */
-			acl_tome[1] = 0xffff00e0u;	/* dMacM15_0 : dMacP47_32 = mask : 00:e0 */
-			acl_tome[2] = 0xffffffffu;	/* dMacM47_32:dMacM31_16 = full 6-byte mask */
-			acl_tome[7] = 0x07000030u;	/* pktOpApp=7 | actionType=TOCPU(3)@[7:4] | ruleType=MAC(0) */
-			rtl865x_asic_write_entry(ASIC_TYPE_ACL_RULE, 4, acl_tome, true);
-		}
+		/* R6: the dst-MAC==WAN-MAC -> TOCPU rule that used to live here at slot 4 is GONE.
+		 * It did stop the reverse-path flood, but only by trapping EVERY WAN ingress frame
+		 * to the CPU — measured WAN_RX == every single ACK — so downloads ran at software
+		 * speed and a sustained one wedged the box (large frames hammering the CPU is the
+		 * M7 large-frame-wedge trigger). It also hardcoded this bench unit's WAN MAC.
+		 * The flood is now handled by SWTCR0 WANRouteMode=ToCpu (see above), which diverts
+		 * only reverse-NAPT MISSES and leaves hits on the hardware path.
+		 * Do NOT re-add a blanket TOCPU rule here: it silently un-accelerates downloads. */
 	}
 	/*
 	 * M6.6 Fork A: NO source-port CPU-tag (it breaks the box's CPU RX). The SoC

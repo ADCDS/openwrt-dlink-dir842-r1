@@ -224,3 +224,34 @@ not the register values; it is the SoC's **CPU-TX egress** on the cold path — 
 port. Next step: diff the CPU-TX path (`_New_swNic_send` portlist / `ph_srcExtPortNum` /
 SoC VLAN+PVID membership programmed by `rtl865x_start`) between a loader boot and a cold
 flash boot, since every register we currently replicate already matches.
+
+## Bench confound #4: the box reboots mid-test (RAM boot is volatile)
+
+Cost three consecutive wrong conclusions, so it goes here with the other guards.
+
+Symptom: every path reads 100% packet loss, *including* the hand-run recovery
+sequence that had worked minutes earlier. It looks exactly like a datapath
+regression from whatever you just changed.
+
+Actual cause: the box had **rebooted**. A RAM boot does not persist, so after a
+reset the box is no longer running the image under test. The boot log made it
+unambiguous — two `DRAM Size` / `Jump to image` pairs, and only the *first* was
+followed by `Linux version`:
+
+    DRAM Size ... Jump to image ... Linux version     <- the RAM boot under test
+    DRAM Size ... Jump to image                       <- rebooted, never came up
+
+Add to the trust-the-bench checklist, and check these **in this order** before
+believing any negative result:
+
+1. `cat /sys/class/net/<usb-eth>/carrier` — 0 means the link is down; a box
+   mid-reset reads carrier 0 and every ping fails for a reason that has nothing
+   to do with your change.
+2. `grep -c 'Linux version' bootlog` — must have advanced since the boot you
+   started. A trailing `Jump to image` with no `Linux version` = the box died.
+3. Then the three known reverters (host USB-eth IPv4, the `172.16.0.0/24` route,
+   tiny's `br0` address).
+
+Rule of thumb that would have saved all three runs: **never measure without first
+proving the box is up.** Carrier and a fresh `Linux version` are two cheap reads;
+a wrong conclusion costs a rebuild-and-boot cycle plus the bad inference it seeds.

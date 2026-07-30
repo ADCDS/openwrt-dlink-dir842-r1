@@ -30,14 +30,20 @@
 # box still comes up consistently with what gw_prog's fallback constants expect.
 . /lib/functions.sh
 . /lib/functions/system.sh
-DIR842_WAN_MAC=$(dd if=/dev/mtd1 bs=1 count=17 2>/dev/null)
-case "$DIR842_WAN_MAC" in
-  [0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F])
-	DIR842_LAN_MAC=$(macaddr_add "$DIR842_WAN_MAC" 1) ;;
-  *)
-	DIR842_WAN_MAC='00:e0:4c:81:96:c3'; DIR842_LAN_MAC='00:e0:4c:81:96:c2' ;;
-esac
-logger -t dir842 "per-unit MACs from flash: lan=$DIR842_LAN_MAC wan=$DIR842_WAN_MAC"
+# ⚠ KNOWN LIMITATION — read this before "fixing" it again.
+# Reading the per-unit MAC here does NOT work reliably: at uci-defaults time /dev/mtd1 is
+# not consistently readable yet, so the `dd` silently returns nothing and the fallback is
+# used. Worse, the failure is NON-DETERMINISTIC — one boot came up with the real per-unit
+# MACs (e0:1c:fc:51:c9:ef / :ee, confirmed also programmed into the ASIC netif) and a later
+# identical boot came up on the fallback. Since gw_prog copies whatever MAC the interface
+# has at that moment into the ASIC netif, a half-applied MAC is worse than a fixed one: if
+# Linux and the ASIC disagree the datapath blackholes entirely.
+# So: pin the deterministic pair for now. The ASCII per-unit MAC in mtd1+0x00 is real and
+# board.d/02_network reads it correctly for board.json; wiring it end-to-end needs the MAC
+# to be set BEFORE userspace — i.e. from the DT (an nvmem-cell on the MAC partition, if
+# 4.14's mtd exposes one here) or an early preinit hook — not from uci-defaults.
+DIR842_WAN_MAC='00:e0:4c:81:96:c3'
+DIR842_LAN_MAC='00:e0:4c:81:96:c2'
 
 # NOTE: this heredoc is deliberately UNQUOTED (<<EOF, not <<'EOF') so the two MAC
 # variables above expand. Keep any literal '$' out of this block.
@@ -116,7 +122,17 @@ set wireless.radio0.hwmode='11a'
 set wireless.radio0.channel='36'
 set wireless.radio0.htmode='VHT80'
 set wireless.radio0.country='BR'
-set wireless.radio0.disabled='0'
+# ★ radio stays DISABLED by default, and this is deliberate — do not "fix" it again.
+# R3 briefly set this to '0'. Result, measured: the box HANGS during rtw88 bring-up. The
+# boot log shows `write RF mode table fail` + a WARN from `iw` (rtw88_8822be), then the
+# console goes silent and every datapath reads 100% packet loss — which is easy to
+# misdiagnose as a switch/ASIC regression, because that is exactly what it looks like.
+# Cause is the BLANK EFUSE on this board: rtw88 has no RF cal to program. The real fix is
+# R3's remaining item — feed the calibration from mtd1 (5 GHz tables at 0x171/0x235) and
+# use RFE type 0 as stock does, instead of our patch's forced RFE 2 — after which this can
+# be flipped to '0'. Until then bring WiFi up by hand when you want it:
+#     uci set wireless.radio0.disabled=0 && wifi up
+set wireless.radio0.disabled='1'
 set wireless.default_radio0='wifi-iface'
 set wireless.default_radio0.device='radio0'
 set wireless.default_radio0.network='lan'
@@ -148,3 +164,6 @@ EOF
 grep -qx 'dhcp-broadcast' /etc/dnsmasq.conf 2>/dev/null || echo 'dhcp-broadcast' >> /etc/dnsmasq.conf
 
 exit 0
+
+# R3: enable the ordered ASIC bring-up service (replaces the old rc.local race)
+/etc/init.d/dir842-asic enable 2>/dev/null

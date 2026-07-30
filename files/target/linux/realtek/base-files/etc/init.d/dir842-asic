@@ -1,0 +1,82 @@
+#!/bin/sh /etc/rc.common
+# DIR-842 R1 (RTL8197F) — bring the ASIC hardware datapath up at boot, in order.
+#
+# R3: replaces the old rc.local `( sleep 5; ... ) &` race. That version fired at a fixed
+# 5 s regardless of whether netifd had finished, did not warm the ASIC L2 tables at all,
+# and never re-ran after a netifd reload — so a boot could easily land with the gateway
+# half-programmed. This is an ordered service instead, and it is idempotent so
+# `/etc/init.d/dir842-asic restart` is a supported recovery.
+#
+# Ordering matters and is the whole point of the file:
+#   1. swconfig apply  — the external RTL8367S keeps a wedged trunk->jack forwarding state
+#      across warm reloads (rtl8367b_reset_chip() deliberately skips the 8367S soft reset
+#      to preserve the loader's power-on RGMII uplink). Re-applying the VLAN/forwarding
+#      tables after netifd clears it; without it routed frames cross the trunk but never
+#      egress the jacks.
+#   2. gw_prog (/proc/rtl865x_gw) — programs netifs + routes + L2 nexthops + the ACL
+#      ranges into the ASIC. ★ This WIPES the ASIC L2 tables, so it MUST come before the
+#      warm-up, never after.
+#   3. warm — the ASIC L2/ARP entries start empty and cold unicast is not delivered until
+#      traffic has flowed (the #13 family). A few box-originated pings prime them. Without
+#      this step a freshly booted box reads as "100% packet loss" and looks broken.
+#
+# ★ hwnat is deliberately NOT armed here. Measured: enabling it before the tables are warm
+# kills the datapath outright (100% loss, recovers on `echo 0` + fabric_reset), and with
+# the WAN->LAN reverse path still CPU-trapped a sustained download wedges the box. Arm it
+# by hand once you want to exercise offload:
+#     echo 1 > /sys/module/rtl819x/parameters/hwnat
+START=97
+USE_PROCD=0
+
+# LAN/WAN peers to prime the L2 tables with. Overridable in /etc/config/dir842 later; the
+# defaults are the bench rig's peers and simply time out harmlessly elsewhere.
+WARM_HOSTS="${WARM_HOSTS:-192.168.0.2 172.16.0.2}"
+
+asic_program() {
+	swconfig dev switch0 set apply 1 2>/dev/null
+	sleep 1
+	# ★ MEASURED-REQUIRED: a level-3 fabric reset before programming. Without it a fresh
+	# boot comes up with the switch core in a state where NOTHING forwards — every path
+	# reads 100% packet loss even though links are up, VLANs are right, br-lan has its IP
+	# and gw_prog reports "netif readback PASS". With it (then gw_prog, then warm) the very
+	# same boot goes to 0% loss. Level 3 = engine reinit + CPUICR soft-reset + full fabric
+	# reset (SIRR FULL_RST -> swcore clock cycle -> MEMCR SRAM re-init -> 153-reg restore),
+	# and it re-arms the ASIC gw tables in-kernel, which is why gw_prog must follow it.
+	echo 3 > /sys/module/rtl819x/parameters/fabric_reset 2>/dev/null
+	sleep 3
+	# read side-effect: gw_prog() programs the whole L3/L4 datapath. NOTE this WIPES the
+	# ASIC L2 tables, so the warm-up must come after.
+	cat /proc/rtl865x_gw >/dev/null 2>&1
+}
+
+asic_warm() {
+	local h i
+	for i in 1 2 3; do
+		for h in $WARM_HOSTS; do
+			ping -c2 -W1 "$h" >/dev/null 2>&1
+		done
+		sleep 1
+	done
+}
+
+start() {
+	# Backgrounded so boot never blocks on the warm-up, but strictly ordered inside.
+	(
+		# let netifd finish creating eth0.1/eth0.2 + br-lan and applying MACs, so
+		# gw_prog reads the real per-unit netif MACs (gw_netif_mac) rather than the
+		# fallback constants
+		sleep 5
+		asic_program
+		asic_warm
+		logger -t dir842-asic "ASIC datapath programmed and L2 warmed (hwnat left off)"
+	) &
+}
+
+stop() {
+	:
+}
+
+restart() {
+	asic_program
+	asic_warm
+}

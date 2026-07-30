@@ -231,14 +231,12 @@ define Device/GWR1200AC-V1
   DEVICE_PACKAGES := kmod-rtw88 rtl8822be-firmware wpad-basic iw \
 	kmod-leds-gpio kmod-gpio-button-hotplug swconfig \
 	ppp ppp-mod-pppoe kmod-nf-flow kmod-ipt-offload iperf3
-  # R3: rtl819x.hwnat=1 — the offload driver is built-in and its `hwnat` module
-  # param defaults to 0, and nothing in userspace ever set it, so hardware NAT was
-  # silently OFF on every unattended boot even though fw3 emits the
-  # `-j FLOWOFFLOAD --hw` rule. Setting it on the kernel command line is the only
-  # place that works for a built-in driver before the first packet.
+  # R3: hwnat deliberately NOT on the cmdline — measured, it breaks the datapath when
+  # armed before the ASIC tables are warm (100% loss; recovers immediately on
+  # `echo 0 > .../parameters/hwnat` + fabric_reset). Arm offload after bring-up instead.
   # R5: ipv6.disable=1 dropped — the v6 packages (odhcpd/odhcp6c/ip6tables) were
   # already shipped but dead weight while the kernel had v6 compiled out at boot.
-  CMDLINE := console=ttyS0,38400 rtl819x.hwnat=1
+  CMDLINE := console=ttyS0,38400
 endef
 TARGET_DEVICES += GWR1200AC-V1
 
