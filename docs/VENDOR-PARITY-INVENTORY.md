@@ -367,3 +367,60 @@ dword0[15:0] after ring init.** Make that the first thing the ring milestone che
 Chip identity is now settled on silicon (all read at probe): bonding strap 10 →
 package_type 1, cut 1 (→ header tables NOT used), HAL type id 14 → **chipver 23** —
 which is exactly the branch the TXDESC question lives on.
+
+### R4/G3 — source acquired and the port surface MEASURED (2026-07-30)
+
+Fetched and verified the 8devices `v3.4.11e/openwrt-18.06-rtkmipsel-3.18` driver
+(sparse clone of `package/kernel/rtl8192cd`, 36 MB):
+
+    WlanHAL/RTL88XX/RTL8197F/ + RTL8197FE/      present
+    WlanHAL/Data/8197F/rtl8197Ffw.bin           61,648 B  (matches the expected fingerprint)
+    efuse_97f/                                  present
+    8192cd_hw.c                                 1,008,120 B (exact expected size)
+    prebuilt .o/.ko/.a                          0     <- full source, GPL-clean
+    scale                                       290 .c + 374 .h, 792,378 LoC
+
+★ Its build config is literally G4:
+
+    CONFIG_SOC_WIFI=y            CONFIG_SOC_RFE_TYPE_0=y
+    CONFIG_SLOT_0_8822BE=y       CONFIG_SLOT_0_RFE_TYPE_10=y
+
+i.e. the on-SoC 2.4 GHz radio and a PCIe RTL8822BE driven together by one driver —
+our exact hardware pairing. And `SOC_RFE_TYPE_0` independently corroborates the
+`rfe_type = 0` decoded from *our* stock binary for the on-SoC radio. Two unrelated
+sources agreeing on that value is meaningful.
+
+**The 3.18 → 4.14 port surface, measured rather than estimated.** Scanned the tree
+for APIs that changed between those kernels, then checked each against the actual
+4.14.187 headers in this build:
+
+| API | in 4.14? | files | verdict |
+|---|---|---|---|
+| `init_timer` | present | 14 | no work (removed in 4.15, not 4.14) |
+| `setup_timer` | present | 6 | no work |
+| `PDE_DATA` | present | 1 | no work |
+| `trans_start` | **absent** | 2 | real break (removed 4.7 → `netif_trans_update`) |
+| `create_proc_entry` | **absent** | 3 | real break (likely dead `#ifdef` legs — check first) |
+| `strnicmp` | **absent** | 2 | real break (→ `strncasecmp`) |
+| `get_ds` | **absent** | 1 | real break |
+| `asm/rtl865x/*` | vendor | 5 | supply or stub |
+| `net/rtl/*` | vendor | 3 | supply or stub |
+
+**So the kernel-facing break surface is ~8 files of API fixes plus ~8 files needing
+vendor headers — out of 664 source files.** That is the opposite of the "port a
+792k-LoC driver" framing: this driver carries its own OS abstraction layer, so almost
+none of its bulk touches kernel API. The 21 files flagged for timer APIs need nothing
+at all, because those were removed in 4.15 and this target is 4.14.
+
+This does NOT make G3 free. The remaining risk is exactly where it always was and is
+not measurable by grep: **SoC WMAC bring-up and per-board RF configuration** (RFE
+type, external PA/LNA, per-unit calibration out of the MAC partition), plus getting a
+WEXT-era driver and mac80211's rtw88 to coexist for G4. But the kernel-API objection
+that made G3 look prohibitive does not survive contact with the numbers.
+
+Reproduce the fetch:
+
+    git clone --depth 1 --filter=blob:none --sparse \
+      -b v3.4.11e/openwrt-18.06-rtkmipsel-3.18 \
+      https://github.com/8devices/openwrt-8devices.git
+    cd openwrt-8devices && git sparse-checkout set package/kernel/rtl8192cd
