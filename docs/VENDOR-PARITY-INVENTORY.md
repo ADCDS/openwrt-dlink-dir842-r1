@@ -496,3 +496,39 @@ inference about include order; the preprocessed output settles it in one step.
 
 State: driver `# CONFIG_RTL8192CD is not set`, image builds (4.75 MB of 7.9 MB), staged
 sources and header fixes all in place — re-enabling one config symbol resumes here.
+
+#### ROOT CAUSE of the G3 compile blocker — it is the ccflags, not the include graph
+
+Preprocessing the failing translation unit (the step named above) settled it, and the
+answer was in neither place I had been looking.
+
+`SUPPORT_TX_AMSDU_SHORTCUT` — the macro that gates both the struct and its use — is
+defined in `8192cd_cfg.h` behind a chain of **vendor** config macros:
+
+    #if defined(CONFIG_WLAN_HAL_8814AE) || defined(CONFIG_WLAN_HAL_8822BE) && !defined(__ECOS)
+    #define SUPPORT_TX_AMSDU
+    #endif
+    #if !defined(CONFIG_RTL_8198C)
+    #ifdef SUPPORT_TX_AMSDU
+    #if defined(TX_SHORTCUT) && !defined(CONFIG_RTK_MESH)
+    #define SUPPORT_TX_AMSDU_SHORTCUT
+
+Those macros do **not** come from the kernel `.config` — `CONFIG_RTL_8197F` is not in it
+at all. They come from the **vendor Makefile's `ccflags-y += -D...` lines** (e.g.
+`-DCONFIG_WLAN_HAL_8197F` at `Makefile:62`, and the `CONFIG_SLOT_0_8822BE` /
+`CONFIG_SOC_RFE_TYPE_0` family that gave this tree its G4 significance).
+
+So the driver's feature macros are only self-consistent when the full vendor ccflags set
+reaches every translation unit. Under this port's Kconfig/Makefile hookup that is not
+guaranteed for the `phydm/` subdirectory, which is exactly the set of units that failed
+— and it explains why the main units compiled while phydm did not, without any include
+cycle being involved.
+
+**Consequence for the port:** the fix is NOT more header surgery (the three header
+changes made are individually correct but were treating a symptom). It is to make the
+vendor `ccflags-y` block apply to all subdirectories — i.e. drive the build from the
+vendor Makefile as the driver's real kernel Makefile (it already carries the complete
+`-D` set and the per-subdir `EXTRA_CFLAGS` include paths), rather than layering a
+minimal Kconfig/obj-y hookup over it.
+
+That is a concrete, bounded change and it is where the next session should start.
