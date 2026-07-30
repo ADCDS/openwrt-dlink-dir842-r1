@@ -459,3 +459,51 @@ ONLY in a one-shot prefill, never in the per-flow clear. Both are now behind
 **Remaining untried:** B4 (SWTCR1 read-modify-write; stock ends ⊇ `0x2E00`, adding
 EnNATT2LOG `0x400` and ENFRAGTOACLPT `0x800`, where this port writes an absolute
 `0x2200` and clears bits 10/11), and B3 done correctly as an init-only prefill.
+
+### B4 tested — no effect. All four stock-vs-port divergences are now exhausted.
+
+`swtcr1_trap_bits` ORs stock's `EnNATT2LOG` (bit10) and `ENFRAGTOACLPT` (bit11) into
+SWTCR1, giving `0x2E00` where this port wrote an absolute `0x2200`. Bit names and
+positions from the vendor header `AsicDriver/rtl865xc_asicregs.h:1583-1585`.
+
+Measured with offload armed, alongside B1+B2, same method and positive control:
+
+| configuration | CPU pkt/MB | vs software |
+|---|---|---|
+| software reference (`hwnat=N`) | 382 | — |
+| **forward** control (`hwnat=Y`) | **147** | −61% ✓ |
+| reverse, B1+B2 | 355 | −7% |
+| reverse, **B1+B2+B4** | **360** | −6% |
+
+No effect, as expected from first principles — both bits concern *trapping*, not the
+NAPT lookup — but it was the last remaining divergence in that register, so it is now
+measured rather than assumed.
+
+### R6 final state
+
+Every difference between stock and this port that is visible in stock's flow-creation
+path has now been implemented and measured under a correct methodology:
+
+- **row encoding, hash, index, byte order, aging, commit protocol** — proven IDENTICAL
+  by decoding stock's `setAsicNaptTcpUdpTable` / `addNaptConnection` /
+  `naptTcpUdpTableIndex`. Not the bug.
+- **B1** (extIP's route as `process=RT_ARP`) — implemented, no effect alone.
+- **B2** (LAN-host ARP entry; index is `arpsta + host-part`, not a hash) — implemented,
+  no effect with B1.
+- **B3** (free rows carry `collision=collision2=1`) — implemented as applied to
+  `napt_clear()` and MEASURED HARMFUL (100% loss); gated off. Untried as an
+  *init-only* prefill, which is how stock actually does it.
+- **B4** (SWTCR1 trap bits) — implemented, no effect.
+
+Forward offload remains healthy throughout (147 vs 382 = −61%), so nothing here
+regressed the working direction.
+
+**What that leaves.** The reverse path does not engage for a reason that is NOT
+visible in the flow-creation path, since that path is now byte-equivalent to stock.
+The two candidates that remain are (a) B3 done correctly — a one-shot prefill of all
+1024 rows at init, before any flow exists, never touching live teardown; and (b) the
+ASIC's 4-way walk semantics themselves (`SWTCR1.EnL4WayH`), which is the only
+encoding-adjacent behaviour left unexamined. Both are concrete; neither is a guess.
+
+All knobs default OFF and the tree is verified at 0% loss on LAN 56 B, LAN 1400 B and
+NAT, with forward offload intact.

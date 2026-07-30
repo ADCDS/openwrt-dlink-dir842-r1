@@ -41,6 +41,13 @@ DEFINE_MUTEX(rtl865x_hal_lock);
 /* R6/B3: prefill the L4 flow table with collision=collision2=1 the way stock's
  * rtl865x_nat_init does. Default 0 — measured to break the datapath when applied
  * unconditionally; see rtl865x_napt_clear() for the analysis and the safe retry. */
+/* R6/B4: add stock's EnNATT2LOG(bit10)+ENFRAGTOACLPT(bit11) to SWTCR1 (=> 0x2E00).
+ * Default 0 = the 0x2200 this tree has run on. */
+static int swtcr1_trap_bits;
+module_param(swtcr1_trap_bits, int, 0644);
+MODULE_PARM_DESC(swtcr1_trap_bits,
+		 "R6/B4: OR EnNATT2LOG|ENFRAGTOACLPT into SWTCR1 (0=off default -> 0x2200, 1=on -> 0x2E00)");
+
 static int napt_collision_prefill;
 module_param(napt_collision_prefill, int, 0644);
 MODULE_PARM_DESC(napt_collision_prefill,
@@ -1032,7 +1039,18 @@ static int gw_prog(struct seq_file *m, void *v)
 	{
 		struct asic_extintip ext;
 
-		REG32(SWTCR1) = (1u << 9) | (1u << 13);	/* 0x2200 = EnL4WayH(bit9) | L4EnHash1(bit13):
+		/* R6/B4: stock reaches SWTCR1 by READ-MODIFY-WRITE and also carries
+		 * EnNATT2LOG (bit10, 0x400 — "trap attack packets for logging") and
+		 * ENFRAGTOACLPT (bit11, 0x800 — "fragment packets checked by ACL and
+		 * protocol trapper"), names and bit positions from the vendor header
+		 * AsicDriver/rtl865xc_asicregs.h:1583-1585. This port writes an ABSOLUTE
+		 * 0x2200 and therefore clears both. Knob adds them back (=> 0x2E00):
+		 *   echo 1 > /sys/module/rtl819x/parameters/swtcr1_trap_bits
+		 * then re-run `cat /proc/rtl865x_gw`. Low prior for fixing reverse-NAPT
+		 * (both bits are about trapping, not the NAPT lookup) but it is the last
+		 * stock-vs-port divergence left in this register. */
+		REG32(SWTCR1) = (1u << 9) | (1u << 13)
+			      | (swtcr1_trap_bits ? ((1u << 10) | (1u << 11)) : 0u);	/* 0x2200 = EnL4WayH(bit9) | L4EnHash1(bit13):
 						 * VENDOR-EXACT. rtl865x_nat_init() enables enhanced-hash1
 						 * (_rtl8651_enableEnhancedHash1, nat.c:173) AND 4-way hash
 						 * (rtl865x_setNatFourWay(TRUE), nat.c:1779; "default enable in
