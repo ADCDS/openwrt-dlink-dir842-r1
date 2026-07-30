@@ -51,15 +51,81 @@
  * LINK_CHANGE_IE is deliberately EXCLUDED: LINK_CHANGE_IP is a level bit that
  * write-1-ack does not clear while the link settles, so re-arming CPUIIMR with
  * LINK_CHANGE_IE re-fires instantly on cable plug-in -> IRQ livelock -> wedge.
- * PKTHDR/MBUF_DESC_RUNOUT_IE are INCLUDED (M6.3b): under sustained load napi can
+ * PKTHDR_DESC_RUNOUT_IE is INCLUDED (M6.3b): under sustained load napi can
  * fall behind, the Rx ring empties of CPU-owned slots, and the switch hits
- * descriptor runout; arming these kicks napi promptly to drain+refill instead
+ * descriptor runout; arming it kicks napi promptly to drain+refill instead
  * of waiting on the ~10ms watchdog (which lets the CPU-port queue congest and
- * hard-wedge the fabric - vendor rtl865x_start arms them too, asicCom.c:1417).
+ * hard-wedge the fabric - the shipped stock kernel arms it too).
+ * MBUF_DESC_RUNOUT_IE was included by M6.3b as well but is now OFF by default,
+ * because the shipped stock kernel leaves it masked - see the R2 block below.
  * The refill-lag storm the original code feared is avoided because napi masks
- * the source while polling and re-checks for pending work on complete. */
+ * the source while polling and re-checks for pending work on complete.
+ *
+ * ---- R2: MBUF_DESC_RUNOUT_IE (bit16) is now OFF by default -------------------
+ * The SHIPPED STOCK KERNEL writes CPUIIMR = 0x807E31FE (decoded from stock
+ * vmlinux 0x80192bb0: `lui v1,0x807e; addiu v1,v1,12798; sw v1,0x28(v0)`), i.e.
+ *   LINK_CHANGE | PKTHDR_DESC_RUNOUT_ALL | RX_DONE_ALL | TX_ALL_DONE_ALL
+ * — PKTHDR runout IS armed, but bit16 MBUF_DESC_RUNOUT is NOT. Ours was
+ * 0x007F31FE: bit16 set (and LINK_CHANGE deliberately clear, see above).
+ *
+ * The comment above cited the public SDK (asicCom.c:1417) for arming "them"
+ * (both runout sources). ★ This is the SAME SDK-vs-shipped-stock discrepancy
+ * class as the DMA_CR0 water marks in rtl865x_start(), where the SDK says
+ * 0xA0A0 and the shipped stock kernel says 0xA0CE — and that one turned out to
+ * be directly implicated in this very wedge. The shipped kernel is ground truth.
+ *
+ * Mechanism this is suspected to fix (R2 = stop the large-frame CPU-RX wedge at
+ * source rather than self-healing it): the wedge is an RX-FIFO drain-lag race
+ * under CPU saturation, where descriptor writeback overtakes the multi-burst
+ * payload DMA. MBUF runout asserts exactly during that saturation window, and if
+ * MBUF_DESC_RUNOUT_IP is a level bit that write-1-ack cannot clear until the
+ * buffer pool actually refills, arming it produces precisely the re-fire ->
+ * IRQ-livelock -> wedge pattern this driver already documents for LINK_CHANGE_IE
+ * two paragraphs up. Dropping bit16 keeps M6.3b's prompt-napi kick (PKTHDR
+ * runout, which stock DOES arm and which covers the descriptor ring) while no
+ * longer arming the one source stock leaves masked.
+ *
+ * ⚠ HYPOTHESIS, NOT YET PROVEN ON HARDWARE. The R2 gate is 10 minutes of
+ * bidirectional saturating traffic with ZERO fabric resets; that has not been
+ * run. Exposed as a runtime knob so the bench can A/B it without a rebuild:
+ *   echo 1 > /sys/module/rtl819x/parameters/mbuf_runout_ie   # pre-R2 behaviour
+ *   ip link set eth0 down; ip link set eth0 up               # re-arm, then load
+ * If the wedge rate is unchanged with 0, this candidate is FALSIFIED — say so in
+ * docs/M7-LARGE-FRAME-RX-WEDGE.md rather than leaving it ambiguous.
+ *
+ * ★ DEFAULT IS 1 (armed, pre-R2), conservatively — but READ THIS BEFORE TRUSTING
+ * ANY PRIOR RESULT ABOUT THIS KNOB.
+ *
+ * An earlier pass recorded here, as measured fact, that masking bit16 left the
+ * CPU-port RX engine dead across warm re-opens and a cold power-cycle
+ * (`rx_done=0`, `CPUIISR=00000000`, 100% loss on every path). ⚠ That conclusion
+ * was CONFOUNDED and is retracted. The test harness ran `ip neigh flush` on the
+ * host immediately before each ping, which recreates the cold-unicast condition
+ * documented in M7-LARGE-FRAME-RX-WEDGE.md / task #13: ASIC L2 entries start
+ * empty and cold unicast is not delivered until traffic has actually flowed. So
+ * every "100% loss" reading in that bisect measured the flush, not the change —
+ * the same box read 0% loss on 56 B, 1400 B and the NAT path minutes later, with
+ * no code change, once traffic had warmed the tables.
+ *
+ * What is actually known: this port ran with bit16 ARMED for a long time and
+ * works; the shipped stock kernel leaves it MASKED (CPUIIMR = 0x807E31FE). The
+ * stock-aligned value is therefore still the R2 candidate and is NOT known to be
+ * harmful — it is simply untested, because the test that "falsified" it was
+ * invalid. Default stays 1 only because that is the configuration this tree has
+ * actually run on.
+ *
+ * To test it for real: A/B across COLD boots (runtime flipping cannot recover an
+ * already-wedged engine), and do NOT flush ARP before measuring — warm the path
+ * first, or measure with a passive tcpdump while the box's own warm-up pings
+ * run. */
+static int mbuf_runout_ie = 1;
+module_param(mbuf_runout_ie, int, 0644);
+MODULE_PARM_DESC(mbuf_runout_ie,
+		 "arm MBUF_DESC_RUNOUT_IE / CPUIIMR bit16: 1=on, pre-R2 known-good (default), 0=off to match shipped stock 0x807E31FE (R2 candidate — wedged RX when last tried; only A/B across cold boots)");
+
 #define NIC_IIMR		(RX_DONE_IE_ALL | TX_ALL_DONE_IE_ALL | \
-				 PKTHDR_DESC_RUNOUT_IE_ALL | MBUF_DESC_RUNOUT_IE_ALL)
+				 PKTHDR_DESC_RUNOUT_IE_ALL | \
+				 (mbuf_runout_ie ? MBUF_DESC_RUNOUT_IE_ALL : 0u))
 
 struct rtl819x_eth_priv {
 	struct net_device	*dev;

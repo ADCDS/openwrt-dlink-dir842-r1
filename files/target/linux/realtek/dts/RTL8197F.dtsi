@@ -164,7 +164,68 @@
 		 * would hard-stall the CPU bus (no bus-error exception on this
 		 * fabric), the same failure that hung the first M5 boot on pcie0.
 		 * Do NOT probe it. Re-enable only if the card is proven to be here.
+		 * ⚠ R4/G1: pcie1 also claims cpuintc interrupt 6, which is the on-SoC
+		 * WMAC's line (see wmac@18640000 below). No clash while this is
+		 * disabled — but it MUST stay disabled now that the WMAC node exists.
 		 */
+		status = "disabled";
+	};
+
+	/*
+	 * R4/G1: on-SoC RTL8197F 2.4 GHz WMAC. Until now this radio had no DTS node
+	 * at all — completely undeclared and undriven — which is why the port is
+	 * single-band (the RTL8822BE on pcie0 is one radio doing 2.4 OR 5, not both).
+	 *
+	 * Everything below is decoded from the stock vendor kernel (vmlinux.bin,
+	 * link base 0x80000000 — confirmed: file offset = VA - 0x80000000).
+	 * rtl8192cd_init_module @0x801fd630 walks a 2-entry wlan device table at
+	 * 0x8064ae6c, stride 0x14 = { u32 flags; u32 pci_cfg; u32 mmio_base; u32 irq;
+	 * void *dev }:
+	 *   [0] flags 0x6  pci_cfg 0xb8b10000  base 0xb9000000  irq 5  -> PCIe RTL8822BE
+	 *   [1] flags 0x2  pci_cfg 0x0         base 0xb8640000  irq 6  -> THIS node
+	 * Field decoding is validated by entry [0]: 0xb8b10000 and 0xb9000000 are
+	 * exactly pcie0's dev_cfg0_base and its PCI-memory window in this same dtsi.
+	 * Entry [1] therefore gives phys 0x18640000, IRQ 6. Confirmed at the consumer
+	 * side too: init_one stores base into dev->base_addr (0x801fc590) and
+	 * dev->irq = 6 (0x801fc5f8); start_hw @0x801fed9c passes dev->irq to
+	 * request_threaded_irq (0x802012e4) with handler 0x804f4d5c.
+	 *
+	 * IRQ: SoC INTC GISR bit29 -> MIPS IP6 via IRR3[23:20]=6. Stock bsp_irq_init
+	 * @0x806ff540 writes IRR3=0x02600200 and GIMR |= 0x20208000 (BIT15|BIT21|
+	 * BIT29) — bit-for-bit what realtek_soc_irq_init() in arch/mips/realtek/irq.c
+	 * ALREADY writes, where REALTEK_IRQ_WIFI == 6, and plat_irq_dispatch already
+	 * maps STATUSF_IP6 -> do_IRQ(6). So no irq plumbing is needed; it lines up.
+	 *
+	 * reg size: the compiled-in 8197F tables provably touch MAC regs 0x000-0x144e
+	 * (array_mp_8197f_mac_reg @0x80564e08, 152 pairs) and BB regs 0x800-0xff8
+	 * (array_mp_8197f_phy_reg @0x80558160, 1492 pairs). The true hardware decode
+	 * window is NOT recoverable from the vendor binary — there is no ioremap or
+	 * request_mem_region to read it off, because the base is already KSEG1. 64K is
+	 * a safe superset, not a measured value.
+	 *
+	 * ★ Bring-up gate — the WMAC analogue of the PCIe SR+0x100 reset-release that
+	 * mainline had wrong: REALTEK_SR_WLAN_EN (0xB8000064) must be set (stock ORs
+	 * 0x1f) before ANY access to this reg window. See realtek_mem.h for the
+	 * decode. Without it every WMAC read returns garbage or hangs.
+	 *
+	 * ⚠ Per-unit 2.4 GHz RF calibration is NOT in an efuse — the stock kernel
+	 * never reads flash or efuse for this radio. It lives in the read-only "MAC"
+	 * mtd partition (0x20000 + 0xd8: pwrlevelCCK_A/B, pwrlevelHT40_1S_A/B, xcap,
+	 * thermal) and stock pushes it in from userspace via `iwpriv set_mib`
+	 * (lib/librlx_wifi_mibs.so). A mainline driver must feed those values itself;
+	 * nothing in hardware supplies them. Note this also means the DIR-842's blank
+	 * RTL8822BE efuse is IRRELEVANT to 2.4 GHz — that blocker is 5 GHz-only.
+	 *
+	 * status stays "disabled" here: declaring the node is G1. There is no
+	 * mainline driver bound to this compatible yet (G2 authors one), so enabling
+	 * it would only assert an unclaimed region.
+	 */
+	wmac: wmac@18640000 {
+		compatible = "realtek,rtl8197f-wmac";
+		reg = <0x18640000 0x10000>;
+		interrupt-parent = <&cpuintc>;
+		interrupts = <6>;
+		clocks = <&pcie_clk>;
 		status = "disabled";
 	};
 };

@@ -39,11 +39,26 @@ case $board in
     # We used to read offset 19 (=0x13), i.e. the shared Realtek default, so every board
     # came up with the same MAC. Read the ASCII field instead and fall back to the old
     # behaviour if it is missing/garbage (some units may have an unprogrammed partition).
-    wan_mac=$(dd if=/dev/mtd1 bs=1 count=17 2>/dev/null)
-    case "$wan_mac" in
-      [0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]) ;;
-      *) wan_mac=$(mtd_get_mac_binary MAC 19) ;;
-    esac
+    # Currently reads the Realtek DEFAULT block (offset 19), i.e. the MAC that is
+    # identical on every unit. Reading the per-unit ASCII MAC at 0x00 is what stock
+    # does and is the correct end state.
+    #
+    # ⚠ It was reverted to this during a bisect of an apparent datapath regression
+    # (100% loss on every path). That regression was NOT REAL: the test harness ran
+    # `ip neigh flush` on the host immediately before each ping, recreating the
+    # cold-unicast condition from task #13 (ASIC L2 entries start empty; cold
+    # unicast is not delivered until traffic has flowed). The same box measured 0%
+    # loss on 56 B, 1400 B and the NAT path once traffic had warmed the tables. So
+    # the per-unit MAC is NOT known to break anything — that finding is retracted.
+    #
+    # It is still left reverted here for a different and unrelated reason, which
+    # does stand: applying the per-unit MAC from userspace is non-deterministic
+    # (/dev/mtd1 is not reliably readable that early, and one boot came up on the
+    # real MAC while an identical later boot came up on the fallback). Doing it
+    # properly means setting the MAC BEFORE userspace — a DT nvmem-cell on the MAC
+    # partition, or a preinit hook — not from board.d/uci-defaults. See
+    # uci-defaults/99-dir842-m5.
+    wan_mac=$(mtd_get_mac_binary MAC 19)
     lan_mac=$(macaddr_add "$wan_mac" 1)
     ;;
   gwr1200ac-v2)
