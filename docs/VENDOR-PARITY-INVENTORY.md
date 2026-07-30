@@ -613,3 +613,43 @@ on silicon *before* this source was obtained.
 That second item is the honest measure of what G3 still costs, and it is a decision
 point rather than a mechanical step: patch core `sk_buff`, or strip the code paths that
 use it (the fast-bridge / hardware-forwarding hooks) and accept a reduced driver.
+
+#### R4/G3 final state this session — 53 objects, one error class left
+
+Best achieved: **53 of the driver's objects compile** against kernel 4.14.187, with a
+single remaining error class. Progress from zero was driven by four fixes plus one
+scoping decision, all recorded in the driver's Makefile and headers.
+
+**Fixes that stuck:**
+1. `wlan_amsdullcsnaphdr_t` defined in the `NOT_RTK_BSP` branch of `wifi.h` — the real
+   bug, found by `#error` probe after four wrong hypotheses.
+2. Five `-Wno-error=` classes, scoped to this driver (vendor targets gcc 4.x/7.x, tree
+   is gcc 8.4).
+3. `-I$(srctree)/arch/mips/include/asm/mach-rtl8197f` so `<bspchip.h>` resolves.
+4. `-DCONFIG_RTL_8197F` — the vendor's SoC selector; this tree names it
+   `CONFIG_SOC_RTL8197F`, so gates silently took wrong branches.
+5. `CONFIG_RTL_CUSTOM_PASSTHRU` disabled — it was the only thing enabling the
+   `srcPhyPort` paths, and `srcPhyPort` is a vendor addition to the core `sk_buff`.
+   Turning the feature off avoided patching `include/linux/skbuff.h` entirely.
+
+**Remaining error class:** `pskb->__unused` (`8192cd_rx.c:10105/10256/10262`) — another
+vendor field added to the core `sk_buff`, reached because
+`#if !defined(NOT_RTK_BSP) && !defined(CONFIG_OPENWRT_SDK)` evaluates true in that unit.
+
+**⚠ Two placement/combination traps, both measured — do not repeat:**
+- `-DCONFIG_OPENWRT_SDK` **does** fix `__unused`, but it simultaneously stops
+  `<bspchip.h>` resolving in `8192cd_osdep.c` and adds an `arch/mips/uaccess.h` type
+  error. Net **worse**: 53 objects → 51 plus new classes.
+- Clearing `CONFIG_PCI_HCI` collapses the build to **5** objects
+  (`struct tx_sc_entry` incomplete). It selects the PCI-style descriptor/ring model,
+  which the **on-SoC** WMAC uses too — it is not a "PCIe card present" switch.
+- Appending the port flags at the END of the Makefile drops the build to **2** objects:
+  it breaks the vendor's own `-I$(src)/WlanHAL/...` paths. They must come first.
+
+**Honest read:** the object count oscillates 46–53 depending on flag placement and
+combination, each change trading one error class for another. That is the signature of
+a config model that needs untangling systematically — mapping which vendor macros this
+build must define and in what order — rather than more one-off flag experiments. That
+is the next session's task, and it is bounded work on a known surface, not a search.
+
+Driver left `# CONFIG_RTL8192CD is not set`; image builds at 4.75 MB of 7.9 MB.
