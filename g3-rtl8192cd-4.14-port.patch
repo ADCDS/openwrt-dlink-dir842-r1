@@ -1,0 +1,81 @@
+# R4/G3 — rtl8192cd 3.18 -> 4.14 port, step 1: the measured API breaks.
+#
+# Apply against the 8devices v3.4.11e vendor tree:
+#   git clone --depth 1 --filter=blob:none --sparse \
+#     -b v3.4.11e/openwrt-18.06-rtkmipsel-3.18 \
+#     https://github.com/8devices/openwrt-8devices.git
+#   cd openwrt-8devices && git sparse-checkout set package/kernel/rtl8192cd
+#   patch -p1 < g3-rtl8192cd-4.14-port.patch
+#
+# Covers every kernel-API break that actually exists on 4.14.187 (verified
+# against its headers, not assumed): trans_start (removed 4.7), get_ds and
+# strnicmp (removed 4.0). NOT included because they need no work on 4.14:
+# init_timer/setup_timer/PDE_DATA (removed in 4.15, still present here) and
+# create_proc_entry (already behind a version gate whose modern leg uses
+# proc_create_data). This is step 1 only — it does NOT make the driver build;
+# asm/rtl865x/* and net/rtl/* (8 files) still need supplying or stubbing.
+#
+--- a/package/kernel/rtl8192cd/8192cd_tx.c
++++ b/package/kernel/rtl8192cd/8192cd_tx.c
+@@ -11186,7 +11186,7 @@
+ 	SMP_LOCK_XMIT(flags);
+ 
+ #ifdef __KERNEL__
+-	dev->trans_start = jiffies;
++	netif_trans_update(dev);
+ #endif
+ 
+ 	goto stop_proc;
+@@ -12063,7 +12063,7 @@
+ 	SMP_LOCK_XMIT(flags);
+ 
+ #ifdef __KERNEL__
+-	dev->trans_start = jiffies;
++	netif_trans_update(dev);
+ #endif
+ 
+ 	goto stop_proc;
+--- a/package/kernel/rtl8192cd/mesh_ext/mesh_tx.c
++++ b/package/kernel/rtl8192cd/mesh_ext/mesh_tx.c
+@@ -161,7 +161,7 @@
+ 	}
+ 
+ #ifdef __KERNEL__
+-	dev->trans_start = jiffies;
++	netif_trans_update(dev);
+ #endif
+ 
+ 	return 1;
+--- a/package/kernel/rtl8192cd/8192cd_comapi.c
++++ b/package/kernel/rtl8192cd/8192cd_comapi.c
+@@ -3480,7 +3480,7 @@
+ 	int ret = 0;
+ 
+ 	oldfs = get_fs();
+-	set_fs(get_ds());
++	set_fs(KERNEL_DS);
+ 	fp = filp_open(CFG_FILE_PATH, O_RDONLY, 0);
+ 	if(IS_ERR(fp)) {
+ 		ret = PTR_ERR(fp);
+--- a/package/kernel/rtl8192cd/rtw_android.c
++++ b/package/kernel/rtl8192cd/rtw_android.c
+@@ -276,7 +276,7 @@
+ {
+ 	int cmd_num;
+ 	for(cmd_num=0 ; cmd_num<ANDROID_WIFI_CMD_MAX; cmd_num++)
+-		if(0 == strnicmp(cmdstr , android_wifi_cmd_str[cmd_num], strlen(android_wifi_cmd_str[cmd_num])) )
++		if(0 == strncasecmp(cmdstr , android_wifi_cmd_str[cmd_num], strlen(android_wifi_cmd_str[cmd_num])) )
+ 			break;
+ 
+ 	return cmd_num;
+--- a/package/kernel/rtl8192cd/efuse_97f/string.c
++++ b/package/kernel/rtl8192cd/efuse_97f/string.c
+@@ -20,7 +20,7 @@
+ //#include <linux/ctype.h>
+ 
+ #if 0
+-int strnicmp(const char *s1, const char *s2, size_t len)
++int strncasecmp(const char *s1, const char *s2, size_t len)
+ {
+ 	/* Yes, Virginia, it had better be unsigned */
+ 	unsigned char c1, c2;
