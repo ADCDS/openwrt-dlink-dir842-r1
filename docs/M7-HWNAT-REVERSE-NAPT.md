@@ -304,3 +304,48 @@ wedge-on-download is reproduced end-to-end, and the detector gap is confirmed.
 Still-open candidates are unchanged — `SWTCR0.WANRouteMode=ToCpu` retest under the
 now-known confounds (#4 reboot, #5 ARP flush), and the live stock register dump as
 ground truth.
+
+## R6 candidate 4 FALSIFIED: SWTCR0.WANRouteMode = ToCpu (2026-07-30)
+
+The plan called for retesting `WANRouteMode` because the original negative was
+confounded. It has now been retested properly, on a bench verified healthy first
+(0% loss on all three paths), with the mode exposed as a runtime knob so both arms
+run inside ONE boot:
+
+    echo {0,1} > /sys/module/rtl819x/parameters/wan_route_mode
+    cat /proc/rtl865x_gw >/dev/null      # re-runs the SWTCR0 write
+
+**Result — clean A/B, same boot, same transfer method:**
+
+| WANRouteMode | CPU-seen on eth0.1 | data | ratio |
+|---|---|---|---|
+| 0 = Forward | 23,420 pkt | 61.2 MB | **382 CPU pkt/MB** |
+| 1 = ToCpu   |  8,690 pkt | 20.3 MB | **427 CPU pkt/MB** |
+
+Theoretical max (every packet trapped at 1500 B) ≈ 699/MB. Both modes sit around
+55–61% of that, and **ToCpu is marginally WORSE, not better**. It does not engage
+hardware reverse-NAPT. ⚠ Caveat on reading the absolute numbers: 61.2 MB / 23,420 =
+~2.7 kB per counted packet, i.e. above MTU, so GRO coalescing is inflating "one
+packet". The A/B comparison between modes is still valid — same counter, same path.
+
+**Two corrections to the record:**
+1. The original claim "ToCpu kills the WAN" is WRONG. With ToCpu set, LAN and NAT
+   both measured 0% loss. It breaks nothing; it just does not help.
+2. That original result was confounded twice over (WAN peer had lost its address,
+   host route had reverted). Retesting it was worth doing, and the answer is a
+   clean negative rather than an unknown.
+
+**Also observed:** the sustained-download wedge reproduces under ToCpu as well —
+after the download the box read 50% loss on LAN and ~66% on NAT, and needed
+`echo 3 > .../fabric_reset` + gw re-arm + warm to return to 0%. So the wedge is not
+a function of this bit either.
+
+Candidates falsified so far: extIP `/32` process=2 route, dst-MAC→TOCPU ACL rule,
+extIP `nextHop`, and now `WANRouteMode=ToCpu`. The knob is kept (default 0 =
+Forward) so the experiment is re-runnable, not re-derivable from scratch.
+
+**What remains for R6** is the ground truth the plan already identified: boot STOCK
+from the 8 MB backup with a real NAT flow running and dump the live MSCR / SWTCR0 /
+SWTCR1 / DACLRCR plus an actual inbound L4 row, then diff against what this port
+programs. Every register-level guess is now exhausted; the remaining unknown is what
+stock's inbound row actually looks like.

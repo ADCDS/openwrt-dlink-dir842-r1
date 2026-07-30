@@ -17,6 +17,7 @@
 #include <linux/mutex.h>
 #include <linux/netdevice.h>	/* R3: read the live netif MACs (see gw_netif_mac) */
 #include <linux/etherdevice.h>
+#include <linux/moduleparam.h>	/* R6: wan_route_mode knob */
 
 #include "rtl819x_regs.h"
 #include "rtl865x_asichal.h"
@@ -31,6 +32,14 @@ DEFINE_MUTEX(rtl865x_hal_lock);
 #define TABSTS_MASK		0x1
 #define TABSTS_SUCCESS		0x0
 #define CMD_ADD			(1 << 1)		/* SWTACR add (hashed) */
+/* R6: SWTCR0 WANRouteMode (bits[4:3]) — 0=Forward, 1=ToCpu, 2=Drop. Default 0 =
+ * the known-good configuration this tree has run on. See the write site in gw_prog()
+ * for the full rationale and the A/B procedure. */
+static int wan_route_mode;
+module_param(wan_route_mode, int, 0644);
+MODULE_PARM_DESC(wan_route_mode,
+		 "SWTCR0 WANRouteMode bits[4:3]: 0=Forward (default, known-good), 1=ToCpu (R6 candidate), 2=Drop. Re-run `cat /proc/rtl865x_gw` to apply.");
+
 #define EN_STOP_TLU		(1 << 18)		/* SWTCR0: freeze lookup */
 #define STOP_TLU_READY		(1 << 19)		/* SWTCR0: freeze acked */
 #define ASIC_L3_ENGINE_CFG	(RTL819X_SWCORE_BASE + 0x4234)
@@ -601,11 +610,27 @@ static int gw_prog(struct seq_file *m, void *v)
 	 * NOTE: an earlier attempt at this read as "WAN dead both ways", but that run was
 	 * CONFOUNDED — tiny had silently lost 172.16.0.2 and the host route had reverted to the
 	 * house gateway, which both present as 100% loss. Retest only via bench-up.sh. */
-	/* R6 BISECT: WANRouteMode left at Forward(0) for now — bits[4:3] explicitly cleared so
-	 * the value is deliberate rather than inherited. Flip `| (1u << 3)` back on to retest
-	 * ToCpu (see the analysis above) once the datapath is known-good on this image. */
+	/* R6: WANRouteMode (SWTCR0 bits[4:3]) = Forward(0) / ToCpu(1) / Drop(2). The vendor
+	 * SDK never writes this field at all, so its role in the inbound path is inferred,
+	 * not documented — which is why it is a knob rather than a hardcoded choice.
+	 *
+	 * History worth keeping: an early pass concluded ToCpu "kills the WAN". That result
+	 * was CONFOUNDED (the WAN peer had lost 172.16.0.2 and the host route had reverted),
+	 * and a later bisect showed reverting it did not restore the datapath either — so
+	 * the candidate was never actually tested. Bits[4:3] are cleared explicitly here so
+	 * the value is deliberate rather than inherited from the loader.
+	 *
+	 * Runtime-switchable so it can be A/B'd inside ONE boot (re-run `cat
+	 * /proc/rtl865x_gw` after changing it — that is what re-executes this write):
+	 *   echo 0 > /sys/module/rtl819x/parameters/wan_route_mode   # Forward (default)
+	 *   echo 1 > /sys/module/rtl819x/parameters/wan_route_mode   # ToCpu   (R6 candidate)
+	 * ⚠ Measure with the bench discipline: warm the path first and do NOT flush ARP
+	 * before pinging (confound #5), and confirm the box is actually up (confound #4).
+	 * The R6 signal is the eth0.1 rx_packets delta during a sustained inbound transfer:
+	 * ~0 = hardware reverse engaged, ~every packet = still CPU-trapped. */
 	REG32(SWTCR0) = ((REG32(SWTCR0) & ~(3u << 16) & ~(3u << 3) & ~0x7u) | (0x3Fu << 5))
-		      | (1u << 14) | (1u << 2);
+		      | (1u << 14) | (1u << 2)
+		      | ((u32)(wan_route_mode & 3u) << 3);
 	REG32(GW_MACCR1) |= (1u << 0);	/* M6.6 PORT0_ROUTER_MODE: put the trunk (SoC port0) in router mode — test whether it permits the L3-routed U-turn (egress back out the single trunk) that source-port filtering otherwise blocks, since hal(LAN)+tiny(WAN) are both behind port0 */
 	/* Phase 3 aging: TEACR bit0 L2/ARP aging OFF (keeps the static ARP[64] nexthop
 	 * chain from aging→invalid mid-flow, which re-triggered the bad-pointer hang);
