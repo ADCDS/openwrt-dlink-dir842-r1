@@ -291,6 +291,21 @@ static int rtl8197f_wmac_probe(struct platform_device *pdev)
 		 strap, cut, cut >= 2 ? "APPLY" : "DO NOT APPLY (legacy path)");
 
 	/*
+	 * HAL type ID. The vendor's HAL_ReadTypeID (@0x80366fc8) reads this single
+	 * byte and maps it to an internal "chipver"; 14 is expected here and maps to
+	 * chipver 23. It matters beyond identification: the TX descriptor layout in
+	 * PrepareTXBD88XX (@0x8037aafc) is selected by chipver, and the active TXDESC
+	 * size on the chipver-23 branch is the one open question in the datapath map
+	 * (40 vs 48 bytes — the stride is 64 either way, but dword0[15:0] tells the
+	 * hardware how many descriptor bytes to fetch, so getting it wrong means
+	 * nothing transmits). Printing it here pins down the branch before any ring
+	 * code is written; the 40-vs-48 question itself can only be settled by reading
+	 * back TXBD dword0[15:0] after ring init, which is a later milestone.
+	 */
+	dev_info(dev, "HAL type id (WMAC+0xfc) = %u (vendor expects 14 -> chipver 23)\n",
+		 readb(w->base + 0xfc));
+
+	/*
 	 * G2 stops here, deliberately and visibly. Registering with mac80211 now
 	 * would advertise a radio that cannot beacon, which is worse than not
 	 * registering at all: hostapd would attach and fail in a confusing way.

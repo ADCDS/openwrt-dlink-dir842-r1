@@ -316,3 +316,54 @@ Two things this changes:
 G3 (port), G4 (both radios up). Also unresolved from the table work: the IQK/LCK/DPK
 trigger sites (indirect calls, no static call site) and which TXAGC register the
 per-unit `pwrlevel*` MIBs land in.
+
+### R4/G2 — the WMAC datapath, mapped (what a driver would have to implement)
+
+Decoded from the stock driver and cross-checked by two independent passes. This is
+the raw material for either a mac80211 driver (G2) or for validating a vendor-driver
+port (G3). Full dumps: `dir842-build/ke/{txdesc_layout,tx_path_decoded,beacon_decoded,ringbase_decoded}.txt`, `tx_asm/`.
+
+**Model:** the on-SoC WMAC uses its own descriptor DMA into DRAM — NOT the SoC
+`swNic`/mbuf infrastructure the ethernet switch core uses. The right mainline
+template is `rtl8192ee` / `rtw88-rtl8822be`, not `rtl8192ce`.
+
+- Ring bases are written by `PrepareTXBD88XX` @0x8037aafc (TX) and
+  `PrepareRXBD88XX` @0x80379fa8 (RX), both called from `open()` — **not** from
+  `init_hw_PCI` or `InitHCIDMAReg88XX` (which writes only the NUM block). They build
+  the offset table on the stack, which is why grepping for immediate offsets finds
+  nothing. RX_DESA = **0x0338**; ⚠ the vendor's own `proc_desc_info` prints label
+  "RDSAR:" then reads 0x0340 — a vendor copy/paste bug, do not trust that dump.
+- Ring index → queue is proven via `SetTxDescQSel88XX_V1`, not inferred. BCNQ =
+  0x308, 5 slots, no index register. `0x0382` bit12 = beacon kick, bit13 = BD engine
+  enable. `0x0304 = 0x00160000` (INT_MIG).
+- Interrupts: HIMR = 0x06100C03, HIMRE = 0x0F00.
+- Beacon is armed/disarmed via the BD OWN bit.
+- Sequence numbers are software in BOTH the 802.11 header and TXDESC w9[23:12]
+  SW_SEQ; `EN_HWSEQ` (w8[15]) is never set.
+
+**Deltas from rtw88 — the actual porting work.** Register offsets, doorbell, beacon
+OWN bit and every overlapping TXDESC bit position are byte-identical to rtw88. What
+differs when lifting its `pci.c`:
+
+| item | this WMAC | rtw88 |
+|---|---|---|
+| `tx_buf_desc_sz` | 32 (4 segments, all in psb_len) | 16 (2 segments) |
+| `tx_pkt_desc_sz` | **40 (see open question)** | 48 (8822b) |
+| `psb_len` unit | 256 bytes | 128 bytes |
+| TXDESC placement | separate 64-byte-stride array | `skb_push`ed onto the frame |
+| memory | cached KSEG0 + explicit `dma_cache_wback` | DMA API |
+
+Porting notes: replace the cache handling with `dma_alloc_coherent` + `dma_sync_*`;
+rtw88 has no macros for MACID, NAVUSEHDR, the w4 retry block or MBSSID w6[15:12];
+LS / PKT_OFFSET / EN_HWSEQ / SW_DEFINE are never set.
+
+**★ One load-bearing open question:** the ACTIVE TXDESC size on the chipver-23
+branch — 40 vs 48 bytes. The stride is 64 either way, but TXBD dword0[15:0] tells the
+hardware how many descriptor bytes to fetch, so a wrong value means nothing
+transmits. The two decode passes disagreed and the surrounding code reuses a scratch
+register, so static analysis cannot settle it. **Discriminating test: read back TXBD
+dword0[15:0] after ring init.** Make that the first thing the ring milestone checks.
+
+Chip identity is now settled on silicon (all read at probe): bonding strap 10 →
+package_type 1, cut 1 (→ header tables NOT used), HAL type id 14 → **chipver 23** —
+which is exactly the branch the TXDESC question lives on.
