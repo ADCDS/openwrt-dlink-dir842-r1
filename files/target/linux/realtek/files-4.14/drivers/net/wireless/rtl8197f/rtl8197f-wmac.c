@@ -52,11 +52,31 @@
  * ── What is deliberately NOT here ────────────────────────────────────────────
  * No PHY/RF programming. Past init, the vendor driver dispatches through a HAL
  * function-pointer table (priv->ops), so a literal ordered register sequence is
- * not recoverable by static analysis. The register sequence that IS recoverable
- * lives in the compiled-in tables array_mp_8197f_mac_reg (@0x80564e08, 152
- * pairs, offsets 0x0000-0x144e), array_mp_8197f_phy_reg (@0x80558160, 1492
- * pairs, 0x0800-0x0ff8) and array_mp_8197f_agc_tab — that is the raw material
- * for the next step.
+ * not recoverable by static analysis. The register sequences that ARE recoverable
+ * live in compiled-in tables, and they have been extracted and sanity-checked
+ * from vmlinux.bin so the next step starts from facts rather than guesses:
+ *
+ *   array_mp_8197f_mac_reg  @0x80564e08 .. 0x805652c8
+ *       152 pairs of {u32 reg; u32 val}. 146/152 (96%) have reg inside the
+ *       expected 0x0000-0x144e MAC window; values are byte-sized (0xbd, 0x1d,
+ *       0x12, 0x92 ...), matching the vendor's `& 0xff` byte writes.
+ *       Decodes cleanly as a flat table — usable almost as-is.
+ *
+ *   array_mp_8197f_phy_reg  @0x80558160 .. 0x8055b004
+ *       1492 pairs, but only 59% land in the 0x0800-0x0ff8 BB window. ★ Do NOT
+ *       treat this as a flat table: entries such as reg=0x80001003 and
+ *       reg=0x40000000 are not registers at all, they are Realtek's
+ *       CONDITIONAL-BRANCH markers (the 0x8.../0x4.../0xf... encoding used
+ *       throughout their PHY tables to select by RF/board variant). Replaying it
+ *       linearly would write garbage to whatever those values alias. It needs the
+ *       small condition interpreter the vendor HAL implements.
+ *
+ *   array_mp_8197f_agc_tab  @0x8055b004 .. 0x80564dd4  (single-register streaming)
+ *
+ * These are deliberately NOT embedded in the tree yet: ~1600 pairs of unverified
+ * data with no code that consumes or tests them would be bulk without value, and
+ * the PHY table would be actively misleading in flat form. Embed them together
+ * with the init code that replays them, including the conditional interpreter.
  *
  * Also note, from G1: per-unit 2.4 GHz RF calibration is NOT in an efuse. The
  * stock kernel never reads flash or efuse for this radio; the values live in the
