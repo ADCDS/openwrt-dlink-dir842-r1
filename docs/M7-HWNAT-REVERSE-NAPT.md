@@ -611,3 +611,65 @@ inbound row actually looks like in silicon versus what we write.
 ⚠ That step overwrites the working OpenWrt install on NOR (stock exists only in the
 backup), so it needs an explicit decision from the operator rather than being done
 opportunistically. Everything short of it has been done.
+
+## ★★★ R6 RESOLVED — by measuring STOCK on the same silicon (2026-07-30)
+
+With the operator's go-ahead, stock firmware was flashed back onto NOR and measured
+directly. **The result overturns R6's premise: stock does NOT hardware-offload the
+reverse path either.**
+
+### Method
+- Backup verified first (all slices match `dir842-mtd6-ALL.bin`, md5 `35d372de…`).
+- Wrote stock's kernel+rootfs region (`0x040000..0x67F000`, md5 `d3a35f39…`) to the
+  firmware partition from a RAM-booted OpenWrt; flash readback verified byte-exact.
+- Stock booted: `Linux version 3.10.90+`, `root=/dev/mtdblock4`, `/proc/hw_nat` = **1**
+  (hardware NAT enabled).
+- Bench wired to stock's own addressing: host on `192.168.1.2`, stock LAN `192.168.1.1`,
+  stock WAN `eth1` = `172.16.0.1` toward tiny at `172.16.0.2`. Added
+  `iptables -t nat -A POSTROUTING -o eth1 -j MASQUERADE` (stock's own WAN setup was
+  bypassed by configuring `eth1` by hand, so TCP did not complete until this was added).
+- Same 60 MB transfer and the same CPU-seen-packet metric used on the port.
+
+### Result — stock, measured
+
+| direction | CPU-seen | data | verdict |
+|---|---|---|---|
+| **forward** LAN→WAN | **10 packets**, ~3 KB | 63 MB | **fully hardware-offloaded** |
+| **reverse** WAN→LAN | **43,529 packets** | 63 MB | **every packet through the CPU** |
+
+691 CPU pkt/MB on the reverse path — against a theoretical maximum of ~699/MB at
+1500 B MTU. Stock traps essentially every inbound packet.
+
+### What this settles
+
+R6 assumed the ASIC does reverse-NAPT in hardware and that this port was failing to
+configure it. **That assumption is false.** The vendor firmware, on this exact silicon,
+with `hw_nat=1` and its own driver, offloads **forward only**. There is no hidden
+register, table or bit we were missing — there is no reverse offload to find.
+
+This retroactively explains every negative in this investigation and vindicates them:
+the encoding was proven identical to stock because it *is* identical; the four
+falsified candidates were falsified because none of them could have worked; B1–B4 had
+no effect because the capability they were meant to unlock does not exist.
+
+For reference, this port versus stock on the same bench:
+
+| | stock | this port |
+|---|---|---|
+| forward | ~0.2 CPU pkt/MB | 147 CPU pkt/MB |
+| reverse | 691 CPU pkt/MB | 355 CPU pkt/MB |
+
+⚠ Read those across a row, not down a column — stock is kernel 3.10 without GRO, so its
+packet counts are raw wire packets, while 4.14 coalesces. The row comparison is what
+matters: **both offload forward and neither offloads reverse.**
+
+**One genuine gap this does expose:** stock's forward offload is far more complete
+(~0.2 vs 147 CPU pkt/MB). That is a real, measurable improvement available to this
+port, and unlike reverse-NAPT it is demonstrably achievable on this hardware — a much
+better target than the one R6 was chasing.
+
+### Bench restored
+Stock removed, OpenWrt factory image written back and byte-verified, box boots from
+NOR, and RAM-boot verified at 0% loss on LAN 56 B, LAN 1400 B and NAT.
+⚠ Note for future reflashes: write the **factory** image, not `sysupgrade` — the loader
+rejects the latter with `magic not found!!!` (it lacks the D-Link boot magic from M7.1).
