@@ -36,22 +36,77 @@
 		#size-cells = <0>;
 		poll-interval = <20>;
 
+		/* R3: all decoded from the stock gpiom.ko `dev_buttons` table
+		 * (rootfs lib/modules/gpiom.ko file offset 0x31a0, stride 13:
+		 * char name[10]; u8 pin; u8 active_low; u8 bank) and cross-checked
+		 * against dev_button_init_hook, which registers them with the vendor
+		 * kernel as bank*32+pin = 54/56/36. */
 		reset {
 			label = "reset";
-			gpios = <&gpio1 22 GPIO_ACTIVE_LOW>;
+			gpios = <&gpio1 22 GPIO_ACTIVE_LOW>;	/* vendor 54 */
 			linux,code = <KEY_RESTART>;
 		};
+
+		wps {
+			label = "wps";
+			gpios = <&gpio1 24 GPIO_ACTIVE_LOW>;	/* vendor 56 */
+			linux,code = <KEY_WPS_BUTTON>;
+		};
+
+		/* Stock declares a third button "wifi" at bank1 pin4 (vendor 36).
+		 * Left out deliberately: if this unit has no such button the pin may
+		 * float and emit spurious KEY_RFKILL, which would toggle the radio at
+		 * random. Enable only after confirming the button physically exists.
+		 *	rfkill {
+		 *		label = "wifi";
+		 *		gpios = <&gpio1 4 GPIO_ACTIVE_LOW>;
+		 *		linux,code = <KEY_RFKILL>;
+		 *	};
+		 */
 	};
 
-	// Breaks device switch. Still needs fix before using it
-	// gpio-leds {
-	// 	compatible = "gpio-leds";
+	/*
+	 * R3: LEDs. This node used to be commented out as "Breaks device switch".
+	 * ★ ROOT CAUSE FOUND — it was on the WRONG PIN. It used <&gpio1 25>, which is
+	 * not the WPS LED and has no use anywhere in the stock firmware; it sits ONE
+	 * PIN away from <&gpio1 26>, the RTL8367S hardware reset (vendor gpio 58,
+	 * global 474, pulsed low/high by the vendor's rtl865x_initAsicL2 @0x80198294).
+	 * Driving or disturbing that line holds the external switch in reset, which is
+	 * exactly the "breaks the switch" symptom. There is a second mechanism with the
+	 * same effect: bgpio_set() writes the whole cached 32-bit DAT word, and the
+	 * cache is snapshotted once in bgpio_init(), so ANY LED write on gpio1 rewrites
+	 * bit 26 from that stale snapshot.
+	 *
+	 * The real WPS LED is <&gpio0 22>, ACTIVE_LOW — a different bank entirely, so
+	 * both the off-by-one and the shared-DAT-word hazard go away. Decoded from
+	 * gpiom.ko `dev_leds` (file offset 0x3150, stride 20) and confirmed by
+	 * dev_led_init_hook calling rtl819x_gpio_register_led(22, active_low=1) ->
+	 * gpio_request_one(22, GPIOF_OUT_INIT_HIGH|GPIOF_EXPORT), i.e. initialised HIGH
+	 * = off, driven LOW to light.
+	 *
+	 * Conflict check (the reason this is safe to enable): the pins that drive the
+	 * external switch are gpio0 18 (SMI MDC), gpio0 19 (SMI MDIO) and gpio1 26
+	 * (8367S reset). None of the nodes here touch any of them.
+	 *
+	 * Only WPS is here because it is the ONLY software-controllable LED on this
+	 * board. LAN/WAN/Internet are driven by the switch/PHY LED controller (stock
+	 * writes a pattern into bits [11:8] of 0xB8003504, not the GPIO DAT register)
+	 * and the power LED has no GPIO at all — its libdhal.so entry points are
+	 * do-nothing stubs. Two 2.4 GHz WLAN LED candidates exist (<&gpio1 1> and
+	 * <&gpio0 24>) but the stock code selects between them on a chip-ID test that
+	 * could not be resolved for this board, so they are NOT declared here.
+	 *
+	 * ⚠ Still needs one visual check: the pin and polarity are confirmed from the
+	 * binary, but the panel COLOUR in the label is assumed to be green.
+	 */
+	gpio-leds {
+		compatible = "gpio-leds";
 
-	// 	wps {
-	// 		label = "gwr1200ac:green:wps";
-	// 		gpios = <&gpio1 25 GPIO_ACTIVE_LOW>;
-	// 	};
-	// };
+		wps {
+			label = "dir842:green:wps";
+			gpios = <&gpio0 22 GPIO_ACTIVE_LOW>;	/* vendor 22 */
+		};
+	};
 
 	/* External RTL8367S 5-port gigabit switch, managed over bit-banged SMI
 	 * (MDC=GPIO18, MDIO=GPIO19 on gpio0). Hardware-confirmed: the RGMII uplink
