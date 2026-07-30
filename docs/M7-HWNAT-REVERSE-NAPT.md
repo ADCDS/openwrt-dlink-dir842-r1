@@ -168,3 +168,59 @@ chain).
 
 ⚠️ The WAN link negotiated **100 Mb/s** (tiny's NIC advertises gigabit, so it is
 the cable). Gigabit cannot be demonstrated until that is replaced.
+
+---
+
+# R1 result (2026-07-30): flash-boot crash FIXED; flash-boot EGRESS is the remaining defect
+
+## ★ The crash was OpenWrt's own crash logger, recursing
+`crashlog_printf()` (generic `hack-4.14/930-crashlog.patch`) faults on this SoC on a bogus
+`0x00000c00` access **from inside `die()`**. So recording the first oops re-enters the
+fault path and recurses — observed `Oops[#448]`, PID 0, `task.stack=NULL` — flooding the
+console until the boot hangs. The genuine first fault was never printed, which is why #11
+had no root cause. Disabling crashlog removes the crash outright.
+
+**GATE PASSED: 10/10 consecutive unattended cold boots from NOR** — `oops=0`, userspace
+reached, `switching to jffs2 overlay` on every boot (previously 100% crash-loop).
+Commits: openwrt `36c3810`, mirror `b58a0a5`.
+
+⚠ **Config trap:** `# CONFIG_CRASHLOG is not set` in the subtarget `config-4.14` is NOT
+enough. `scripts/kconfig.pl` merges it correctly (verified), but OpenWrt injects top-level
+`CONFIG_KERNEL_<SYM>` knobs **after** that merge, so `CONFIG_KERNEL_CRASHLOG=y` silently
+won and the built kernel still contained `crashlog_printf` at `800af680` — exactly the
+crashing address. Effective switch = `# CONFIG_KERNEL_CRASHLOG is not set` in the
+top-level `.config` (git-ignored ⇒ recorded in `seed-m5.config`). **Verify by symbol, not
+by config:** `System.map` crashlog count 10 → 0.
+
+## The remaining flash-boot defect: egress is dead, ingress is perfect
+A flash boot now reaches a shell but has no working network. Measured, hop by hop:
+
+| hop | result |
+|---|---|
+| host → 8367S port 2 | ✓ arrives (`ifInOctets` grows) |
+| 8367S → trunk port 6 egress (switch→SoC) | ✓ `TRUNKOUT=408` |
+| SoC → CPU (`eth0` rx) | ✓ `CPURX=6` |
+| VLAN demux (`eth0.2` rx) | ✓ `LANVIF_RX=6` |
+| bridge local delivery (`br-lan` rx, unicast) | ✓ `BRLAN2=4` (with a static ARP) |
+| **box → host (anything the box emits)** | ✗ **NOTHING on the wire** |
+
+`tcpdump -i <host> 'ether src 00:e0:4c:81:96:c2 or icmp'` during 5 pings captured **only
+the 5 echo requests and zero frames from the box.** So ingress works end to end and the
+box's TX never leaves. Corroborating: the box's ARP table stays **empty** and broadcast
+ARP never reaches `br-lan` (rx=0) while unicast does (rx=4).
+
+Board state is otherwise correct on flash boot: `br-lan` = 192.168.0.1 with `eth0.2`
+enslaved, bridge port `state=3` (forwarding), `carrier=1`, `stp=0`, VLAN 2 =
+`ports 0 1 2 3 6t`, links up (port2 1000, port4 100, trunk 1000), `gw_prog` = `netif
+readback PASS`, and the trunk registers END UP IDENTICAL to a working RAM boot
+(`P0GMIICR=0x00037d55`, `PCRP0=42fc0039`, `PITCR=1`).
+
+★ Note the loader difference that makes this the *loader-absent* path: at `trunk-pre` a
+flash boot shows `P0GMIICR=0x00037d00` — missing the `0x55` Conf_done/delay bits — so the
+driver's **cold replica** runs and fixes it (and `first TX` / `first RX frame` do appear at
+boot). The 8367S itself IS loader-configured (`[1219]=0040`). So this is not the 8367S and
+not the register values; it is the SoC's **CPU-TX egress** on the cold path — the #13
+"box-originated traffic" family resurfacing when the loader has not fully initialised the
+port. Next step: diff the CPU-TX path (`_New_swNic_send` portlist / `ph_srcExtPortNum` /
+SoC VLAN+PVID membership programmed by `rtl865x_start`) between a loader boot and a cold
+flash boot, since every register we currently replicate already matches.
