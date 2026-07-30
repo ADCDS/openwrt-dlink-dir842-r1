@@ -38,6 +38,14 @@ DEFINE_MUTEX(rtl865x_hal_lock);
 /* R6/B1: restore the WAN CONNECTED route (172.16.0.0/24, process=RT_ARP) that stock
  * always programs for a netif's own subnet. Default 0 = the known-good forward-path
  * config this tree has run on; 1 = the R6 candidate. See the write site in gw_prog(). */
+/* R6/B3: prefill the L4 flow table with collision=collision2=1 the way stock's
+ * rtl865x_nat_init does. Default 0 — measured to break the datapath when applied
+ * unconditionally; see rtl865x_napt_clear() for the analysis and the safe retry. */
+static int napt_collision_prefill;
+module_param(napt_collision_prefill, int, 0644);
+MODULE_PARM_DESC(napt_collision_prefill,
+		 "R6/B3: free L4 rows carry collision=collision2=1 (0=off default, 1=on — known to break the datapath in this form)");
+
 static int wan_connected_route;
 module_param(wan_connected_route, int, 0644);
 MODULE_PARM_DESC(wan_connected_route,
@@ -358,7 +366,42 @@ int rtl865x_napt_clear(u32 idx)
 	if (idx >= RTL865X_NAPT_ROWS)
 		return -EINVAL;
 	memset(&z, 0, sizeof(z));	/* valid=0 => the ASIC treats the row as free */
+	/* ★ R6/B3: a free row is NOT all-zero on this ASIC. Stock's rtl865x_nat_init
+	 * (vendor l4Driver/rtl865x_nat.c:176-180) memsets the template, then sets
+	 * isCollision = isCollision2 = 1 and force-writes EVERY row of the 1024-entry
+	 * table with it. The vendor's own comment elsewhere ("col1 and col2 are always
+	 * set") reads as an erratum workaround for the hash / 4-way walk: the walk uses
+	 * the collision bits to decide whether to keep probing, so a row cleared to
+	 * all-zero can terminate a probe chain early and hide a valid entry sitting
+	 * behind it. The row setter also hardwires both bits on every row it writes
+	 * (ori 0x4002), so stock never has a collision-clear row anywhere.
+	 * Clearing them here was this port's own invention.
+	 *
+	 * ⚠ MEASURED HARMFUL AS AN UNCONDITIONAL CHANGE — default OFF. With the bits set
+	 * on every clear (including live flow teardown) the datapath went to 100% loss on
+	 * LAN and NAT and did not recover by warming. Plausibly because napt_clear() is
+	 * also the teardown path for ACTIVE flows, so marking freed rows as "collision,
+	 * keep probing" corrupts the walk for subsequent lookups rather than repairing
+	 * it. Stock only ever writes this pattern at INIT, before any flow exists, and
+	 * its teardown path is not this function. So if this is retried, apply it ONLY in
+	 * the prefill, never in the per-flow clear. */
+	if (napt_collision_prefill) {
+		z.collision = 1;
+		z.collision2 = 1;
+	}
 	return rtl865x_asic_write_entry(ASIC_TYPE_L4_TCP_UDP, idx, &z, true);
+}
+
+/* R6/B3: stock prefills the WHOLE L4 flow table before any flow exists
+ * (rtl865x_nat_init). This port never initialised it at all, so its 1024 rows keep
+ * whatever the bootloader left, and any stale row with valid=1 or a collision-clear
+ * chain can defeat the inbound lookup. Runs once from gw_prog. */
+void rtl865x_napt_prefill(void)
+{
+	u32 i;
+
+	for (i = 0; i < RTL865X_NAPT_ROWS; i++)
+		rtl865x_napt_clear(i);
 }
 
 int rtl865x_napt_read(u32 idx, struct asic_napt_tcpudp *out)
@@ -769,6 +812,12 @@ static int gw_prog(struct seq_file *m, void *v)
 						 * + PPPoE row) from the live shadows; boot default
 						 * = tiny -> trunk (WAN vid1), fid1, ethernet */
 
+	/* R6/B3: prefill the L4 flow table the way stock does, BEFORE programming
+	 * routes/flows. See rtl865x_napt_clear() for why a free row must carry
+	 * collision=collision2=1 rather than being all-zero. */
+	if (napt_collision_prefill)
+		rtl865x_napt_prefill();
+
 	/* 5. Routes. /32 host routes FIRST (process=L2, nextHop = peer L2 idx directly —
 	 * bypasses the ARP-window hashing) so hal<->tiny resolves deterministically; the
 	 * /24 direct routes (process=ARP) follow as a fallback. Most-specific = lowest idx. */
@@ -820,8 +869,44 @@ static int gw_prog(struct seq_file *m, void *v)
 	memset(&rt, 0, sizeof(rt));
 	rt.ipAddr = 0xC0A80000;			/* 192.168.0.0/24 -> LAN */
 	rt.ipMask = gw_asicmask(24); rt.valid = 1; rt.process = 2; rt.netif = 0;
-	rt.internal = 1; rt.ARPStart = 0; rt.ARPEnd = 31;
+	rt.internal = 1; rt.ARPStart = 0; rt.ARPEnd = 31;	/* raw rows 0..255 */
 	rtl865x_asic_write_entry(ASIC_TYPE_L3_ROUTING, 2, &rt, true);
+
+	/* ── R6/B2: the LAN-host ARP entry ───────────────────────────────────────────
+	 * ★ The ASIC's ARP index is NOT a hash — that assumption is what made an earlier
+	 * static-ARP attempt drop frames and got the whole idea shelved. From the vendor
+	 * source (l3Driver/rtl865x_arp.c:303 rtl865x_arp_hash):
+	 *
+	 *     arpIndex = route->un.arp.arpsta + (ip & ~route->ipMask);
+	 *
+	 * i.e. the route's RAW ARP start plus the HOST part of the address. Purely
+	 * positional. That same function also returns FAILED unless
+	 * `route->process == 2`, which independently confirms why a connected subnet has
+	 * to be process=RT_ARP (see R6/B1) for any of this to resolve.
+	 *
+	 * So for the LAN route above — 192.168.0.0/24, ARPStart field 0 => raw arpsta 0 —
+	 * host 192.168.0.2 lands at row 0 + 2 = 2. Deterministic, no hash needed.
+	 *
+	 * Why this matters for R6: after a reverse-NAPT hit the destination becomes the
+	 * LAN host, and a process=2 route DROPS unless its ARP range holds a resolved
+	 * entry for that destination. This port previously programmed exactly ONE ARP
+	 * row (64, the WAN peer) and none for any LAN host, so even a correctly
+	 * classified inbound packet had no hardware path to the LAN. B1 without B2
+	 * therefore cannot show a gain, which is exactly what the first B1-only
+	 * measurement found (369 vs 382 CPU pkt/MB = noise).
+	 *
+	 * aging: max, and TEACR bit0 freezes L2/ARP aging anyway (see the aging comment
+	 * further down), so this entry will not age out mid-flow.
+	 */
+	{
+		struct asic_arp la;
+
+		memset(&la, 0, sizeof(la));
+		la.valid = 1;
+		la.nextHop = hal_nh;	/* L2 row for the LAN host's MAC */
+		la.aging = 0x1f;
+		rtl865x_asic_write_entry(ASIC_TYPE_ARP, 0 + 2, &la, true);
+	}
 	/* ── R6/B1: the WAN CONNECTED route, in stock's shape ────────────────────────
 	 * ★★★ This is the leading hypothesis for why inbound (WAN->LAN) reverse-NAPT
 	 * never engages, and it comes from diffing stock's route construction against
@@ -869,6 +954,8 @@ static int gw_prog(struct seq_file *m, void *v)
 	 * collapsing toward 0 (measure warm; see bench confound #5).
 	 */
 	if (wan_connected_route) {
+		struct asic_arp wa;
+
 		memset(&rt, 0, sizeof(rt));
 		rt.ipAddr = 0xAC100000;		/* 172.16.0.0/24 — CONTAINS the extIP .1 */
 		rt.ipMask = gw_asicmask(24);
@@ -876,9 +963,23 @@ static int gw_prog(struct seq_file *m, void *v)
 		rt.process = 2;			/* RT_ARP: stock's connected-subnet process */
 		rt.netif = 1;			/* WAN netif */
 		rt.internal = 0;		/* WAN side = external */
-		rt.ARPStart = 0; rt.ARPEnd = 31;	/* stored >>3 => raw rows 0..255 */
+		/* ★ ARP range must NOT overlap the LAN route's. See the B2 block below for
+		 * why the index is deterministic: arpIndex = arpsta_raw + host-part, so two
+		 * /24s sharing arpsta would collide on every host number. LAN owns raw rows
+		 * 0..255 (field 0..31); give the WAN raw 256..504 (field 32..63). The table
+		 * is 512 rows (RTL8651_ARPTBL_SIZE), so both fit. */
+		rt.ARPStart = 32; rt.ARPEnd = 63;	/* stored >>3 => raw rows 256..504 */
 		rt.ARPIpIdx = 0;		/* extIP table row holding the WAN IP */
 		rtl865x_asic_write_entry(ASIC_TYPE_L3_ROUTING, 3, &rt, true);
+
+		/* Companion ARP entry for the WAN peer within THIS route's range:
+		 * 256 + (172.16.0.2 & ~/24) = 256 + 2 = 258. Without it a process=2 route
+		 * drops, which is what made the previous static-ARP attempt fail. */
+		memset(&wa, 0, sizeof(wa));
+		wa.valid = 1;
+		wa.nextHop = tiny_nh;		/* L2 row for the WAN peer MAC */
+		wa.aging = 0x1f;
+		rtl865x_asic_write_entry(ASIC_TYPE_ARP, 256 + 2, &wa, true);
 	} else {
 		/* Phase 3 default: keep idx3 dead so a stale warm-reload entry cannot
 		 * shadow the process=5 NAPT route at idx0. */

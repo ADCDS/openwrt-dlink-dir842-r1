@@ -413,3 +413,49 @@ bits 18/19 are `EN_STOP_TLU`/`STOP_TLU_READY`, not a generic trigger/done pair.
 
 The full vendor SDK used as documentation is preserved at `dir842-build/sdk-rtl819x/`
 (529 MB); stock disassembly dumps are in `dir842-build/ke/`.
+
+## R6 measured properly at last — with a positive control (2026-07-30)
+
+★ **Every earlier R6 measurement this session was invalid**, including the ones used
+to falsify `WANRouteMode` and to test B1. They all ran with **`hwnat=N`** — hardware
+NAT was never armed, so they measured software forwarding and every packet hit the CPU
+by definition. Retracting that as a methodology error, not a hardware finding.
+
+Redone with offload armed AND a positive control, so the metric is shown to be capable
+of detecting offload before any negative is believed:
+
+| path | CPU pkt/MB | vs software |
+|---|---|---|
+| software reference (`hwnat=N`) | 382 | — |
+| **forward** LAN→WAN, `hwnat=Y` | **147** | **−61% — offload detected ✓** |
+| **reverse** WAN→LAN, `hwnat=Y` + B1 + B2 | **355** | −7% — still CPU-bound ✗ |
+
+The forward arm is the control: the same counter, same method, same box, shows a large
+drop when offload engages. So the reverse arm's flatness is a real property of the
+datapath, not an insensitive measurement.
+
+**B1 + B2 implemented and both are insufficient.** B2 turned out to be much easier than
+feared — the ARP index is **not a hash**:
+
+    arpIndex = route->un.arp.arpsta + (ip & ~route->ipMask)     (l3Driver/rtl865x_arp.c:303)
+
+Purely positional: raw ARP start plus the host part. For the LAN /24 at `arpsta=0`,
+host `.2` lands at row 2. That same function returns FAILED unless `route->process==2`,
+which independently confirms B1 is a prerequisite for any ARP resolution. Both are now
+implemented (LAN ARP row 2; B1's WAN route given raw rows 256..504 so the two /24s
+cannot collide on host number). Neither moved the reverse path.
+
+**B3 tried and MEASURED HARMFUL — do not repeat in this form.** Stock's
+`rtl865x_nat_init` (vendor `l4Driver/rtl865x_nat.c:176-180`) force-writes all 1024 rows
+with `isCollision = isCollision2 = 1`. Applying that as the general free-row pattern —
+i.e. inside `rtl865x_napt_clear()` — took the datapath to 100% loss on LAN and NAT with
+no recovery by warming. Almost certainly because `napt_clear()` is ALSO the teardown
+path for *active* flows, so marking freed rows "collision, keep probing" corrupts the
+walk for later lookups instead of repairing it. Stock only writes that pattern at INIT,
+before any flow exists, and its teardown is a different function. If retried: apply it
+ONLY in a one-shot prefill, never in the per-flow clear. Both are now behind
+`napt_collision_prefill` (default 0) and the tree is back to 0% on all paths.
+
+**Remaining untried:** B4 (SWTCR1 read-modify-write; stock ends ⊇ `0x2E00`, adding
+EnNATT2LOG `0x400` and ENFRAGTOACLPT `0x800`, where this port writes an absolute
+`0x2200` and clears bits 10/11), and B3 done correctly as an init-only prefill.

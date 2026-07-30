@@ -184,6 +184,7 @@ u32 gw_napt_hash1(u32 isTCP, u32 sip, u32 sport, u32 dip, u32 dport);
 int rtl865x_napt_write(u32 idx, const struct asic_napt_tcpudp *e);
 int rtl865x_napt_read(u32 idx, struct asic_napt_tcpudp *out);
 int rtl865x_napt_clear(u32 idx);
+void rtl865x_napt_prefill(void);
 
 /* ---- M7.2: dynamic WAN identity (PPPoE session + dynamic masquerade IP) ----
  * The WAN side is no longer compile-time: on a PPPoE WAN the peer MAC (the AC),
