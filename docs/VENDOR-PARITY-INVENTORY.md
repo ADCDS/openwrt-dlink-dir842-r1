@@ -563,3 +563,53 @@ from an approximation of that command; none of them held.
 
 Recorded this way deliberately: an unverified root cause left standing in the docs is
 worse than an open question, because the next person would build on it.
+
+#### R4/G3 — the real blocker found and fixed; driver now builds 50 objects
+
+The `incomplete type` error that stalled this for eight attempts is **solved**, and the
+cause was none of my four earlier guesses. It was a genuine vendor bug that this config
+combination exposes:
+
+`wifi.h` splits into an `#ifdef NOT_RTK_BSP` branch (lines 75–133) and an `#else`
+branch. `wlan_amsdullcsnaphdr_t` was defined **only in the `#else`**. But
+`NOT_RTK_BSP` **is** defined (`8192cd_cfg.h:1885`), while `SUPPORT_TX_AMSDU_SHORTCUT`
+is **also** defined (via `CONFIG_WLAN_HAL_8822BE` from the vendor Makefile) — and
+`8192cd.h` uses the struct under that second macro. So the type is used but never
+defined. The main driver units survive only because they pull the `#else` branch in by
+another route; the `phydm/` units do not.
+
+Found by probe, not inference: a `#error` at the use site proved the struct invisible,
+a second probe proved the include guard was *not* pre-set, and the conditional nesting
+then showed the branch split. Every earlier hypothesis (missing `asm/rtl865x`, circular
+include, missing `wifi.h` include, ccflags not reaching phydm) was wrong.
+
+**Fixes applied, each minimal and justified:**
+
+| fix | why |
+|---|---|
+| define `wlan_amsdullcsnaphdr_t` in the `NOT_RTK_BSP` branch too | makes both branches agree; the real bug |
+| `ccflags-y += -Wno-error=incompatible-pointer-types` (+ 4 similar) | vendor targets gcc 4.x/7.x; this tree is gcc 8.4. Scoped to this driver only |
+| `ccflags-y += -I$(srctree)/arch/mips/include/asm/mach-rtl8197f` | `<bspchip.h>` lives there; the kernel only adds the *configured* platform's mach dir |
+| `ccflags-y += -DCONFIG_RTL_8197F` | the vendor selects its SoC with this; this tree names it `CONFIG_SOC_RTL8197F`, so gates silently took wrong branches (e.g. `8192cd_osdep.c:174` included `<bsp/bspchip.h>`) |
+
+**Progress: 0 → 50 objects compiling.**
+
+★ Incidental but valuable: the vendor's `bspchip.h` independently confirms the R4/G1
+reverse engineering — `BSP_WLAN_BASE_ADDR 0xB8640000`, `BSP_WLAN_MAC_IRQ = CPU_BASE+6`,
+`BSP_WLAN_MAC_IE = BIT(29)`. All three were decoded from the stock binary and verified
+on silicon *before* this source was obtained.
+
+**Two blockers remain, and they are different in kind:**
+
+1. `BSP_PCIE0_D_CFG0` / `BSP_PCIE0_D_MEM` / `BSP_PCIE_IRQ` — more BSP symbols. Same
+   class as the ones just fixed; tractable.
+2. ★ **`struct sk_buff has no member 'srcPhyPort'`** (`8192cd_rx.c:7241`, `:8073`) — the
+   vendor SDK **adds fields to the kernel's core `sk_buff`**. This is the `net/rtl`
+   integration the G0 audit flagged at the outset. It cannot be fixed inside the driver:
+   it needs a patch to `include/linux/skbuff.h` adding the vendor fields, which is an
+   invasive core-kernel change and the point at which "port the driver" becomes "port
+   the vendor's kernel integration layer".
+
+That second item is the honest measure of what G3 still costs, and it is a decision
+point rather than a mechanical step: patch core `sk_buff`, or strip the code paths that
+use it (the fast-bridge / hardware-forwarding hooks) and accept a reduced driver.
