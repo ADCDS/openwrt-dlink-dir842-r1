@@ -5,10 +5,14 @@
 # (mainline's "realtek" target is the RTL838x/930x managed switches only). The
 # only tree with RTL8197F target support is the ggbruno fork. This script
 # overlays ./files/ (the DIR-842 device support + our fixes) onto a pinned
-# ggbruno checkout and builds a RAM-boot initramfs image.
+# ggbruno checkout and builds both a RAM-boot initramfs and a NOR squashfs image.
 #
-# IMPORTANT: this port is RAM-boot only (serial XMODEM into memory, then jump);
-# it does NOT write flash. Stock D-Link firmware stays intact — see README.md.
+# NOTE: this used to be RAM-boot only. It is not anymore — M7.1 cracked the D-Link
+# boot signature (a forgeable keyed-MD5) and R1 fixed the flash-boot crash, so this
+# builds a squashfs image that boots from NOR and survives a power cycle (verified
+# 10/10 consecutive unattended cold boots). ⚠ Flashing REPLACES stock firmware: back
+# up all 8 MB of NOR first and keep it, because stock exists only in that backup.
+# The initramfs image is still built and is still the safer way to iterate.
 #
 # Build environment: the ggbruno fork is from 2020 (kernel 4.14 / gcc 8.4). Use
 # a Debian 11 (bullseye)-era build host or container; very new toolchains can
@@ -18,6 +22,7 @@
 #   PROFILE=~/dir842-profile ./build.sh
 set -e
 cd "$(dirname "$0")"
+SELF_DIR="$(pwd)"
 
 [ -e openwrt ] && { echo "ERROR: ./openwrt already exists — remove it first." >&2; exit 1; }
 
@@ -51,35 +56,39 @@ if [ -n "$PROFILE" ]; then
 	[ -f files/etc/dropbear/authorized_keys ] && chmod 600 files/etc/dropbear/authorized_keys
 fi
 
-# NOTE: feeds are intentionally NOT updated. This old fork's default feeds
-# resolve to incompatible CURRENT package versions, and the minimal initramfs
-# image needs only in-tree packages (rtw88/mac80211, wpad, iw). Running
-# ./scripts/feeds update -a here would break the build.
+# Feeds: PINNED, and only the two we need are updated.
+#
+# The old advice here was "never update feeds" — true for the original initramfs image,
+# which used in-tree packages only, but it also meant no web UI. The real constraint is
+# that this fork's *default* feeds resolve to CURRENT (master) package versions, which do
+# not build against a 19.07-era base: master's luci-base is ucode-based and dies on
+# ucode-mod-html / liblucihttp-ucode, and master split miniupnpd into -iptables/-nftables
+# so a plain `miniupnpd` dep no longer resolves.
+#
+# Pinning both feeds to the openwrt-19.07 branch fixes that (Lua-era LuCI, no ucode), so
+# R5's LuCI + UPnP + QoS build cleanly. `feeds.conf` overrides feeds.conf.default wholly,
+# and it is gitignored inside the OpenWrt tree, which is why it is shipped from here.
+cp "$SELF_DIR/feeds.conf" feeds.conf
+./scripts/feeds update luci packages
+./scripts/feeds install luci-base luci-mod-admin-full luci-theme-bootstrap \
+                        luci-app-firewall luci-app-upnp luci-app-opkg \
+                        cgi-io miniupnpd qos-scripts
 
-# Seed config: realtek/rtl8197f, GWR1200AC-V1 profile (the RTL8197F reference
-# board the DIR-842 rides), initramfs (RAM-boot) + rtw88 WiFi packages.
-cat > .config <<'EOF'
-CONFIG_TARGET_realtek=y
-CONFIG_TARGET_realtek_rtl8197f=y
-CONFIG_TARGET_realtek_rtl8197f_DEVICE_GWR1200AC-V1=y
-CONFIG_TARGET_ROOTFS_INITRAMFS=y
-# CONFIG_TARGET_ROOTFS_SQUASHFS is not set
-CONFIG_PACKAGE_kmod-mac80211=y
-CONFIG_PACKAGE_kmod-cfg80211=y
-CONFIG_PACKAGE_kmod-rtw88=y
-CONFIG_PACKAGE_rtl8822be-firmware=y
-CONFIG_PACKAGE_wpad-basic=y
-# CONFIG_PACKAGE_wpad-mini is not set
-CONFIG_PACKAGE_iw=y
-CONFIG_DRIVER_11AC_SUPPORT=y
-CONFIG_DRIVER_11N_SUPPORT=y
-CONFIG_DRIVER_11W_SUPPORT=y
-EOF
+# Seed config: shipped from seed-m5.config so this script builds what the port
+# actually is today (squashfs flash image + LuCI + PPPoE + offload diagnostics), not
+# the historical minimal initramfs. Keep the seed as the single source of truth —
+# an inline copy here drifted out of date once already.
+# ★ Includes `# CONFIG_KERNEL_CRASHLOG is not set`, which is load-bearing for flash
+# boot: OpenWrt's own crashlog handler faults on this SoC and recurses, masking the
+# real oops. CONFIG_KERNEL_* is injected AFTER the target config merge, so the
+# subtarget's "# CONFIG_CRASHLOG is not set" alone is silently overridden.
+cp "$SELF_DIR/seed-m5.config" .config
 
 make defconfig
 make -j"$(nproc)"
 
 echo
-echo "Build complete. RAM-boot image is in:"
+echo "Build complete. Images are in:"
 echo "  $(pwd)/bin/targets/realtek/rtl8197f/"
-echo "  - *-GWR1200AC-V1-initramfs-kernel.bin   (serial XMODEM RAM-boot; see README)"
+echo "  - *-GWR1200AC-V1-initramfs-kernel.bin      (serial XMODEM RAM-boot; safest)"
+echo "  - *-GWR1200AC-V1-squashfs-sysupgrade.bin   (NOR flash; REPLACES stock — back up NOR first)"
