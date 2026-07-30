@@ -740,3 +740,28 @@ five times. Read what the preprocessor actually did.
 
 Everything else is banked: `g3-rtl8192cd-portflags.mk` in this repo holds the complete
 working flag set, and the traps above are recorded so none are rediscovered.
+
+#### R4/G4 — hardware precondition CONFIRMED on silicon
+
+Before the 2.4 GHz driver exists, the question "can both radios actually be live at
+once on this board?" can be answered independently — and it is now answered YES.
+
+Measured on a running RAM-boot with the G2 bring-up driver bound and the 5 GHz AP up:
+
+    WLAN_EN (SR+0x64): 00000000 -> 0000001f      (WMAC gate lifted and HELD)
+    WMAC regs +0x000=51c0b2f3 +0x004=14020012    (on-SoC block responding)
+    wlan1: ESSID "DIR842-OpenWrt", Mode Master, Channel 36 (5.180 GHz)
+    /sys/class/ieee80211/ -> phy1                 (rtw88's phy, the only one so far)
+
+So the on-SoC WMAC is powered, gated on, and answering register reads at the same time
+as the PCIe RTL8822BE is beaconing. Nothing about lifting `SR+0x64` disturbs rtw88,
+and the ethernet datapath stays at 0% loss throughout. This matches stock, which runs
+`wlan0` + `wlan1` together.
+
+**What that means for G4:** the remaining work is purely software — a driver that
+registers a second `phy` for the on-SoC radio, plus the userspace wiring to run an AP
+on each. There is no hardware arbitration, power or clock conflict to solve, which was
+the main open risk.
+
+The G4 gate is therefore: `/sys/class/ieee80211/` shows **two** phys, an AP on each,
+and a client associated on both simultaneously.
