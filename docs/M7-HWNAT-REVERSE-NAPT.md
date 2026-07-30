@@ -507,3 +507,53 @@ encoding-adjacent behaviour left unexamined. Both are concrete; neither is a gue
 
 All knobs default OFF and the tree is verified at 0% loss on LAN 56 B, LAN 1400 B and
 NAT, with forward offload intact.
+
+### B3 retried CORRECTLY (init-only) — safe, but still no effect
+
+Reworked exactly as the previous entry prescribed: `rtl865x_napt_prefill()` now writes
+the stock pattern (`collision = collision2 = 1`, `valid = 0`) directly to all 1024 rows
+once at init, and `rtl865x_napt_clear()` is back to a plain all-zero row because it is
+the teardown path for ACTIVE flows.
+
+That distinction is confirmed to be the one that mattered: **the init-only form does
+not break anything** (0% loss on LAN and NAT), where the same pattern applied inside
+`napt_clear()` took the box to 100%. So the earlier harm was the live-teardown
+application, not the pattern.
+
+But it does not fix inbound either.
+
+### R6 — the complete measured picture
+
+All with offload armed, same method, same box, against the forward positive control:
+
+| configuration | CPU pkt/MB | vs software |
+|---|---|---|
+| software reference (`hwnat=N`) | 382 | — |
+| **forward** control (`hwnat=Y`) | **147** | **−61%** ✓ |
+| reverse, B1+B2 | 355 | −7% |
+| reverse, B1+B2+B4 | 360 | −6% |
+| reverse, B1+B2+B3(init-only) | 361 | −6% |
+
+Every reverse configuration lands in 355–361 — indistinguishable from each other and
+from software forwarding, while the forward arm on the same counter drops by 61%.
+**Hardware reverse-NAPT does not engage under any combination of the divergences that
+are observable in stock's flow-creation path.**
+
+That path is now byte-equivalent to stock (encoding, hash, index, byte order, aging
+seed, commit protocol all decoded and matched), and B1, B2, B3 and B4 are each
+implemented and measured. So the cause lies outside flow creation.
+
+**The one candidate left, and a contradiction worth chasing.** `RTL865X_NAPT_ROWS` is
+documented in this port as *"flat 1-way L4 table depth (SWTCR1 EnL4WayH=0)"*, yet the
+code SETS `EnL4WayH` (bit 9). With that bit set the table is 4-way associative — 256
+sets × 4 ways — and a 10-bit index decomposes into set+way rather than addressing a
+flat 1024-entry array. The port writes rows as if the table were flat. Forward still
+works because its row is found by the same hash that wrote it; the inbound
+*verification* row is the one that must be located by a walk across ways, which is
+exactly where a set/way-vs-flat mismatch would bite, and also why the collision bits
+(B3) are implicated in the walk but insufficient on their own.
+
+Next step for whoever picks this up: determine, from `rtl865x_asicL4.c`'s four-way
+helpers in the preserved SDK (`dir842-build/sdk-rtl819x/`), how a 10-bit index maps to
+(set, way) when `EnL4WayH=1`, and whether `rtl819x_hwnat.c` should be writing the
+inbound row at a different physical row than it currently computes.

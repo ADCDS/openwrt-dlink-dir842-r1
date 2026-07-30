@@ -392,10 +392,10 @@ int rtl865x_napt_clear(u32 idx)
 	 * it. Stock only ever writes this pattern at INIT, before any flow exists, and
 	 * its teardown path is not this function. So if this is retried, apply it ONLY in
 	 * the prefill, never in the per-flow clear. */
-	if (napt_collision_prefill) {
-		z.collision = 1;
-		z.collision2 = 1;
-	}
+	/* NOTE: deliberately all-zero. This function is the teardown path for ACTIVE
+	 * flows, and setting the collision bits here was measured to break the datapath
+	 * outright (100% loss). Stock's collision pattern belongs in the INIT-ONLY
+	 * prefill below, which is how stock actually applies it. */
 	return rtl865x_asic_write_entry(ASIC_TYPE_L4_TCP_UDP, idx, &z, true);
 }
 
@@ -405,10 +405,22 @@ int rtl865x_napt_clear(u32 idx)
  * chain can defeat the inbound lookup. Runs once from gw_prog. */
 void rtl865x_napt_prefill(void)
 {
+	struct asic_napt_tcpudp t;
 	u32 i;
 
+	/* Stock rtl865x_nat_init (vendor l4Driver/rtl865x_nat.c:176-180): memset the
+	 * template, set isCollision = isCollision2 = 1, then force-write EVERY row of
+	 * the 1024-entry table with it — once, at init, BEFORE any flow exists.
+	 * valid stays 0, so these are free rows that keep the ASIC's probe chain walking
+	 * instead of terminating early on an all-zero row.
+	 * ★ This is deliberately NOT routed through rtl865x_napt_clear(): that function
+	 * is live-flow teardown, and applying this pattern there took the datapath to
+	 * 100% loss. Init-only is the distinction that matters. */
+	memset(&t, 0, sizeof(t));
+	t.collision = 1;
+	t.collision2 = 1;
 	for (i = 0; i < RTL865X_NAPT_ROWS; i++)
-		rtl865x_napt_clear(i);
+		rtl865x_asic_write_entry(ASIC_TYPE_L4_TCP_UDP, i, &t, true);
 }
 
 int rtl865x_napt_read(u32 idx, struct asic_napt_tcpudp *out)
