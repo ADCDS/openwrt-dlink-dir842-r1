@@ -254,3 +254,65 @@ Falsified so far, for the record: (1) extIP `/32` route with `process=2` → rep
 black-holed, proving the extIP-table match does **not** pre-empt the L3 route lookup;
 (2) dst-MAC→TOCPU ACL rule → works but blanket-traps every WAN frame (software-speed
 downloads, wedges under load); (3) extIP `nextHop` semantics → not a factor (this entry).
+
+## R4 — the 2.4 GHz radio: where it actually stands (2026-07-30)
+
+### G1 + G2 done and hardware-verified
+The SoC's integrated 2.4 GHz WMAC now has a DTS node and a driver that binds:
+
+    chip id 8197f001, reg [mem 0x18640000-0x1864ffff], irq 6, xtal 25MHz
+    WLAN_EN (SR+0x64): 00000000 -> 0000001f
+    WMAC regs +0x000=51c0b2f3 +0x004=14020012 +0x008=00003023
+    WMAC responds.
+
+`WLAN_EN` reading **zero** before the write is the key result: the bootloader never
+sets it, so that undocumented gate is load-bearing — the direct analogue of the PCIe
+`SR+0x100` release that cracked M5. Ethernet is unaffected (0% loss all paths).
+
+### The table route was investigated and then RULED OUT on hardware
+The vendor's init tables are conditional. Decoding the interpreter gave a flattened
+board-specific sequence (144 MAC + 464 BB + 196 AGC + 144 RF writes, files under
+`dir842-build/ke/wmac_*_flat.txt`, regenerable with `flatten_8197f.py`). It depended
+on two values only the chip can answer, so the driver prints them at probe:
+
+    bonding strap (SR+0x0c)[3:0]    = 10  -> 97FS -> package_type 1   ✓ predicted
+    cut version   (WMAC+0xf0)[15:12] = 1  -> ✗ NOT as assumed
+
+★ The vendor gates the whole header-table path on `(cut >= 2)` (0x801f91d4). This
+chip is **cut 1**, so stock never applies those tables here — it runs a legacy path
+(0x80252750 / 0x80253c90 / 0x80252784). Replaying the flattened tables would have
+programmed a register set the vendor does not use on this silicon, and would have
+looked entirely plausible while doing it.
+
+### Consequence: G3 (port the vendor driver) now beats G2 (hand-write)
+Source IS obtainable — the earlier "no source on this machine" was about this
+machine, not the world. Verified GPL publications, newest driver first:
+
+| source | driver vintage | kernel | why it matters |
+|---|---|---|---|
+| Cudy GP3000 `jameywine/GPL-for-GP3000` | 4.0.8 (`8192cd_hw.c` 1,150,948 B) | **5.10** | newest; full `WlanHAL/RTL88XX/RTL8197F` (verified 20 files), `Data/8197F` + `rtl8197Ffw.bin`, `8192cd_cfg80211.c`, and `wnic_skb_pool` factored out as a standalone module |
+| Mercusys MT110 `skraizenn/mercusys-mt110` | 4.0.8 | 5.4 | same driver, already packaged as an OpenWrt `KernelPackage` — best packaging template |
+| **8devices `v3.4.11e/openwrt-18.06-rtkmipsel-3.18`** | 1,008,120 B | 3.18 | **right target glue**: `ARCH:=mipsel`, `SUBTARGETS:=rtl8197f` — the SoC-side platform code |
+| **`vladisslav2011/openwrt-AC10`** | 981,115 B | 3.18 | ★ **the G4 precedent**: ships `CONFIG_SLOT_0_8822BE=y` next to `CONFIG_SOC_RFE_TYPE_0/5`, `CONFIG_SOC_EXT_PA`, `CONFIG_SOC_EXT_LNA` — an 8197F on-SoC radio running ALONGSIDE an RTL8822BE PCIe card, i.e. our exact pairing |
+
+Two things this changes:
+1. The port is **bracketed** (3.18 below our 4.14, 5.10 above), so every kernel-API
+   break between them has already been solved by the vendor — 5.10 is an answer key.
+2. **G4 has a published precedent.** vladisslav2011/openwrt-AC10 is a shipped config
+   driving exactly this hardware combination, which turns "is concurrent dual-band
+   even possible on this SoC" from an open question into a configuration problem.
+
+### Dead ends, so nobody repeats them
+- **D-Link never published DIR-842 R1 source.** All 7,901 keys in their public GPL
+  bucket were enumerated; only MediaTek revisions (A1/B1/C1/C3) exist. The one
+  Realtek entry is an RTL8196C. Do not download the 600 MB A1/B1 tarballs.
+- **No one has 8197F on-SoC 2.4 GHz working on modern OpenWrt** (forum t/70975, read
+  first-hand). The SoC port to 5.10 is done; the wireless driver is the blocker.
+- Worth weighing: that thread claims the 8197F WMAC "can be ported to rtw88, as they
+  use the same structs". Unverified, but rtw88 already binds the 8822BE on this box,
+  so it is a cheap hypothesis to test before committing to a 1 MB driver forward-port.
+
+### Still open
+G3 (port), G4 (both radios up). Also unresolved from the table work: the IQK/LCK/DPK
+trigger sites (indirect calls, no static call site) and which TXAGC register the
+per-unit `pwrlevel*` MIBs land in.

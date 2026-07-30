@@ -78,6 +78,26 @@
  * the PHY table would be actively misleading in flat form. Embed them together
  * with the init code that replays them, including the conditional interpreter.
  *
+ * ★★ AND THEN THE HARDWARE SAID NO — read this before spending any time on those
+ * tables. The tables are conditional, and a full decode of the vendor interpreter
+ * produced a flattened, board-specific sequence (144 MAC + 464 BB + 196 AGC + 144
+ * RF writes) on two assumptions that MUST be checked on silicon. This driver now
+ * prints both at probe. Measured on this board:
+ *
+ *     bonding strap (SR+0x0c)[3:0] = 10   -> 97FS -> package_type 1   ✓ as predicted
+ *     cut version (WMAC+0xf0)[15:12] = 1  -> ✗ NOT as assumed
+ *
+ * The vendor gates the whole header-table path on `p_dm[0x3E4] = (cut >= 2)`
+ * (decoded at 0x801f91d4). This chip reports **cut = 1**, so stock does NOT apply
+ * those tables at all — it runs a separate legacy path (0x80252750 / 0x80253c90 /
+ * 0x80252784). Replaying the flattened tables here would therefore program this
+ * radio with a register set the vendor never uses on this silicon revision.
+ *
+ * That is the expensive mistake this probe-time check exists to prevent, and it is
+ * why G2's next step is NOT "replay the tables". It also shifts the balance toward
+ * G3 (port the real vendor driver, which contains the legacy path) rather than
+ * hand-writing init from static analysis.
+ *
  * Also note, from G1: per-unit 2.4 GHz RF calibration is NOT in an efuse. The
  * stock kernel never reads flash or efuse for this radio; the values live in the
  * read-only "MAC" mtd partition (0x20000 + 0xd8) and stock pushes them in from
@@ -198,7 +218,7 @@ static int rtl8197f_wmac_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct rtl8197f_wmac *w;
 	struct resource *res;
-	u32 chip_id;
+	u32 chip_id, strap, cut;
 	int ret;
 
 	w = devm_kzalloc(dev, sizeof(*w), GFP_KERNEL);
@@ -243,6 +263,32 @@ static int rtl8197f_wmac_probe(struct platform_device *pdev)
 		rtl8197f_wmac_disable(w);
 		return ret;
 	}
+
+	/*
+	 * Report the three runtime values that decide WHICH vendor init tables
+	 * apply. The tables are conditional: the loader evaluates
+	 *   driver1 = cut<<24 | package<<12 | interface<<8 | rfe_type
+	 * and only entries whose condition matches are executed. Picking the wrong
+	 * package/RFE silently selects a DIFFERENT but equally well-formed register
+	 * set — the hardest possible failure to debug after the fact — so these are
+	 * printed at probe rather than assumed.
+	 *
+	 *  - bonding strap, SR+0x0C bits[3:0]: selects package_type via the vendor's
+	 *    13-entry table (strap 10/11/12 = 97FS -> package 1; 4/5/6 = 97FN ->
+	 *    package 2; 0 = 97FB -> package 0). The DIR-842 carries an RTL8197F*S*,
+	 *    so package 1 is EXPECTED — confirm here.
+	 *  - cut version, WMAC+0xF0 bits[15:12]: ★ gates whether the header-file
+	 *    tables are used AT ALL. The vendor sets its "use tables" flag as
+	 *    (cut >= 2); below that it runs a completely different legacy path, and
+	 *    the flattened tables would NOT be what stock applies.
+	 *  - rfe_type is a software MIB default (0 for chip_type 0x100A), not a
+	 *    register, so it cannot be read here — noted for completeness.
+	 */
+	strap = sr_r32(0x0c) & 0xf;
+	cut = (readl(w->base + 0xf0) >> 12) & 0xf;
+	dev_info(dev,
+		 "table-selection inputs: bonding strap(SR+0x0c)=%u cut(WMAC+0xf0[15:12])=%u -> tables %s (vendor uses header tables only when cut>=2)\n",
+		 strap, cut, cut >= 2 ? "APPLY" : "DO NOT APPLY (legacy path)");
 
 	/*
 	 * G2 stops here, deliberately and visibly. Registering with mac80211 now
