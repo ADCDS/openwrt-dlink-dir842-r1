@@ -468,3 +468,31 @@ untangle the `wifi.h` ↔ `8192cd_cfg.h` cycle properly — e.g. split the featu
 into a leaf header both can include, or move the type definitions ahead of the cycle.
 
 Driver left `# CONFIG_RTL8192CD is not set` so the image builds; re-enable to resume.
+
+#### Correction: there is NO circular include — and the blocker is still open
+
+The entry above blamed a `wifi.h` ↔ `8192cd_cfg.h` cycle. **That is wrong.**
+`8192cd_cfg.h` does not include `wifi.h` at all. The real situation is simpler:
+`8192cd.h` uses `struct wlan_amsdullcsnaphdr_t` but never included `wifi.h`, which
+defines it. Main driver units survive because they pull `wifi.h` in via
+`8192cd_util.h`; the `phydm/` units include only `8192cd.h`.
+
+Fixes applied and kept (all correct in themselves):
+- struct made unconditional in `wifi.h`
+- `wifi.h` given its own `8192cd_cfg.h` + `typedef.h` includes
+- `#include "./wifi.h"` added to `8192cd.h` **after** `8192cd_cfg.h`/`sys-support.h`,
+  so `__PACK`, `__WLAN_ATTRIB_PACK__` and `UINT8` exist first. (A first attempt put it
+  at the top of the include list, which hoisted `wifi.h` ahead of those macros and
+  stopped the struct body parsing — worse, not better.)
+
+⚠ **The error persists** — `phydm/../8192cd.h: field 'amsdullcsnaphdr' has incomplete
+type`, 5 objects compile. Five attempts have not cleared it, so this stops here rather
+than continuing to reason about the include graph from the outside.
+
+**The right next move is mechanical, not inferential:** preprocess the failing
+translation unit (`-save-temps` on one phydm object, or `make ... CFLAGS=-E`) and read
+what the compiler actually sees around that struct. Every attempt so far has been an
+inference about include order; the preprocessed output settles it in one step.
+
+State: driver `# CONFIG_RTL8192CD is not set`, image builds (4.75 MB of 7.9 MB), staged
+sources and header fixes all in place — re-enabling one config symbol resumes here.
