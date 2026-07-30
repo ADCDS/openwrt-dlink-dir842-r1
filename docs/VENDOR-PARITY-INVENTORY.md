@@ -704,3 +704,39 @@ which is the strongest validation the hardware map has had.
 the real build flags (`-save-temps` on `8192cd_proc.o`, or re-run its exact `make V=s`
 command line with `-E -dD`) and grep the output for `current_thread_info`. That shows
 what is shadowing it. Every remaining unknown here is now a single lookup.
+
+#### R4/G3 — stopping point, and the one thing that will crack it
+
+Best result stands at **52 objects** (parallel build) / 44–47 before the first serial
+failure. Two error sites remain, both in `8192cd_osdep.c` and both the *same* root
+issue: `BSP_WLAN_CONF_ADDR` / `BSP_WLAN_BASE_ADDR` / `BSP_WLAN_MAC_IRQ` undeclared at
+lines 372–374, plus `BSP_BOND_97F*` in `8192cd_hw.c`.
+
+**What was tried for that one symbol class, and measured:**
+
+| attempt | result |
+|---|---|
+| `-I .../mach-rtl8197f` | path present, symbols still undeclared |
+| `-include .../bspchip.h` | symbols resolve, but breaks `arch/mips/uaccess.h` + `thread_info.h` (`current_thread_info()` implicitly declared → `int`) |
+| supply the constants by `-D` | works for 6 symbols; does not scale — the driver needs 20+ (`BSP_BOND_97F*`, `BSP_PCIE0_*`, `BSP_GPIO_*`, `BSP_MISC_PINSR`, …) and `BSP_WLAN_MAC_IRQ` clashes with the header's `(BSP_IRQ_CPU_BASE + 6)` spelling |
+| `-DUSE_RLX_BSP` (to reach the `<bspchip.h>` branch at `osdep.c:175`) | no change |
+
+`8192cd_osdep.c:168-178` is the deciding block: `<bspchip.h>` sits in the `#else` of
+`#if !defined(USE_RLX_BSP)`, nested inside
+`#if defined(CONFIG_RTL_819X) && defined(__LINUX_2_6__)`. `CONFIG_RTL_819X` is defined
+(`8192cd_cfg.h:168`); `__LINUX_2_6__` was **not verified** and is the most likely
+culprit — if it is unset the entire block is skipped and no BSP header is included at
+all, which matches the symptom exactly and would explain why neither `-I` nor
+`USE_RLX_BSP` changed anything.
+
+**The one command that settles it** — check `__LINUX_2_6__`, then preprocess that file:
+
+    grep -rn 'define __LINUX_2_6__' drivers/net/wireless/rtl8192cd/*.h
+    # then, with the driver enabled, take the exact `make ... V=s` line for
+    # 8192cd_osdep.o and re-run it with -E -dD, grepping for BSP_WLAN_BASE_ADDR
+
+Stop reasoning about the include graph from outside; that has now failed on this file
+five times. Read what the preprocessor actually did.
+
+Everything else is banked: `g3-rtl8192cd-portflags.mk` in this repo holds the complete
+working flag set, and the traps above are recorded so none are rediscovered.

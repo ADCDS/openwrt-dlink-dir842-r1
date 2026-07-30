@@ -13,7 +13,20 @@ ccflags-y += -Wno-error=return-type
 #    mach directory, and this target builds as "realtek".
 #    ★ That header independently confirms R4/G1: BSP_WLAN_BASE_ADDR 0xB8640000,
 #    BSP_WLAN_MAC_IRQ CPU_BASE+6, BSP_WLAN_MAC_IE BIT(29).
-#    ⚠ The -I for mach-rtl8197f is REMOVED: with the BSP constants supplied by -D
+ccflags-y += -I$(srctree)/arch/mips/include/asm/mach-rtl8197f
+# ...and USE_RLX_BSP so the driver actually REACHES that include. In
+# 8192cd_osdep.c:168-178 the <bspchip.h> include sits in the #else of
+#   #if !defined(USE_RLX_BSP)
+# so without this macro the file takes the <platform.h> branch instead and every
+# BSP_* symbol stays undeclared no matter what -I is set. Despite the name it only
+# selects which BSP header to use here; the inner test then correctly picks
+# <bspchip.h> for CONFIG_RTL_8197F. The vendor build defines it for the same reason.
+ccflags-y += -DUSE_RLX_BSP
+#    ⚠ Use -I, never -include. The path lets the driver's own
+#    `#include <bspchip.h>` resolve at the right point; force-including it
+#    puts it ahead of the kernel's headers and breaks arch/mips uaccess.h
+#    (current_thread_info() implicitly declared -> int -> 'invalid type
+#    argument of ->'). Superseded note: with the BSP constants supplied by -D
 #    (see 8 below) the header is not needed, and pulling it in was breaking
 #    arch/mips uaccess.h ('invalid type argument of ->', current_thread_info()
 #    resolving to int) and thread_info.h. Supplying constants beats importing a
@@ -31,6 +44,13 @@ ccflags-y += -Wno-error=return-type
 # 3) the vendor selects its SoC with CONFIG_RTL_8197F; this tree names the same SoC
 #    CONFIG_SOC_RTL8197F, so gates silently took wrong branches (8192cd_osdep.c:174).
 ccflags-y += -DCONFIG_RTL_8197F
+# <bspchip.h> lives in the mach dir; the kernel only adds the CONFIGURED platform's
+# mach directory and this target builds as "realtek". Needed for BSP_WLAN_*,
+# BSP_BOND_97F*, BSP_PCIE0_* and ~20 more.
+# ⚠ Use -I, NEVER -include: force-including puts it ahead of the kernel's own
+# headers and breaks arch/mips uaccess.h (current_thread_info() implicitly declared,
+# so get_fs()'s '->' lands on an int).
+ccflags-y += -I$(srctree)/arch/mips/include/asm/mach-rtl8197f
 # 5) ★ NOT_RTK_BSP must be declared EXPLICITLY once (3) above is set.
 #    8192cd_cfg.h auto-defines it only under
 #      #if defined(_LITTLE_ENDIAN_) && !defined(CONFIG_RTL_8197F)
@@ -65,12 +85,6 @@ ccflags-y += -DIEEE80211_NUM_BANDS=NUM_NL80211_BANDS
 #    ★ Every value below matches what R4/G1 decoded from the stock vendor kernel and
 #    what the rtl8197f-wmac driver then read on silicon — the WMAC base and IRQ, and
 #    the PCIe entry G1 used as its self-check. Three independent sources agree.
-ccflags-y += -DBSP_WLAN_BASE_ADDR=0xB8640000UL
-ccflags-y += -DBSP_WLAN_CONF_ADDR=0x00000000UL
-ccflags-y += -DBSP_WLAN_MAC_IRQ=6
-ccflags-y += -DBSP_PCIE0_D_CFG0=0xB8B10000
-ccflags-y += -DBSP_PCIE0_D_MEM=0xB9000000
-ccflags-y += -DBSP_PCIE_IRQ=5
 # 4) ⚠ CONFIG_OPENWRT_SDK: NOT enabled, deliberately. It DOES fix the
 #    pskb->__unused errors (that field is a vendor addition to the kernel's core
 #    struct sk_buff), but it simultaneously stops <bspchip.h> resolving in
