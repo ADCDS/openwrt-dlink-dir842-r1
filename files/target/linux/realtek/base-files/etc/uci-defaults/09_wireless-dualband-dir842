@@ -1,0 +1,50 @@
+#!/bin/sh
+#
+# DIR-842 R1 (RTL8197F) — R4/G4 concurrent dual-band seed config.
+#
+# `wifi detect` only sees cfg80211 wiphys, so it generates the 5 GHz rtw88
+# radio and nothing else. The 2.4 GHz on-SoC WMAC is driven by the vendor
+# rtl8192cd driver over WEXT and has no wiphy, so its wifi-device stanza has
+# to be seeded here. Handler: /lib/netifd/wireless/rtl8192cd.sh
+#
+# Radio map (see docs/VENDOR-PARITY-INVENTORY.md R4/G1):
+#   radio0 / phy0 / wlan0 : RTL8822BE on PCIe, 5 GHz, mac80211 (rtw88) + hostapd
+#   radio1 /  --  / wlan1 : on-SoC RTL8197F WMAC, 2.4 GHz, rtl8192cd (WEXT),
+#                           in-kernel WPA2-PSK (8192cd_psk.c) — NOT hostapd
+#
+# wlan1 is pinned for the vendor radio so it cannot race rtw88 for wlan0.
+
+# The driver ingests /etc/Wireless/RTL8192CD.dat on interface-up
+# (8192cd_comapi.c:3431, called from 8192cd_osdep.c:7703). Stock symlinks this
+# directory to /tmp so the file lands in tmpfs instead of causing a flash write
+# on every `wifi up`; do the same.
+[ -e /etc/Wireless ] || ln -s /tmp /etc/Wireless
+
+[ -e /etc/config/wireless ] || touch /etc/config/wireless
+
+# Only seed once.
+uci -q get wireless.radio1 >/dev/null && exit 0
+
+uci -q batch <<'EOF'
+set wireless.radio1='wifi-device'
+set wireless.radio1.type='rtl8192cd'
+set wireless.radio1.phy='wlan1'
+set wireless.radio1.hwmode='11g'
+set wireless.radio1.channel='6'
+set wireless.radio1.htmode='HT20'
+set wireless.radio1.band='7'
+set wireless.radio1.country='1'
+set wireless.radio1.disabled='0'
+
+set wireless.default_radio1='wifi-iface'
+set wireless.default_radio1.device='radio1'
+set wireless.default_radio1.network='lan'
+set wireless.default_radio1.mode='ap'
+set wireless.default_radio1.ifname='wlan1'
+set wireless.default_radio1.ssid='DIR842-2G'
+set wireless.default_radio1.encryption='psk2'
+set wireless.default_radio1.key='ChangeMeNow123'
+commit wireless
+EOF
+
+exit 0

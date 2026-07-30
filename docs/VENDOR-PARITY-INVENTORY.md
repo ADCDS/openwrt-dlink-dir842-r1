@@ -765,3 +765,112 @@ the main open risk.
 
 The G4 gate is therefore: `/sys/class/ieee80211/` shows **two** phys, an AP on each,
 and a client associated on both simultaneously.
+
+## ★★ R4/G3 — rtl8192cd.ko LINKS. Root cause was dead code, not include paths.
+
+**`rtl8192cd.ko` builds and links: 116 objects, exit 0.** The wall that resisted eight
+of my inference attempts had a cause none of them could have reached, and it was found
+by *measuring* — recovering the real kbuild command line from `.8192cd_tx.o.cmd` and
+re-running it with `-E -dD`.
+
+**Root cause: the `#include <bspchip.h>` sites are UNREACHABLE DEAD CODE.** The
+189,406-line preprocessed TU contains zero `bspchip.h` markers, zero `platform.h`
+markers, zero `BSP_*` defines, and no `#define CONFIG_RTL_819X`. `8192cd_osdep.c:168`
+gates the whole block on `CONFIG_RTL_819X`, whose only self-define site
+(`8192cd_cfg.h:168`) is nested under **both** `#if !defined(__LINUX_2_6__)` **and**
+`#if defined(CONFIG_RTL8196B|C|8198)` — both false on 4.14/8197F. In the vendor SDK the
+symbol comes from the *kernel's* `.config`. **No `-I` could ever have helped.**
+`8192cd_hw.c` uses a different dead gate, `USE_RTL8186_SDK`.
+
+Two of my own conclusions were disproven by the same evidence:
+- `-DUSE_RLX_BSP` is **inert** — `8192cd_cfg.h:1820` defines it, then `:2007` does
+  `#undef USE_RLX_BSP` under `#ifdef NOT_RTK_BSP`, which this port sets.
+- the `uaccess.h` breakage was **never** caused by `-include` — it is the vendor's own
+  include order (`8192cd_security.c:15` includes `<asm/uaccess.h>` before
+  `<linux/module.h>`), and it reappeared with no `-include` in the build.
+
+**The fixes that got it linking:**
+
+| # | change | effect |
+|---|---|---|
+| 1 | `#include <bspchip.h>` appended to `8192cd_cfg.h` under `CONFIG_RTL_8197F && __KERNEL__` — every TU reaches it, *after* the kernel's headers | 52 → 55 objects, all BSP errors gone |
+| 2 | staged `include/net80211/` (4 headers) from the vendor SDK | needed by the `RTK_NL80211` sources |
+| 3 | ★ `<asm/uaccess.h>` → `<linux/uaccess.h>` in **14** files — the correct post-3.4 spelling, which pulls `linux/thread_info.h` first | **55 → 101 objects** |
+| 4 | two genuine vendor-rot fixes in `Hal88XXTxDesc.c` (`TXBD_BEACON_OFFSET_8197F` → `_V1`, a rename the vendor missed in one block; and dropping an AMSDU write-back that dereferences a struct member that does not exist) — both in `CONFIG_NET_PCI` paths the vendor never compiled | **101 → 116 objects, .ko LINKED** |
+| 5 | `<linux/sched/signal.h>` in `8192cd_util.c` (4.10 split the signal API out) | last implicit declaration gone |
+
+Module: `ELF 32-bit LSB relocatable, MIPS32 rel2`, **1.87 MB stripped** (6.6 MB with
+debug), `license=GPL`. Fits the 7.9 MB budget with ~3.1 MB free.
+Packaged via a new `target/linux/realtek/modules.mk` (`kmod-rtl8192cd`); confirmed in
+the rootfs at 1.81 MB.
+
+Full port captured in `g3-rtl8192cd-4.14-port.patch` (25 files) with the fetch recipe.
+
+**Caveat, stated plainly: this is compile-and-link only.** The driver has never been
+loaded. Remaining warnings (non-fatal, expected for 3.18-era code on gcc 8.4): 104
+`-Wincompatible-pointer-types`, 44 `-Wint-conversion` — downgraded from errors and the
+likeliest home for latent runtime bugs.
+
+## R4/G4 — concurrent dual-band: verdict, mechanism, and the blocker that would have bitten
+
+**Verdict: achievable.** `rtl8192cd` is cfg80211-only (`wiphy_new`/`wiphy_register`, and
+**no `ieee80211_alloc_hw` anywhere**), so it never competes with mac80211. It either
+adds a second `phyN` (Path A) or stays a pure WEXT netdev (Path B).
+
+★★ **The blocker that would have silently destroyed the working 5 GHz AP:**
+`rtl8192cd_pci_tbl[]` contains `{ REALTEK, 0xB822 }` under `CONFIG_WLAN_HAL_8822BE`, and
+`MODULE_DEVICE_TABLE` + `pci_register_driver` are live (`CONFIG_NET_PCI` is force-set by
+`8192cd_cfg.h` under `NOT_RTK_BSP`). Loading the driver as built would have made it
+**claim the RTL8822BE away from rtw88**. Fixed: `CONFIG_WLAN_HAL_8822BE`,
+`SLOT_0_8822BE`, `SLOT_0_RFE_TYPE_10`, `SLOT_0_TX_BEAMFORMING`, `RTL_5G_SLOT_0`,
+`BAND_5G_ON_WLAN0` and `USE_PCIE_SLOT_0` are all compiled out; `CONFIG_PCI_HCI` stays ON
+(it is the descriptor/ring model the on-SoC WMAC also uses, not a "PCIe card" switch).
+Verified the module still links with them off.
+
+**Stock's model — and it is Path B.** Stock's rootfs has **no hostapd at all**; its only
+802.1X binary is Realtek's `bin/auth` (RADIUS/Enterprise only), and `libdhal.so` logs
+"auth daemon isn't needed!" for PSK. **WPA2-PSK's 4-way handshake runs inside the
+driver.** So a WEXT-only 2.4 GHz radio alongside mac80211's 5 GHz is exactly what ships
+in production on this hardware.
+
+**Configuration mechanism (better than per-ioctl setup, and present in our source):**
+stock writes one file and lets the driver ingest it —
+`CFG_FILE_PATH "/etc/Wireless/RTL8192CD.dat"` (`8192cd_comapi.c:3431`), read by
+`CfgFileProc()` which `8192cd_osdep.c:7703` calls on open, reloadable via the `cfgfile`
+ioctl. Lines are `<ifname>_<mib>=<value>`. Bringing the interface up applies the whole
+config atomically, including MIBs that must be set *before* open. Stock symlinks
+`/etc/Wireless` → `/tmp` so it lands in tmpfs.
+
+**Artifacts now in the tree:**
+- `base-files/lib/netifd/wireless/rtl8192cd.sh` — netifd handler; writes the `.dat`
+  from UCI then brings the interface up. All MIB names verified against
+  `8192cd_ioctl.c`. `/sbin/wifi` dispatches on UCI `type` → `/lib/netifd/wireless/$type.sh`.
+- `base-files/etc/uci-defaults/09_wireless-dualband-dir842` — creates the
+  `/etc/Wireless` symlink, seeds `radio1` (`type 'rtl8192cd'`). `radio0` (rtw88,
+  `type mac80211`) is untouched.
+
+**Interface naming (corrected, proven three ways):** stock is `wlan0` = **5 GHz**
+(RTL8822BE) and `wlan1` = **2.4 GHz** (on-SoC) — the reverse of the intuitive reading.
+Evidence: `librlx_wifi_mibs.so`'s calibration keys (CCK/HT40 → `wlan_index=1`, 5G_* →
+`wlan_index=0`), `libdhal.so` pairing `RadioOff`↔`wlan1` and `5G_RadioOff`↔`wlan0`, and
+`etc/config.default`'s `"wifi": "wlan0", "wifi_2G": "wlan1"`.
+
+**Two further findings worth acting on:**
+- ⚠ `librlx_wifi_mibs.so` hard-checks the driver name string `rtl8192cd` before applying
+  anything, then pushes per-radio TX-power calibration from `/dev/mtd1`. **An
+  rtw88-driven 5 GHz radio is silently skipped and comes up uncalibrated.** That is the
+  same signature as the RX-deaf symptom on the other router in this fleet, so it is
+  worth measuring rather than assuming. The stock 5 GHz tables are mapped
+  (`pwrlevel5GHT40_1S_A/B`, `pwrdiff_5G_*`).
+- WPA3/SAE is absent from *this* driver vintage (no `wpa3/`, no `sae_` symbols; only
+  `dot11IEEE80211W` PMF). Stock's kernel *does* contain `rtl8192cd/wpa3/src_mbedtls/`,
+  so a newer vendor drop adds in-kernel SAE. A vintage limitation, not architectural.
+
+**If Path A (second `phy`) is pursued later:** the kernel has no in-tree cfg80211 — it
+comes from backports 5.8 — and `CONFIG_MODVERSIONS` is off, so symbols bind by name with
+no CRC check. 4.14-shaped structs meeting a 5.8 cfg80211 would corrupt silently. Path A
+must therefore move the driver into `package/kernel/mac80211`. The only cfg80211 op the
+driver uses that 5.8 removed is `mgmt_frame_register` → `update_mgmt_frame_registrations`
+— one shim, not a rewrite. (Consistent with what we hit: enabling the cfg80211 objects
+produced `cfg80211_inform_bss` signature errors and a `cfg80211_mgmt_tx_params`
+redefinition.)
