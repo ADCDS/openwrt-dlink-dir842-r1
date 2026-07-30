@@ -532,3 +532,34 @@ vendor Makefile as the driver's real kernel Makefile (it already carries the com
 minimal Kconfig/obj-y hookup over it.
 
 That is a concrete, bounded change and it is where the next session should start.
+
+#### ⚠ Correction: the "ccflags" root cause above is NOT verified either
+
+The entry above states the blocker's root cause as "the vendor ccflags don't reach the
+phydm/ units". **That is a hypothesis, not a confirmed finding, and the evidence now
+argues against it:** the vendor Makefile emits `-DCONFIG_WLAN_HAL_8822BE`
+*unconditionally* at `Makefile:63`, so the macro chain
+`CONFIG_WLAN_HAL_8822BE → SUPPORT_TX_AMSDU → SUPPORT_TX_AMSDU_SHORTCUT` should be
+satisfied for every unit built through that Makefile — including phydm's.
+
+So the honest state is: **the blocker is not root-caused.** Four separate explanations
+have been proposed and each failed to survive contact with evidence:
+
+1. "`asm/rtl865x/*` headers must be supplied" — disproved (all references dead).
+2. "`wifi.h` ↔ `8192cd_cfg.h` circular include" — disproved (`8192cd_cfg.h` does not
+   include `wifi.h`).
+3. "`8192cd.h` never includes `wifi.h`" — true, and fixed, but the error persists.
+4. "vendor ccflags don't reach phydm/" — contradicted by `Makefile:63`.
+
+Two attempts to preprocess the failing unit standalone both aborted before reaching the
+struct, on artefacts of the hand-built command line (missing `KERNEL_VERSION`, then
+missing mach-specific include paths) rather than on anything about the driver. That
+approach is a dead end as executed.
+
+**The only reliable next step is to capture the REAL compile command** the kernel build
+issues for a phydm object — `make target/linux/compile V=s` prints it — and re-run that
+exact command with `-E -dD`, changing nothing else. Every diagnosis so far has come
+from an approximation of that command; none of them held.
+
+Recorded this way deliberately: an unverified root cause left standing in the docs is
+worse than an open question, because the next person would build on it.
