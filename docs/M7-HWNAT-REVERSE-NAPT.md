@@ -1124,3 +1124,63 @@ ARP windows fed from the kernel neigh table, extIP `type(NAPT)` as the NAT trigg
 a default NxtHop route with IPDOMAIN=6, and an ARP index that fits 6 bits. That
 deletes the hardcoded-peer design entirely and is now a *transcription* job against a
 known-good reference rather than a search.
+
+---
+
+## Stock's netif + L2 tables — and the architectural verdict
+
+The two tables missing from the first stock run, captured during a live offloaded flow.
+
+`/proc/rtl865x/netif`:
+
+    [0] VID[2] e0:1c:fc:51:c9:ef  Routing enabled
+        ingress ACL 0-3,  egress ACL 253-253,  MTU 1500
+        Untag member ports: 0 1 2 3     Active member ports: 0 1 2 3 8
+    [1] VID[1] e0:1c:fc:51:c9:ee  Routing enabled
+        ingress ACL 4-6,  egress ACL 253-253,  MTU 1500
+        Untag member ports: 4           Active member ports: 4
+
+`/proc/rtl865x/l2`:
+
+    [119,0] 00:e0:4c:12:59:90 FID:0 mbr(2 ) FWD DYN     LAN client -> its jack
+    [134,0] e4:5f:01:04:98:af FID:1 mbr(4 ) FWD DYN     WAN peer   -> its jack
+    [119,1] e0:1c:fc:51:c9:ef FID:0 mbr(8 ) FWD DYN     router's own MAC -> CPU port 8
+    [  0,0] ff:ff:ff:ff:ff:ff FID:0 mbr(0 1 2 3 4 8) CPU STA NH
+    [  5,0] 00:00:0a:00:00:0f FID:0 mbr()            CPU STA NH
+
+### Everything cheap has now been tried, and failed
+
+| change | result |
+|---|---|
+| LAN client identity learned per-flow (`a420c7f`) | correct + necessary; **no offload** |
+| stock route/ARP architecture, no /32s (`5d39676`) | NAT still works with zero /32 routes — **confirms NAT is driven by extIP `type(NAPT)`, not `process=5`** — but **no offload** |
+| nexthop → ARP index 64 → 20 (6-bit safe) | **no offload** |
+| default route `IPDOMAIN` 0 → 6 | **no offload** |
+| single-port L2 egress mask 0x3f → 0x01 (`d04879c`) | **no offload** |
+
+Upload sat at 172–177 Mbit/s and ~93% CPU throughout, with ~106% of payload bytes
+crossing the CPU every time.
+
+### The verdict: it is the switch model, not a register
+
+Stock's SoC switch addresses the **physical jacks directly** — LAN netif members
+`0 1 2 3` + CPU `8`, WAN netif member `4` — and its L2 entries name one real jack per
+host. That only works because the RTL8367S is run as a **cascade / port extender**, so
+the SoC's L2/L3 engine has a genuine per-jack egress port to commit a routed unicast to.
+
+This port's **Fork A** model does the opposite: every jack lives behind the RGMII trunk,
+the CPU is port 6, and the jack is selected by VLAN ID after the frame has left the SoC.
+For hardware L3 forwarding the ASIC must resolve a destination to a single egress port;
+under Fork A that port is only ever the trunk, and delivery then depends on tagging the
+*external* switch acts on afterwards — which is fine for CPU-forwarded frames (they are
+re-injected with the right VID) and evidently is not a completable hardware path.
+
+⇒ **Hardware offload on this port requires bringing up the 8367S cascade so the SoC
+sees per-jack ports (stock's model), not another table or register fix.** That is
+M4-scale work — comparable to the original ethernet carve — and it is now a
+well-specified target rather than a search, because stock's exact end state is
+recorded above.
+
+The good news from this session stands: **the capability is real** (stock does 913/923
+Mbit/s at ~1% CPU in both directions), the reverse path is not the wall R6 believed,
+and two genuine correctness bugs were removed along the way.
