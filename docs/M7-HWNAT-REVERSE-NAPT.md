@@ -931,3 +931,28 @@ every packet with it both enabled and disabled.
 - Software flow offload A/B, same boot, same topology: **147 → 181 Mbit/s**. A later
   171-vs-144 pair is NOT a valid A/B — the `iptables -D` did not match the fw3 rule
   (it carries `-m comment`), so both runs had offload active.
+
+### ★ Measure offload by BYTES, not packet counts — the old "~90% offloaded" is suspect
+
+Today's upload, real two-port, `HWNAT=Y`:
+
+    eth0.2 rx bytes through the CPU : 215.4 MB
+    iperf3 payload transferred      : 203.0 MB   -> 106% (>100% = headers)
+    avg bytes per CPU-seen packet   : 5242       -> >1518, so GRO-COALESCED
+
+**Every byte of the upload went through the CPU.** Unambiguous, because bytes cannot
+be coalesced away the way packets can.
+
+This is why the packet-count method misleads here. Session 2 concluded "LAN→WAN is
+hardware offloaded, ~90% of data packets bypass the CPU" from `eth0.2` rx delta 5670
+against ~54,000 data packets. But 5,670 CPU-seen segments over that ~79 MB flow is
+~13,900 bytes per segment — those were **GRO super-packets**, not wire packets.
+Comparing coalesced CPU segments against wire packets makes any CPU-forwarded flow
+look ~90% offloaded. By the byte test, that flow's data also went through the CPU.
+
+⇒ The forward-offload claim needs re-verification by bytes before it is trusted, and
+the same applies to the `147 CPU pkt/MB` vs stock `0.2 CPU pkt/MB` comparison (stock
+ran kernel 3.10 **without GRO**, so its packet counts are raw wire packets while ours
+are coalesced — the two columns were never commensurable, as that table's own footnote
+half-suspected). Stock's 0.2 pkt/MB remains meaningful on its own terms: at ~700 wire
+pkt/MB, seeing 0.2 means stock genuinely offloaded essentially everything.
