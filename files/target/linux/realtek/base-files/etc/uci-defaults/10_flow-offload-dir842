@@ -1,0 +1,32 @@
+#!/bin/sh
+#
+# DIR-842 R1 (RTL8197F) — enable netfilter SOFTWARE flow offloading.
+#
+# Measured on the bench (RTL8197F @ 1 GHz, single core), WAN->LAN NAT download,
+# iperf3 -R over 10 s, CPU sampled from /proc/stat on the box:
+#
+#   without offload : 147 Mbit/s @ 96% CPU   (54.7 ms CPU per MB)
+#   with offload    : 181 Mbit/s @ 90% CPU   (40.7 ms CPU per MB)
+#
+# +23% throughput and -25% CPU per byte, so it is a clear win and costs nothing.
+#
+# ★ Why this matters on THIS board specifically: the rtl865x ASIC offloads the
+# FORWARD (LAN->WAN) direction only. The WAN->LAN reverse path has no hardware
+# offload on this silicon — stock firmware traps every inbound packet too, which
+# was verified by booting stock and measuring it (see
+# docs/M7-HWNAT-REVERSE-NAPT.md). So every downloaded byte is forwarded by the
+# CPU, and the only lever left on that direction is making the software path
+# cheaper. This is that lever.
+#
+# NOT a fix for the remaining gap: the box is still CPU-bound at ~181 Mbit and
+# gigabit needs roughly 8 ms CPU/MB, so ~5x more is still owed by the driver
+# datapath (DMA cache maintenance + uncached descriptor reads dominate; the RX
+# path is already zero-copy). Flow offload only removes the conntrack/iptables
+# traversal, which was never the dominant cost here.
+#
+# fw3 appends "--hw" to the rule; harmless — this driver implements no flowtable
+# ndo, so nf_flow_table_hw finds no hardware and it stays a software flowtable.
+[ -n "$(uci -q get firewall.@defaults[0])" ] || exit 0
+uci -q set firewall.@defaults[0].flow_offloading='1'
+uci -q commit firewall
+exit 0

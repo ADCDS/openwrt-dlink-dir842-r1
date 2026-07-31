@@ -7,19 +7,19 @@
 # overlays ./files/ (the DIR-842 device support + our fixes) onto a pinned
 # ggbruno checkout and builds both a RAM-boot initramfs and a NOR squashfs image.
 #
-# NOTE: this used to be RAM-boot only. It is not anymore — M7.1 cracked the D-Link
-# boot signature (a forgeable keyed-MD5) and R1 fixed the flash-boot crash, so this
-# builds a squashfs image that boots from NOR and survives a power cycle (verified
-# 10/10 consecutive unattended cold boots). ⚠ Flashing REPLACES stock firmware: back
-# up all 8 MB of NOR first and keep it, because stock exists only in that backup.
-# The initramfs image is still built and is still the safer way to iterate.
+# ⚠ FLASHING REPLACES STOCK FIRMWARE. This is no longer RAM-boot-only: M7.1 cracked
+# the D-Link boot signature (a forgeable keyed-MD5, see tools/sign-dlink.py) and the
+# squashfs image boots from NOR and survives a power cycle. Back up all 8 MB of NOR
+# FIRST and keep it somewhere safe — once you flash, stock exists only in that backup.
+# The initramfs image never touches flash and is still the safer way to iterate.
 #
 # Build environment: the ggbruno fork is from 2020 (kernel 4.14 / gcc 8.4). Use
 # a Debian 11 (bullseye)-era build host or container; very new toolchains can
 # fail to build the old host tools. See README.md for a container one-liner.
 #
-# Optional private profile (pre-configured gateway image):
-#   PROFILE=~/dir842-profile ./build.sh
+#   ./build.sh                                  # wired + 5 GHz WiFi + HW NAT offload
+#   VENDOR_SDK=/path/to/rtl819x-sdk ./build.sh  # ...plus the 2.4 GHz radio
+#   PROFILE=~/dir842-profile ./build.sh         # ...plus a private pre-configured profile
 set -e
 cd "$(dirname "$0")"
 SELF_DIR="$(pwd)"
@@ -35,15 +35,54 @@ git checkout 8a0ccb93f3431bcf8f5c5d03d4acc2c8e442de67
 # Overlay DIR-842 device support + fixes (path-preserving)
 cp -a ../files/. .
 
+# ---- vendor SDK import (optional, needed ONLY for the 2.4 GHz radio) ----------
+#
+# ★ WHY THIS IS NOT VENDORED IN THIS REPO. Two pieces of the 2.4 GHz path come from
+# Realtek's RTL819x SDK and are NOT redistributable here:
+#
+#   include/net/rtl/*                  ~37 headers, each carrying
+#                                      "Copyright Realtek Semiconductor Corporation.
+#                                       All rights reserved." with NO license grant.
+#   drivers/net/wireless/rtl8192cd/*   the vendor WMAC driver (~120 files), same.
+#
+# Neither is present in the pinned ggbruno base, so shipping them here would mean
+# publishing proprietary source that is not otherwise public. What this repo DOES
+# ship is our own work against them: two port patches, plus the BSD-licensed
+# net80211 headers (which carry an explicit redistribution grant) in files/.
+#
+# Point VENDOR_SDK at an extracted RTL819x SDK tree containing
+# target/linux/realtek/files/{include/net/rtl,drivers/net/wireless/rtl8192cd}.
+#
+# WITHOUT it the build still succeeds and you get: wired ethernet, the RTL8367S
+# switch, WAN/LAN, NAT, hardware NAT offload, and the 5 GHz RTL8822BE radio (rtw88,
+# fully mainline). You lose ONLY the 2.4 GHz radio.
+if [ -n "${VENDOR_SDK:-}" ]; then
+	SDKF="$VENDOR_SDK/target/linux/realtek/files"
+	[ -d "$SDKF/include/net/rtl" ] || { echo "ERROR: VENDOR_SDK=$VENDOR_SDK has no target/linux/realtek/files/include/net/rtl" >&2; exit 1; }
+	[ -d "$SDKF/drivers/net/wireless/rtl8192cd" ] || { echo "ERROR: VENDOR_SDK has no .../drivers/net/wireless/rtl8192cd" >&2; exit 1; }
+	echo ">>> VENDOR_SDK=$VENDOR_SDK: importing vendor headers + rtl8192cd, then applying port patches"
+
+	DST=target/linux/realtek/files-4.14
+	mkdir -p "$DST/include/net" "$DST/drivers/net/wireless"
+	cp -a "$SDKF/include/net/rtl"                "$DST/include/net/rtl"
+	cp -a "$SDKF/drivers/net/wireless/rtl8192cd" "$DST/drivers/net/wireless/rtl8192cd"
+
+	# Our 4.14 port work on top of the pristine SDK sources.
+	patch -p1 --forward < "$SELF_DIR/g4-rtl-headers-4.14-port.patch"
+	patch -p1 --forward < "$SELF_DIR/g3-rtl8192cd-4.14-port.patch"
+	cp "$SELF_DIR/g3-rtl8192cd-portflags.mk" "$DST/drivers/net/wireless/rtl8192cd/portflags.mk"
+else
+	echo ">>> VENDOR_SDK not set: building WITHOUT the 2.4 GHz radio."
+	echo "    (wired, switch, NAT, hardware offload and 5 GHz rtw88 are all unaffected)"
+fi
+
 # ---- optional: private profile overlay (PROFILE=/path/to/profile) ----
 # Bakes a private, secret-bearing profile into the image as custom rootfs files
 # (OpenWrt copies ./files/ into the rootfs). The profile's
 # files/etc/config/{network,wireless,firewall,dhcp} hold the real gateway
 # topology + WiFi PSK, so a clean image boots configured. It lives OUTSIDE this
 # repo; only its path is passed in:  PROFILE=~/dir842-profile ./build.sh
-# NOTE: full gateway routing needs the deferred RTL8367R switch + WAN driver
-# work (docs/ASSESSMENT.md); today only a flat LAN + WiFi AP function.
-if [ -n "$PROFILE" ]; then
+if [ -n "${PROFILE:-}" ]; then
 	[ -d "$PROFILE/files" ] || { echo "ERROR: PROFILE=$PROFILE has no files/ dir." >&2; exit 1; }
 	echo ">>> PROFILE=$PROFILE: baking private profile config into the image"
 	mkdir -p files
@@ -90,5 +129,9 @@ make -j"$(nproc)"
 echo
 echo "Build complete. Images are in:"
 echo "  $(pwd)/bin/targets/realtek/rtl8197f/"
-echo "  - *-GWR1200AC-V1-initramfs-kernel.bin      (serial XMODEM RAM-boot; safest)"
-echo "  - *-GWR1200AC-V1-squashfs-sysupgrade.bin   (NOR flash; REPLACES stock — back up NOR first)"
+echo "  - *-GWR1200AC-V1-initramfs-kernel.bin      (serial XMODEM RAM-boot; never writes flash)"
+echo "  - *-GWR1200AC-V1-squashfs-factory.bin      (NOR flash via the loader's AUTOBURN)"
+echo "  - *-GWR1200AC-V1-squashfs-sysupgrade.bin   (NOR flash via sysupgrade)"
+echo
+echo "⚠ Both squashfs images REPLACE stock firmware. Back up all 8 MB of NOR first."
+echo "  A factory image must carry the D-Link trailer: tools/sign-dlink.py in.bin out.bin"

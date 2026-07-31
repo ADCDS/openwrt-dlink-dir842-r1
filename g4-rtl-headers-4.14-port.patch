@@ -1,0 +1,461 @@
+diff -urN pa/target/linux/realtek/files-4.14/include/net/rtl/fastpath/fastpath_core.h pb/target/linux/realtek/files-4.14/include/net/rtl/fastpath/fastpath_core.h
+--- a/target/linux/realtek/files-4.14/include/net/rtl/fastpath/fastpath_core.h	2026-07-26 14:34:41.104952545 -0300
++++ b/target/linux/realtek/files-4.14/include/net/rtl/fastpath/fastpath_core.h	2026-07-30 15:02:18.527337003 -0300
+@@ -76,8 +76,14 @@
+ 
+ #if defined(CONFIG_UDP_FRAG_CACHE)
+ #define MAX_UDP_FRAG_ENTRY 64 //kernel => 64 frag queue!!
++#define FRAG_CACHE_TIMEOUT (10 * HZ)
+ #endif
+-
++extern void rtl_readUdpFragEntry(void);
++extern unsigned int statistic_udp_frag_rx;
++extern unsigned int statistic_udp_frag_ps;
++extern unsigned int statistic_udp_frag_tbl_full;
++extern unsigned int statistic_udp_frag_add;
++extern unsigned int statistic_udp_frag_free;
+ #if 1
+ /***********************************cary:refine filter.c**********************************/
+ #define FASTPATH_FILTER	1
+@@ -227,7 +233,7 @@
+         unsigned char mac_header[ETH_HLEN];
+ 	__u16 valid;
+ 
+-
++	__u16 sport;
+ };
+ 
+ struct l2tp_ext_hdr
+@@ -285,7 +291,7 @@
+ 	__u16 Ns;                    /* Optional next sent */
+ 	__u16 Nr;                    /* Optional next received */
+ };
+-extern void (*l2tp_tx_id_hook)(void *skb);
++extern void (*l2tp_tx_id_hook)(void *skb,int tx,int rx);
+ 
+ #endif
+ 
+@@ -473,7 +479,7 @@
+ 	extern int fast_l2tp_to_wan(void *skb);
+ 	#endif
+ 	extern int fast_l2tp_rx(void *skb);
+-	extern void l2tp_tx_id(void *skb);
++	extern void l2tp_id(void *skb,int tx,int rx);
+ 	extern int fast_l2tp_fw;
+ #endif
+ 
+@@ -630,7 +636,7 @@
+ #endif
+ 									enum NP_FLAGS flags);
+ enum LR_RESULT rtk_delNaptConnection( rtl_fp_napt_entry *fpNaptEntry);
+-#if defined(IMPROVE_QOS)
++#if 0//defined(IMPROVE_QOS)
+ enum LR_RESULT rtk_idleNaptConnection(rtl_fp_napt_entry *fpNaptEntry, uint32 interval);
+ #else
+ enum LR_RESULT rtk_idleNaptConnection(rtl_fp_napt_entry *fpNaptEntry, uint32 interval, unsigned long *lastUsed);
+@@ -1162,6 +1168,8 @@
+ struct net_device * rtl_get_dev_by_name(char *name);
+ 
+ struct net_device *rtl_get_skb_dev(struct sk_buff* skb);
++unsigned char *rtl_get_dev_addr(struct net_device *dev);
++
+ void rtl_set_skb_dev(struct sk_buff *skb, struct net_device *dev);
+ 
+ char *rtl_get_skb_dev_name(struct sk_buff *skb);
+@@ -1261,6 +1269,9 @@
+ #endif
+ #endif
+ 
++int rtl_is_wan_dev(struct sk_buff *skb);
++
++
+ #define RTL_FSTPATH_TTL_ADJUST 1
+ void get_fastpath_module_info(unsigned char *buf);
+ 
+diff -urN pa/target/linux/realtek/files-4.14/include/net/rtl/features/rtl_features.h pb/target/linux/realtek/files-4.14/include/net/rtl/features/rtl_features.h
+--- a/target/linux/realtek/files-4.14/include/net/rtl/features/rtl_features.h	2026-07-26 14:34:41.104952545 -0300
++++ b/target/linux/realtek/files-4.14/include/net/rtl/features/rtl_features.h	2026-07-30 15:02:18.527337003 -0300
+@@ -96,7 +96,7 @@
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,10,0)
+ extern unsigned int	udp_get_timeouts_by_state(enum udp_conntrack state,void *ct_or_cp,int is_ct);
+ #else
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,4,0)
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,2,0)
+ extern unsigned int	udp_get_timeouts_by_state(enum udp_conntrack state);
+ #else
+ extern unsigned int nf_ct_udp_timeout;
+diff -urN pa/target/linux/realtek/files-4.14/include/net/rtl/features/rtl_private_struct.h pb/target/linux/realtek/files-4.14/include/net/rtl/features/rtl_private_struct.h
+--- a/target/linux/realtek/files-4.14/include/net/rtl/features/rtl_private_struct.h	2026-07-26 14:34:41.104952545 -0300
++++ b/target/linux/realtek/files-4.14/include/net/rtl/features/rtl_private_struct.h	2026-07-30 15:02:18.527337003 -0300
+@@ -1,7 +1,7 @@
+ #ifndef	RTL_PRIVATE_STRUCT_H
+ #define RTL_PRIVATE_STRUCT_H
+ 
+-#if defined(CONFIG_RTL_HARDWARE_NAT)
++#if defined(CONFIG_RTL_HARDWARE_NAT)||defined(CONFIG_RTL_IPTABLES_FAST_PATH)
+ #define CONFIG_RTL_HW_NAT_BYPASS_PKT 1
+ #define RTL_HW_NAT_BYPASS_PKT_NUM	50
+ #endif
+diff -urN pa/target/linux/realtek/files-4.14/include/net/rtl/rtk_stp.h pb/target/linux/realtek/files-4.14/include/net/rtl/rtk_stp.h
+--- a/target/linux/realtek/files-4.14/include/net/rtl/rtk_stp.h	2026-07-26 14:34:41.104952545 -0300
++++ b/target/linux/realtek/files-4.14/include/net/rtl/rtk_stp.h	2026-07-30 15:02:18.531336995 -0300
+@@ -7,6 +7,7 @@
+ #ifndef _RTK_STP_H
+ #define _RTK_STP_H
+ #include "rtl_types.h"
++#include <linux/netdevice.h>
+ 
+ #ifdef CONFIG_RTK_MESH
+ #define MAX_RE865X_STP_PORT	7
+@@ -22,6 +23,10 @@
+ 
+ #define NO_MAPPING				-1
+ 
++#define PORT_NAME_PREFIX	    "port"
++
++#define ETH_NAME_PREFIX	    "eth"
++
+ #define MAX_RTL_STP_PORT_WH	5
+ 
+ #define RTL8651_PORTSTA_DISABLED		0x00
+@@ -36,4 +41,6 @@
+ int32 rtl865x_setMulticastSpanningTreePortState(uint32 port, uint32 portState);
+ int32 rtl865x_setSpanningTreePortState(uint32 port, uint32 portState);
+ 
++int rtl_get_phy_port_by_dev(struct net_device *dev);
++
+ #endif // _RTK_STP_H
+diff -urN pa/target/linux/realtek/files-4.14/include/net/rtl/rtl865x_igmpsnooping_glue.h pb/target/linux/realtek/files-4.14/include/net/rtl/rtl865x_igmpsnooping_glue.h
+--- a/target/linux/realtek/files-4.14/include/net/rtl/rtl865x_igmpsnooping_glue.h	2026-07-26 14:34:41.104952545 -0300
++++ b/target/linux/realtek/files-4.14/include/net/rtl/rtl865x_igmpsnooping_glue.h	2026-07-30 15:02:18.531336995 -0300
+@@ -107,7 +107,31 @@
+ void rtl_glueMutexLock(void);
+ void rtl_glueMutexUnlock(void);
+ 
++
++#ifdef CONFIG_SMP
++#include <linux/spinlock.h>
++extern int lock_owner_igmp;
++extern spinlock_t lock_igmp;
++
++#define SMP_LOCK_IGMP(__x__)	\
++	do { \
++		if(lock_owner_igmp!=smp_processor_id()) \
++			spin_lock_irqsave(&lock_igmp, (__x__)); \
++		else \
++			rtlglue_printf("[%s %s %d] recursion detection in IGMP\n",__FILE__, __FUNCTION__,__LINE__); \
++		lock_owner_igmp=smp_processor_id();\
++	} while(0)
++
++#define SMP_UNLOCK_IGMP(__x__) \
++	do { \
++		lock_owner_igmp=-1; \
++		spin_unlock_irqrestore(&lock_igmp, (__x__)); \
++	} while(0)
++#else
++#define SMP_LOCK_IGMP(__x__)
++#define SMP_UNLOCK_IGMP(__x__)
+ #endif
+ 
++#endif
+ 
+ 
+diff -urN pa/target/linux/realtek/files-4.14/include/net/rtl/rtl865x_igmpsnooping.h pb/target/linux/realtek/files-4.14/include/net/rtl/rtl865x_igmpsnooping.h
+--- a/target/linux/realtek/files-4.14/include/net/rtl/rtl865x_igmpsnooping.h	2026-07-26 14:34:41.104952545 -0300
++++ b/target/linux/realtek/files-4.14/include/net/rtl/rtl865x_igmpsnooping.h	2026-07-30 15:02:18.531336995 -0300
+@@ -165,7 +165,7 @@
+ int32 rtl_getIpv4UnknownMCastFloodMap(uint32 moduleIndex,uint32 *unknownMCastFloodMap);
+ int32 rtl_setIpv6UnknownMCastFloodMap(uint32 moduleIndex,uint32 unknownMCastFloodMap);
+ int32 rtl_getIpv6UnknownMCastFloodMap(uint32 moduleIndex,uint32 *unknownMCastFloodMap);
+-
++#define	Any_0_hop_protocl		114
+ #ifndef M2U_DELETE_CHECK
+ #define M2U_DELETE_CHECK
+ #endif
+diff -urN pa/target/linux/realtek/files-4.14/include/net/rtl/rtl865x_multicast.h pb/target/linux/realtek/files-4.14/include/net/rtl/rtl865x_multicast.h
+--- a/target/linux/realtek/files-4.14/include/net/rtl/rtl865x_multicast.h	2026-07-26 14:34:41.104952545 -0300
++++ b/target/linux/realtek/files-4.14/include/net/rtl/rtl865x_multicast.h	2026-07-30 15:02:18.531336995 -0300
+@@ -21,11 +21,15 @@
+ #define 	RTL865X_MULTICAST_EXTIP_SET				0x02
+ #define 	RTL865X_MULTICAST_UPLOADONLY				0x04
+ 
+-#define 	MAX_MCAST_FWD_DESCRIPTOR_CNT			256
+-#define	    MAX_MCAST_TABLE_ENTRY_CNT				128
++//#define 	MAX_MCAST_FWD_DESCRIPTOR_CNT			256
++#define 	MAX_MCAST_FWD_DESCRIPTOR_CNT			(RTL8651_MULTICASTTBL_SIZE<<2)
++//#define	    MAX_MCAST_TABLE_ENTRY_CNT				128
++#define	    MAX_MCAST_TABLE_ENTRY_CNT			(RTL8651_MULTICASTTBL_SIZE<<1)
+ #if defined(CONFIG_RTL_8198C) || defined(CONFIG_RTL_8197F)
+-#define 	MAX_MCASTV6_FWD_DESCRIPTOR_CNT			256
+-#define     MAX_MCASTV6_TABLE_ENTRY_CNT				256
++//#define 	MAX_MCASTV6_FWD_DESCRIPTOR_CNT			256
++//#define     MAX_MCASTV6_TABLE_ENTRY_CNT				256
++#define 	MAX_MCASTV6_FWD_DESCRIPTOR_CNT			(RTL8651_MULTICASTTBL_SIZE<<2)
++#define     MAX_MCASTV6_TABLE_ENTRY_CNT				(RTL8651_MULTICASTTBL_SIZE<<1)
+ #endif
+ 
+ /*
+@@ -320,16 +324,16 @@
+ #if  defined(CONFIG_RTL8196C_REVISION_B) || defined (CONFIG_RTL8198_REVISION_B) || defined(CONFIG_RTL_819XD) || defined(CONFIG_RTL_8196E)
+ 	unsigned short liveTime;
+ #endif
+-#if defined(CONFIG_RTL_819XD) || defined(CONFIG_RTL_8196E) 
++//#if defined(CONFIG_RTL_819XD) || defined(CONFIG_RTL_8196E) 
+ 	unsigned int hashIndex;
+-#endif
++//#endif
+ #if defined(CONFIG_RTL_MULTICAST_PORT_MAPPING)
+ 	unsigned int mapPortMbr;
+ #endif
+ 	TAILQ_ENTRY(rtl865x_tblDrv_mCast_s) nextMCast;
+ 	
+ } rtl865x_tblDrv_mCast_t;
+-
++TAILQ_HEAD(MCast_hash_head, rtl865x_tblDrv_mCast_s);
+ struct rtl865x_multicastTable{
+ 	
+ 	struct freeList_s {
+@@ -418,9 +422,9 @@
+ 	unsigned short liveTime;
+ #endif 
+ 
+-#if defined(CONFIG_RTL_819XD) || defined(CONFIG_RTL_8196E)
++//#if defined(CONFIG_RTL_819XD) || defined(CONFIG_RTL_8196E)
+ 	unsigned int hashIndex;
+-#endif
++//#endif
+ 
+ #if defined CONFIG_RTL_MULTICAST_PORT_MAPPING
+ 	unsigned int mapPortMbr;
+@@ -428,7 +432,7 @@
+ 
+ 	TAILQ_ENTRY(rtl8198c_tblDrv_mCastv6_s) nextMCast;	
+ } rtl8198c_tblDrv_mCastv6_t;
+-
++TAILQ_HEAD( MCast6_hash_head, rtl8198c_tblDrv_mCastv6_s);
+ struct rtl8198c_multicastv6Table{
+ 	struct freeList6_s {
+ 		
+diff -urN pa/target/linux/realtek/files-4.14/include/net/rtl/rtl865x_netif.h pb/target/linux/realtek/files-4.14/include/net/rtl/rtl865x_netif.h
+--- a/target/linux/realtek/files-4.14/include/net/rtl/rtl865x_netif.h	2026-07-26 14:34:41.104952545 -0300
++++ b/target/linux/realtek/files-4.14/include/net/rtl/rtl865x_netif.h	2026-07-30 15:02:18.531336995 -0300
+@@ -681,8 +681,13 @@
+ 			#define	RTL_LANPORT_MASK		0x11f
+ 		#elif defined(CONFIG_RTL_EXCHANGE_PORTMASK)
+ 			//change wan port to port0
++			#if defined(CONFIG_RTL_8363NB_SUPPORT) || defined(CONFIG_RTL_8364NB_SUPPORT)
++			#define	RTL_LANPORT_MASK			0x8
++			#define RTL_WANPORT_MASK			0x2
++			#else
+ 			#define RTL_WANPORT_MASK		0x01 //port0
+ 			#define RTL_LANPORT_MASK		0x11e
++			#endif
+ 		#else
+ 			#if defined(CONFIG_RTL_LINK_AGGREGATION)
+ 			#define RTL_WANPORT_MASK		0x18 //port3 and port4 for wan, testcode
+@@ -760,6 +765,14 @@
+ 	#define	RTL_WANPORT_MASK		0x10
+ 		#ifdef CONFIG_8198C_8211FS
+ 		#define	RTL_LANPORT_MASK			0x12f  
++		#elif defined(CONFIG_RTL_8366SC_SUPPORT) || defined(CONFIG_RTL_8365MB_SUPPORT)
++		#define	RTL_LANPORT_MASK			0x107
++		#undef RTL_WANPORT_MASK
++		#define RTL_WANPORT_MASK			0x8
++		#elif defined(CONFIG_RTL_8363NB_SUPPORT) || defined(CONFIG_RTL_8364NB_SUPPORT)
++		#define	RTL_LANPORT_MASK			0x2
++		#undef RTL_WANPORT_MASK
++		#define RTL_WANPORT_MASK			0x8
+ 		#else
+ 		#define	RTL_LANPORT_MASK			0x10f
+ 		#endif
+diff -urN pa/target/linux/realtek/files-4.14/include/net/rtl/rtl_dnstrap.h pb/target/linux/realtek/files-4.14/include/net/rtl/rtl_dnstrap.h
+--- a/target/linux/realtek/files-4.14/include/net/rtl/rtl_dnstrap.h	2026-07-26 14:34:41.104952545 -0300
++++ b/target/linux/realtek/files-4.14/include/net/rtl/rtl_dnstrap.h	2026-07-30 15:02:18.531336995 -0300
+@@ -23,6 +23,7 @@
+ 
+ extern int br_dns_filter_enter(struct sk_buff *skb);
+ extern int is_dns_packet(struct sk_buff *skb);
++extern int is_recaped_dns_packet(struct sk_buff *skb);
+ extern int dns_filter_enable;
+ 
+ extern int br_dns_filter_init(void);
+diff -urN pa/target/linux/realtek/files-4.14/include/net/rtl/rtl_nic.h pb/target/linux/realtek/files-4.14/include/net/rtl/rtl_nic.h
+--- a/target/linux/realtek/files-4.14/include/net/rtl/rtl_nic.h	2026-07-26 14:34:41.108952538 -0300
++++ b/target/linux/realtek/files-4.14/include/net/rtl/rtl_nic.h	2026-07-30 15:02:18.531336995 -0300
+@@ -24,7 +24,7 @@
+ 
+ #if !defined(CONFIG_RTL_NO_BR_SHORTCUT)
+ #if !defined(CONFIG_RTL_FASTBRIDGE)//&&!defined(CONFIG_RPS)
+-#define BR_SHORTCUT         1
++//#define BR_SHORTCUT         1
+ #endif
+ #endif
+ 
+@@ -61,7 +61,7 @@
+ 	#endif
+ 
+ #include <linux/version.h>
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,2,0)
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,36)
+ #define ETH_SKB_BUF_SIZE	(SKB_DATA_ALIGN(CROSS_LAN_MBUF_LEN+sizeof(struct skb_shared_info)+160+RTL_NET_SKB_PAD))
+ #else	
+ #define ETH_SKB_BUF_SIZE	(SKB_DATA_ALIGN(CROSS_LAN_MBUF_LEN+sizeof(struct skb_shared_info)+160+NET_SKB_PAD))
+@@ -82,7 +82,7 @@
+ #else
+ 	struct	net_device	*dev[ETH_INTF_NUM];
+ #endif
+-#if 0//def CONFIG_RTL_STP
++#if defined(CONFIG_RTL_STP) && !defined(CONFIG_RTL_MULTI_LAN_DEV)
+ 	struct	net_device	*stp_port[MAX_RE865X_STP_PORT];
+ #endif
+ #if defined(CONFIG_RTL_CUSTOM_PASSTHRU)
+@@ -112,6 +112,9 @@
+ 
+ #ifdef TX_TASKLET
+ 	struct tasklet_struct   tx_dsr_tasklet;
++#if defined(CONFIG_RTL_NIC_QUEUE)
++	struct tasklet_struct   tx_queue_tasklet;
++#endif
+ #endif
+ 
+ 	struct tasklet_struct   link_dsr_tasklet;
+@@ -250,7 +253,12 @@
+ #define RTL_PS_PPP1_DEV_NAME RTL_DEV_NAME_NUM(RTL_PS_PPP_NAME,1)
+ #define RTL_PS_WLAN0_DEV_NAME RTL_DEV_NAME_NUM(RTL_PS_WLAN_NAME,0)
+ #define RTL_PS_WLAN1_DEV_NAME RTL_DEV_NAME_NUM(RTL_PS_WLAN_NAME,1)
++#if defined(CONFIG_RTL_MESH_SINGLE_IFACE)
+ #define RTL_PS_MESH_DEV_NAME "wlan-msh"
++#else	//!CONFIG_RTL_MESH_SINGLE_IFACE
++#define RTL_PS_MESH1_DEV_NAME "wlan0-msh0"
++#define RTL_PS_MESH2_DEV_NAME "wlan1-msh0"
++#endif	//CONFIG_RTL_MESH_SINGLE_IFACE
+ 
+ #if defined(CONFIG_RTL_MULTIPLE_WAN)
+ #define RTL_MULTIWAN_ADD 1
+@@ -373,13 +381,28 @@
+ #endif
+ #endif
+ 
+-#define RTL_DROP_OUT_OF_BR_SUBNET_FRAME 1
++//#define RTL_TRAP_BR_REAMIN_IP_TO_CPU 		1
++
++#if defined(RTL_TRAP_BR_REAMIN_IP_TO_CPU)
++#define RTL_MAX_BR_IP_NUM					10
++#define RTL865X_ACL_BR_REMAIN_IP_USED0		-20000
++#else
++#define RTL_DROP_OUT_OF_BR_SUBNET_FRAME 	1
++#endif
+ 
+ #if defined(CONFIG_RTL_PROCESS_PPPOE_IGMP_FOR_BRIDGE_FORWARD)
+ struct iphdr * rtl_get_pppoe_ipv4_hdr(unsigned char *data, int check_from_mac, unsigned short protocol);
++#if defined(CONFIG_RTL_MLD_SNOOPING)
++struct ipv6hdr * rtl_get_pppoe_ipv6_hdr(unsigned char *data, int check_from_mac, unsigned short protocol);
++#endif
+ int rtl_is_pppoe_igmp_bridge_frame(struct sk_buff *skb, int check_from_mac, unsigned char *dest);
+ #define PPPOE_IGMP  1
+ #define PPPOE_UDP   2
+ #define PPPOE_TCP   3
++#if defined(CONFIG_RTL_MLD_SNOOPING)
++#define PPPOE_ICMPV6  4
++#define PPPOE_UDPV6  5
++#define PPPOE_TCPV6  6
++#endif
+ #endif
+ #endif
+diff -urN pa/target/linux/realtek/files-4.14/include/net/rtl/rtl_types.h pb/target/linux/realtek/files-4.14/include/net/rtl/rtl_types.h
+--- a/target/linux/realtek/files-4.14/include/net/rtl/rtl_types.h	2026-07-26 14:34:41.108952538 -0300
++++ b/target/linux/realtek/files-4.14/include/net/rtl/rtl_types.h	2026-07-30 15:02:18.531336995 -0300
+@@ -723,11 +723,13 @@
+ extern int lock_owner_tx;
+ extern int lock_owner_buf;
+ extern int lock_owner_hw;
++extern int lock_owner_smi;
+ extern spinlock_t lock_eth_other;
+ extern spinlock_t lock_eth_rx;
+ extern spinlock_t lock_eth_tx;
+ extern spinlock_t lock_eth_buf;
+ extern spinlock_t lock_eth_hw;
++extern spinlock_t lock_eth_smi;
+ 
+ #if 0
+ /* ============ release version ============ */
+@@ -822,6 +824,21 @@
+ 		lock_owner_hw=-1; \
+ 		spin_unlock_irqrestore(&lock_eth_hw, (__x__)); \
+ 	} while(0)
++
++#define SMP_LOCK_ETH_SMI(__x__)	\
++	do { \
++		if(lock_owner_smi!=smp_processor_id()) \
++			spin_lock_irqsave(&lock_eth_smi, (__x__)); \
++		else \
++			rtlglue_printf("[%s %d] recursion detection in SMI\n",__FUNCTION__,__LINE__); \
++		lock_owner_smi=smp_processor_id();\
++	} while(0)
++	
++#define SMP_UNLOCK_ETH_SMI(__x__) \
++	do { \
++		lock_owner_smi=-1; \
++		spin_unlock_irqrestore(&lock_eth_smi, (__x__)); \
++	} while(0)	
+ #endif
+ 
+ #if defined(CONFIG_RTL819X_SPI_FLASH)
+@@ -853,6 +870,9 @@
+ #define SMP_LOCK_ETH_HW(x)			local_irq_save(x)
+ #define SMP_UNLOCK_ETH_HW(x)		local_irq_restore(x)
+ 
++#define SMP_LOCK_ETH_SMI(x)			local_irq_save(x)
++#define SMP_UNLOCK_ETH_SMI(x)		local_irq_restore(x)
++
+ #define SMP_LOCK_ETH2(x)			local_irq_save(x)
+ #define SMP_UNLOCK_ETH2(x)			local_irq_restore(x)
+ 
+@@ -872,7 +892,7 @@
+ #define CONFIG_RTL_SWITCH_NEW_DESCRIPTOR	1
+ #endif
+ // move this two definitions from linux_menuconfig to here due to they are too obviously.
+-#if !defined(CONFIG_RTL_AP_PACKAGE) && !defined(CONFIG_OPENWRT_SDK)
++#if !defined(CONFIG_RTL_AP_PACKAGE) && !defined(CONFIG_OPENWRT_SDK)
+ #define REINIT_SWITCH_CORE	1
+ //#define CONFIG_RTL_CHECK_SWITCH_TX_HANGUP	1
+ 
+@@ -888,6 +908,7 @@
+ #define RTL_dumpTxRing(a)			New_dumpTxRing(a)
+ #define RTL_dumpMbufRing(a)
+ #define RTL_swNic_reInit()			New_swNic_reInit()
++#define RTL_swNic_freeTxRing()		New_swNic_freeTxRing()
+ #define RTL_check_tx_own(a)			New_check_tx_done_desc_swCore_own(a)
+ #else
+ #define RTL_swNic_init(a,b,c,d)		swNic_init(a,b,c,d)
+@@ -899,6 +920,7 @@
+ #define RTL_dumpTxRing(a)			rtl_dumpTxRing(a)
+ #define RTL_dumpMbufRing(a)			rtl_dumpMbufRing(a)
+ #define RTL_swNic_reInit()			swNic_reInit()
++#define RTL_swNic_freeTxRing()		swNic_freeTxRing()
+ #define RTL_check_tx_own(a)			rtl_check_tx_done_desc_swCore_own(a)
+ #endif
+ 
+@@ -922,7 +944,11 @@
+ 		#if defined(CONFIG_RTL_SWITCH_NEW_DESCRIPTOR)
+ 		#define CONFIG_RTL_97F_HW_TX_CSUM            1
+ 		#else
+-		#define CONFIG_RTL_HW_TX_CSUM 		1
++			#if (defined(CONFIG_RTL_819XD) || defined(CONFIG_RTL_8881A)) && defined(CONFIG_IPV6)
++			// for 97D/8881A and older IC, they do not support HW L4 csum offload for IPv6+TCP/UDP packet.
++			#else
++			#define CONFIG_RTL_HW_TX_CSUM 		1
++			#endif
+ 		#define CONFIG_RTL_ETH_TX_SG 		1
+ 		#endif
+ 
+@@ -947,5 +973,9 @@
+ #endif
+ #endif
+ 
++#if defined(CONFIG_RTL_8197F) && defined(CONFIG_RTL_8211F_SUPPORT)
++extern int gpio_simulate_mdc_mdio;
++#endif
++
+ #endif
+ 
