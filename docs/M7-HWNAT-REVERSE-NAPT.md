@@ -863,3 +863,71 @@ breaks on an empty ring. Getting ~1.14 packets per poll at 94 Mbit means the CPU
 was **keeping up** — batching only appears once napi falls behind. It is a symptom
 of arrival rate, not a defect. The per-packet *cost* is the real finding, and it
 stands on the jiffie accounting, not on the poll ratio.
+
+---
+
+## ★★★ GIGABIT WAN LINK — the download is CPU-bound, not cable-bound (2026-07-30)
+
+The WAN cable was replaced and now links at **`port:4 link:up speed:1000baseT
+full-duplex`** (tiny: `carrier=1`, `speed=1000`). Every throughput caveat in this
+file about the 100 Mb link is now lifted, and the numbers can be taken at face value.
+
+Measured on the real two-port topology, `HWNAT=Y`, 10 s `iperf3`, CPU from
+`/proc/stat` on the box (`HZ=100`):
+
+| direction | throughput | CPU | CPU-seen |
+|---|---|---|---|
+| **download** (WAN→LAN, no HW offload exists) | **173 Mbit/s** | **86%** | 93 pkt/MB |
+| **upload** (LAN→WAN, HW offload *should* apply) | **171 Mbit/s** | **92%** | 191 pkt/MB |
+
+### What this settles
+
+**The 100 Mb cable was never what limited downloads — the CPU is.** With gigabit on
+both sides the download lands at 173 Mbit/s with the CPU at 86%. This confirms, by
+direct measurement on a gigabit link, the 155–160 Mbit ceiling that was extrapolated
+from 94 Mbit data and then measured at 147 Mbit on the netns bench. Three independent
+routes, same answer.
+
+So the operator's question — *"if stock does not offload, how did I download at
+gigabit on stock?"* — has this answer: **not because stock offloads the reverse path
+(it does not; that was verified by booting stock), but because stock's software path
+must be several times cheaper per packet than ours.** Our side of that comparison is
+now pinned down on real gigabit hardware. Stock's side is still an inference — the
+decisive test is to reflash stock and sample its CPU during a download on this same
+gigabit link, which is now finally possible.
+
+### ⚠ NEW REGRESSION: hardware forward offload is NOT engaging
+
+Upload shows **191 CPU pkt/MB** — the CPU is seeing every packet (GRO coalesces to
+~5.2 KB/segment). That contradicts session 2's measured "LAN→WAN is hardware
+offloaded, ~90% of data packets bypass the CPU" and stock's ~0.2 CPU pkt/MB.
+
+State at the time: `hwnat=Y`, `cat /proc/rtl865x_gw` → `RESULT PASS (gateway datapath
+LIVE in ASIC; MSCR=00000017)`, and rows **are** being programmed (distinct outbound
+rows 146/162/165/175/240/660/671/708/757 seen). But the aging instrument reads
+
+    hwnat AGE out[708]=0 in[65]=0
+
+**static at zero** — and a pinned/advancing age is precisely the "ASIC is forwarding
+this row" signal this port relies on. Rows exist; the ASIC is not matching them.
+That is the next target, and it is worth more than anything else on the list: stock
+proves ~0.2 CPU pkt/MB is achievable on this silicon, so restoring it should take
+uploads from ~170 Mbit toward line rate.
+
+Not the cause (checked): software flow offload does not steal the flows — the CPU sees
+every packet with it both enabled and disabled.
+
+### Bench notes
+
+- `bench-wan-emu.sh` (netns WAN peer on a tagged vid-1 subinterface of the LAN jack)
+  remains useful when no second machine is available, but ⚠ **it cannot exercise the
+  hardware forward offload**: with ingress and egress on the same physical port the
+  ASIC will not hardware-forward, measured as `HWNAT=Y` 167 Mbit @ 131 pkt/MB versus
+  `HWNAT=N` 170 Mbit @ 143 pkt/MB — no difference. It measures the *software* path
+  only, which is exactly right for the download direction and wrong for upload.
+- `HWNAT` is **N after a cold boot** (deliberate — see the DTS `chosen` comment) and
+  must be armed after `gw_prog`. Any throughput number must state its hwnat state;
+  two measurements in this session were initially confounded by not doing so.
+- Software flow offload A/B, same boot, same topology: **147 → 181 Mbit/s**. A later
+  171-vs-144 pair is NOT a valid A/B — the `iptables -D` did not match the fw3 rule
+  (it carries `-m comment`), so both runs had offload active.
