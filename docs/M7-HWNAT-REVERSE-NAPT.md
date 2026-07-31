@@ -1020,3 +1020,107 @@ DACLRCR, the L3 route + nexthop + ARP + L2 chain, EXTIP, and a live NAPT row pai
 with its aging. Then diff against the readback above. The question it answers is
 narrow and well-posed: *given a matching L4 row, what makes stock's silicon forward
 where ours traps?* Everything cheap has now been eliminated.
+
+---
+
+# ★★★★ STOCK GROUND TRUTH (2026-07-31) — R6's CENTRAL CONCLUSION IS OVERTURNED
+
+Stock was reflashed onto NOR (backup verified, `mtd write`, flash readback
+`d3a35f39…` byte-exact) and measured on the **gigabit** bench, then OpenWrt was
+restored. This is the experiment this document has called decisive since session 1.
+
+## The measurement that changes everything
+
+| firmware | direction | throughput | CPU busy (10 s transfer) |
+|---|---|---|---|
+| **stock** | upload LAN→WAN | **913 Mbit/s** | **9 jiffies = 0.09 s ≈ 0.9%** |
+| **stock** | download WAN→LAN | **923 Mbit/s** | **16 jiffies = 0.16 s ≈ 1.6%** |
+| this port | upload | 177 Mbit/s | 94% |
+| this port | download | 173 Mbit/s | 86% |
+
+**Stock hardware-offloads BOTH directions at ~920 Mbit/s with the CPU essentially
+idle.** Not just forward — *download too*.
+
+## ✗ RETRACTED: "stock does not offload the reverse path; there is no reverse
+## offload to find"
+
+That conclusion (and everything built on it) is **wrong**. It came from counting
+packets on stock's `eth1` and seeing 43,529 for a 63 MB download — "every packet
+trapped".
+
+The error: **stock's netdev counters include ASIC-forwarded frames.** Proven
+directly here — during the 913 Mbit upload, `br0` rx incremented by the *full*
+1,183 MB payload while the CPU logged **9 jiffies** of work. Bytes cannot flow
+through a CPU that is 99% idle. So on stock, `/proc/net/dev` counts what the switch
+forwards, not what the CPU touched, and every "stock traps everything" measurement in
+this file is void.
+
+⇒ **CPU time is the only valid cross-firmware metric here.** Packet *and* byte
+counters mean different things in the two firmwares (ours count CPU deliveries in the
+NAPI poll; stock's count switch traffic).
+
+⇒ **Reverse-NAPT in hardware is real and achievable on this silicon.** The operator's
+"I downloaded at gigabit on stock" was correct all along, and the R6 time-box was
+abandoned on a false negative.
+
+## Stock's configuration — the blueprint to copy
+
+`/proc/rtl865x/l3` (live, NAT flow running):
+
+    [0] 192.168.0.0/24 process(ARP)    LAN  dvidx(0) ARPSTA(0)   ARPEND(248) IPIDX(0)
+    [1] 172.16.0.0/24  process(ARP)    WAN  dvidx(1) ARPSTA(256) ARPEND(504) IPIDX(0)
+    [7] 0.0.0.0/0      process(NxtHop) WAN  NHSTA(0) NHNUM(2) NHNXT(0) NHALGO(2) IPDOMAIN(6)
+
+`/proc/rtl865x/arp`:
+
+    192.168.0.2  00-e0-4c-12-59-90  ARP:  2  L2:119     (LAN window 0 + host octet 2)
+    172.16.0.2   e4-5f-01-04-98-af  ARP:258  L2:134     (WAN window 256 + host octet 2)
+
+`/proc/rtl865x/ip`:
+
+    [0] intip(0.0.0.0) extip(172.16.0.1) type(NAPT) nhIdx(0)      <- everything else Invalid
+
+`/proc/rtl865x/nexthop`:
+
+    [0],[1] type(ethernet) IPIdx(0) dstVid(1) pppoeIdx(0) nextHop([5:0]20)
+
+`/proc/rtl865x/napt` (live, offloaded flow):
+
+    [212] 192.168.0.2:58128 {V,D}={1,0} col1(1) col2(1) static(1) tcp(1)
+          age(129) offset(57344) tcpflag(3) SelEIdx(784) SelIPIdx(0) NHIDXValid(0)
+    [250] 192.168.0.2:58128 ... age(129) offset(16384) tcpflag(2) SelEIdx(312) SelIPIdx(12)
+
+## The structural diff — why ours traps
+
+| | stock | this port |
+|---|---|---|
+| LAN route | `/24` **process(ARP)**, ARP window 0..248 | `192.168.0.2/32` process=1 (+ /24 ARP fallback) |
+| WAN route | `/24` **process(ARP)**, ARP window 256..504 | `172.16.0.2/32` **process=5 (NAPT NxtHop)** |
+| default | `0.0.0.0/0` process(NxtHop), NHNUM=2, **IPDOMAIN(6)** | IPDomain=0 |
+| host resolution | **dynamic ARP rows** (window base + host octet) | hardcoded L2 entries + `/32` routes |
+| NAPT trigger | **the extIP entry's `type(NAPT)`** | the route's `process=5` |
+| nexthop→ARP idx | **20** (field printed `[5:0]`, i.e. 6 bits) | **64** — does not fit 6 bits |
+| NAPT row age | 129 (0x81) | 17 (0x11 = our `AGING_RELOAD`) |
+
+Two findings stand out:
+
+1. **Stock resolves every host through the subnet route's ARP window** — no `/32`
+   host routes at all. This is why our port needed a compiled-in client MAC, and it
+   is the general fix already flagged in `a420c7f`. `ARP row = window base + host
+   octet` (LAN 0+2=2, WAN 256+2=258), exactly the deterministic mapping our own
+   comments predicted.
+2. **NAPT is driven by the extIP table entry (`type(NAPT)`), not by `process=5`.**
+   Stock's WAN subnet route is a plain process(ARP) route and it still NATs. Our M7
+   conclusion that "only NxtHop routes engage the NAPT stage" looks wrong, and the
+   `/32 process=5` design built on it is the likely reason our L4 rows match (aging
+   reloads) while the packet is still delivered to the CPU: egress resolution never
+   completes. The `nextHop=64` overflow of a 6-bit ARP-index field is a concrete
+   candidate for the same failure.
+
+## Next
+
+Restructure `gw_prog` to stock's shape: subnet routes with process(ARP) + populated
+ARP windows fed from the kernel neigh table, extIP `type(NAPT)` as the NAT trigger,
+a default NxtHop route with IPDOMAIN=6, and an ARP index that fits 6 bits. That
+deletes the hardcoded-peer design entirely and is now a *transcription* job against a
+known-good reference rather than a search.
