@@ -1284,3 +1284,25 @@ Everything needed to start it is banked: stock's complete working end-state (rou
 ARP windows, extIP, nexthop, NAPT rows, netif, L2), the decode of stock's own
 `0x890/0x891/0x892 = 1<<cpu_port` writes at `0x801c7394`, confirmation that `cpu_port`
 is 6 on this board, and six eliminated candidates with their measurements.
+
+### ⚠ Precision note on the section above — the evidence is consistent, not isolated
+
+Stated carefully, because the distinction matters to whoever picks this up:
+
+The netns bench and the real two-port bench are **both** same-SoC-port cases. Under
+Fork A everything reaches the SoC over the one trunk, so the netns run did *not*
+independently isolate a "same physical port" rule — it was always the same SoC port,
+exactly like the two-jack topology. Both fail identically, which is consistent with the
+hairpin explanation but does not prove it on its own.
+
+What is solid: **this port has never presented the ASIC with two distinct ingress/egress
+ports**, in any configuration tried, while stock's working setup plainly does
+(netif members `0 1 2 3` vs `4`). So the ASIC has never actually been given the chance
+to commit a forward. That is enough to explain every negative result here and enough to
+justify the model change — but the claim "the ASIC refuses same-port forwards" is an
+inference from the failures, not a measurement that isolated it.
+
+The clean way to settle it during the cascade work: once jacks are visible as separate
+SoC ports, a LAN→WAN flow becomes a genuinely two-port case. If offload engages then,
+the inference was right. If it still does not, the remaining difference is elsewhere
+and the stock tables captured above are the reference to diff against next.
