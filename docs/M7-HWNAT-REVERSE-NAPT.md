@@ -1235,3 +1235,52 @@ What is banked and does not need redoing: stock's complete working end-state
 (routes / ARP windows / extIP / nexthop / NAPT rows / netif / L2), the proof that both
 directions really do offload at ~920 Mbit/s and ~1% CPU, and five eliminated
 candidates with measurements.
+
+---
+
+# ★★★★★ WHY IT CANNOT WORK UNDER FORK A — the unifying explanation
+
+Every failed transplant in this file has the same root cause, and the proof was already
+sitting in the bench notes above.
+
+**Measured, on the netns bench:** with ingress and egress on the *same physical port*
+the ASIC will not hardware-forward — `HWNAT=Y` 167 Mbit @ 131 pkt/MB versus `HWNAT=N`
+170 Mbit @ 143 pkt/MB, i.e. no difference at all. The offload simply does not engage
+for a same-port hairpin.
+
+**Now apply that to Fork A.** In this port's model every jack sits behind the RGMII
+trunk, which is a *single* SoC port (port 0, per P0GMIICR/PCRP0). LAN (vid2) and WAN
+(vid1) are distinguished only by VLAN tag — **the ingress port and the egress port are
+the same port** for every routed flow. So routing LAN→WAN is exactly the same-port
+hairpin that was already measured as un-offloadable.
+
+⇒ **Fork A can never hardware-offload, by construction.** Not because of a missing
+register, a wrong route process, a bad ARP index, an L2 member mask, or the extIP
+encoding — all of which were tried and eliminated — but because the ASIC needs
+*distinct* ingress and egress ports to commit a hardware forward, and Fork A only ever
+presents it with one.
+
+This explains, in one stroke, every observation in this document:
+
+| observation | explanation |
+|---|---|
+| L4 NAPT row matches and reloads its age (pinned at 0x11) | the L4 lookup runs fine; the packet is classified |
+| yet 100% of bytes still reach the CPU | egress cannot be committed to a port distinct from ingress → trap |
+| stock offloads both ways at ~920 Mbit / ~1% CPU | stock's netif members are real jacks (`0 1 2 3` / `4`) — genuinely distinct ports |
+| stock's per-jack L2 masks kill our datapath | those SoC ports have nothing attached under Fork A |
+| stock's `0x890-0x892 = 1<<cpu_port` kills our datapath | it is one piece of a model whose other pieces we do not have |
+| the netns bench showed HWNAT=Y ≡ HWNAT=N | the *same* same-port effect, seen directly |
+
+## What this means for the goal
+
+Hardware offload on this port is **blocked on the switch model, not on configuration**.
+Closing it requires making the 8367S's jacks visible to the SoC as separate ports —
+the cascade / port-extender bring-up — so that a LAN→WAN flow has a real ingress port
+and a real, different egress port. That is the M4-scale work, and it is now justified
+by a measurement rather than assumed: there is no configuration of Fork A that can
+succeed, so the model change is not one option among several, it is the only path.
+
+Everything needed to start it is banked: stock's complete working end-state (routes,
+ARP windows, extIP, nexthop, NAPT rows, netif, L2), the decode of stock's own
+`0x890/0x891/0x892 = 1<<cpu_port` writes at `0x801c7394`, confirmation that `cpu_port`
+is 6 on this board, and six eliminated candidates with their measurements.
