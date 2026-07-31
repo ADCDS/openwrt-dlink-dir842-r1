@@ -956,3 +956,67 @@ ran kernel 3.10 **without GRO**, so its packet counts are raw wire packets while
 are coalesced — the two columns were never commensurable, as that table's own footnote
 half-suspected). Stock's 0.2 pkt/MB remains meaningful on its own terms: at ~700 wire
 pkt/MB, seeing 0.2 means stock genuinely offloaded essentially everything.
+
+---
+
+## Hardware-offload goal: one real bug fixed, and the blocker narrowed to a paradox
+
+### ✅ Fixed: the LAN client identity was compiled in
+
+`gw_prog` programmed the ASIC's LAN egress chain from **build-time constants** —
+`GW_MAC_HALLAN` (54:bf:64:18:b8:de, one bench machine's NIC) and the /32 route
+`0xC0A80002`. The WAN peer was already learned at runtime from the flow-offload dest
+path; the LAN side never was. On any other network the L2 entry and host route the
+reply direction egresses through name a MAC/IP that does not exist, so **no LAN
+client could ever be reached in hardware**. It had already rotted here too: after the
+rig was rewired from hal's `enp3s0` to a USB adapter, the ASIC kept pointing at the
+departed MAC while the live client was `00:e0:4c:12:59:90`.
+
+Fix: `rtl865x_lan_set_nexthop(mac, ip)` mirroring `rtl865x_wan_set_nexthop` exactly
+(shadow-compared, returns 1 on change so the caller flushes rows programmed under the
+old identity), fed from `src->eth_dest` + the flow's internal IP in
+`hwnat_add_flow()`. Verified: `gw_prog` now reports `L2[hal] = 00:e0:4c:12:59:90`.
+Commit `a420c7f`.
+
+⚠ Single-client shadow (matching the single /32 slot). Several active LAN clients
+will thrash it — each reprograms and flushes, so flows re-offload continuously and
+fall back to software. General fix: drive route[2]'s ARP window (ARPStart=0/
+ARPEnd=31) with one ARP row per client.
+
+### ✗ It did not restore forwarding — and the remaining state is a paradox
+
+Upload after the fix: **177 Mbit/s, 223.5 MB through the CPU for a 211 MB payload =
+106%**, i.e. everything. Measured by bytes, which GRO cannot hide.
+
+The paradox, stated exactly, because it constrains the answer:
+
+- **The ASIC IS matching the L4 rows.** `RTL865X_NAPT_AGING_RELOAD = 0x11 = 17`, and
+  during traffic every row sits pinned at `age=17` — the reload ceiling — decaying to
+  0 only when idle. A pinned age *is* the "silicon reloaded this row on a hit" signal.
+  Software re-learn cannot explain it: the flowtable re-offers at ~30 s GC while a
+  tick is ~6 s (≈102 s full decay), so an unhit row would visibly fall during a 25 s
+  transfer. It does not.
+- **Yet every byte still reaches the CPU.**
+
+So the L4 NAPT lookup hits and reloads, and the packet is *still* delivered to the
+CPU. Everything else checks out on readback: `MSCR=0x17` (EN_IN_ACL on),
+`SWTCR1=0x2200` (L4EnHash1 + EnL4WayH), `DACLRCR=1fbf4180`, `ACL[0] w7=0x07000000`
+catch-all permit, netif ACL ranges LAN[0..3]/WAN[4..6], `ROUTE0` = tiny/32 process=5
+NAPT-NextHop, `NH0` → ARP[64] → `L2[tiny]` with the correct peer MAC, and `EXTIP0`
+holding `htonl(172.16.0.1)` (the byte-reversed readback word `010010ac` is correct —
+network order is deliberate, vendor `nat.c:690`; checked, not a bug).
+
+Also ruled out this pass: the blanket `dst-MAC==WAN-MAC → TOCPU` ACL rule is already
+gone (`rtl865x_asichal.c:820`, R6); software flow offload is not stealing the flows
+(every byte hits the CPU with it both on and off); and the WAN nexthop is not stale
+(re-running `gw_prog` against the live peer changed nothing).
+
+### Next: the stock dump, which is now the decisive experiment
+
+This is exactly the ground truth this file named at the start — with the operator's
+go-ahead to reflash. Boot stock, establish a real NAT flow, and dump, **during the
+live flow**: the ACL table (raw 11-word rows, all of 0..6), MSCR/SWTCR0/SWTCR1/
+DACLRCR, the L3 route + nexthop + ARP + L2 chain, EXTIP, and a live NAPT row pair
+with its aging. Then diff against the readback above. The question it answers is
+narrow and well-posed: *given a matching L4 row, what makes stock's silicon forward
+where ours traps?* Everything cheap has now been eliminated.
