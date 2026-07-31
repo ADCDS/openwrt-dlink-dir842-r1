@@ -787,3 +787,79 @@ IPv4, host route, tiny's `br0` address), so this is not confound #4/#5.
 R2's gate passed on **box-terminating ICMP**, and its own write-up flagged the coverage
 gap ("not bidirectional *forwarded* saturation ... that scenario is still untested").
 That untested scenario is the one that fails. **R2 should be reopened.**
+
+---
+
+## R6 FINAL (2026-07-30, later still) — a gigabit-capable bench, the real ceiling
+## measured, and TWO of my own earlier claims retracted
+
+The 100 Mb WAN cable was replaced. The replacement did not link (box: all jacks
+`link:down` except the host's port 2; tiny: `eth0` `<NO-CARRIER>`, `speed=-1`), so
+the bench was rebuilt to **not need the WAN peer at all**.
+
+### The new bench: emulate the WAN peer on the gigabit LAN port
+
+`swconfig dev switch0 vlan 1 set ports "4 2t 6t"` adds the host's jack (port 2) to
+the **WAN VLAN as tagged**, alongside the real WAN jack. The host then runs a
+802.1Q vid-1 subinterface inside a network namespace holding `172.16.0.2/24`:
+
+    ip link add link <ifP> name wanp type vlan id 1
+    ip netns add benchns && ip link set wanp netns benchns
+    ip -n benchns addr add 172.16.0.2/24 dev wanp
+    ip -n benchns route add default via 172.16.0.1
+
+Root ns keeps `192.168.0.2` (LAN). Traffic between them is forced onto the wire by
+the namespace boundary and is **routed and NATed by the box exactly as before** —
+same subnets, same zones, same NAT — but now over a **1000baseT** link.
+
+★ Deliberately reuses **vid 1**, not a new vid. The SoC's internal switch has VLAN
+entries for vid 1 and 2 only (`sw_add_vlan`); a vid 3 was tried first and TX was
+silently dropped because `ph_vlanId` must name a VID whose SoC member mask covers
+the portlist (the constraint already documented at `rtl819x-eth.c:1134`). Adding a
+third VLAN needs a driver change; reusing vid 1 needs none.
+
+Caveat: every byte crosses the host NIC twice, so the wire carries ~2x the payload.
+The NIC is r8152 on **USB3 (5000M)**, and the box saturates its CPU well below that,
+so the host is not the limiter — confirmed by the box hitting ~96% CPU.
+
+### The ceiling, measured directly (not extrapolated)
+
+| config | throughput | CPU | cost |
+|---|---|---|---|
+| baseline | **147 Mbit/s** | **96%** | 54.7 ms CPU/MB |
+| + software flow offload | **181 Mbit/s** | **90%** | 40.7 ms CPU/MB |
+
+10 s `iperf3 -R`, CPU from `/proc/stat` on the box, `HZ=100`. The baseline
+**confirms the 155-160 Mbit prediction** extrapolated earlier from the 94 Mbit
+data — the extrapolation method was sound.
+
+Flow offload is now shipped on by default (`uci-defaults/10_flow-offload-dir842`).
+It is a genuine +23%, but note what it means: removing the entire conntrack and
+iptables traversal bought only 25% per byte, so **netfilter was never the dominant
+cost**. Gigabit needs ~8 ms CPU/MB; we are at 40.7. The remaining ~5x is in the
+driver datapath — DMA cache maintenance and uncached descriptor/register reads —
+and the RX path is already zero-copy (skb swap + `dma_unmap_single`, no memcpy),
+so there is no easy copy to delete. That is the next real project.
+
+### ✗ RETRACTION 1 — "R2 is not closed / the download wedges the box"
+
+Withdrawn as a confirmed defect. **60 s of sustained forwarded download at 147
+Mbit/s (1.03 GB, CPU pegged at 96%) ran clean, and the path was fully alive
+afterwards** — a heavier load than the 94 Mbit run that "wedged".
+
+The earlier stall has a physical confound I did not rule out: it happened while the
+operator was at the bench changing cables, and although I verified the three
+software guards (host IPv4, host route, tiny's `br0` address) I never checked
+**link state**. A cable pulled mid-transfer explains the stall, both directions
+dying, and why `fabric_reset=3` could not fix it. That does not prove the wedge
+isn't real — it reproduces ~1 in 3-4 heavy attempts historically — but this
+instance is not evidence for it. R2's status returns to what its own gate said:
+passed on box-terminating load, forwarded saturation now also clean for 60 s.
+
+### ✗ RETRACTION 2 — "~1 packet per NAPI poll is a bug"
+
+Withdrawn. `rtl819x_eth_poll()` is a correct `while (rx_done < budget)` drain that
+breaks on an empty ring. Getting ~1.14 packets per poll at 94 Mbit means the CPU
+was **keeping up** — batching only appears once napi falls behind. It is a symptom
+of arrival rate, not a defect. The per-packet *cost* is the real finding, and it
+stands on the jiffie accounting, not on the poll ratio.
