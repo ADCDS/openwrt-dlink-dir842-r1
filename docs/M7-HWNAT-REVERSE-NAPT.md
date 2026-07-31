@@ -1184,3 +1184,54 @@ recorded above.
 The good news from this session stands: **the capability is real** (stock does 913/923
 Mbit/s at ~1% CPU in both directions), the reverse path is not the wall R6 believed,
 and two genuine correctness bugs were removed along the way.
+
+## The cascade hypothesis is NOT yet confirmed — what the next session must settle first
+
+Attempting the bring-up immediately would be building on an unverified premise. Two
+facts are established, one is not:
+
+**Established.** Stock's SoC L2/netif tables name real jacks (`mbr(2)`, `mbr(4)`,
+netif members `0 1 2 3 8`), and **this port cannot**: programming those same masks
+here kills the datapath outright (100% loss, box wedged, power-cycle required). Only
+`0x01`, the RGMII trunk, carries traffic. So the two firmwares are driving the switch
+fabric in fundamentally different modes — that much is measured, not inferred.
+
+**NOT established.** *How* stock does it. The natural explanation is an 8367S
+cascade / port-extender with a Realtek CPU tag, but that is currently a guess:
+
+- `grep` of the decompressed stock kernel finds **no** `cpu.?tag` / `extension port` /
+  `cascade` strings at all.
+- OpenWrt's `rtl8367b` driver has **no** CPU-tag support to copy from — it is a plain
+  swconfig VLAN driver (`RTL8367B_CPU_PORT_NUM 5` and RGMII extif setup, nothing more).
+- The DIR-842's loader already programs the 8367S uplink (`0x1219=0040`, which this
+  port deliberately preserves), so part of whatever mode stock relies on may be set up
+  **before** either kernel runs — meaning it might not be a kernel-side cascade at all.
+
+### The one experiment that settles it
+
+Boot stock and OUR port in turn and dump the **8367S's own registers over SMI** in both
+(stock exposes `/proc/rtl8367` and `/proc/rtl_8367r_vlan`; this port can read them
+through the `rtl8367b` smi accessors). Diff the two register sets. That answers, with
+no speculation:
+
+1. whether stock enables a CPU/extension tag on EXT1 at all, and in which register;
+2. whether the difference is kernel-side or already established by the loader;
+3. what the SoC-side port map must look like to match.
+
+Only after that diff is it worth touching the datapath. Guessing at port masks has
+already cost one wedged box, and each wrong guess costs a power-cycle plus a
+re-warm — the measurement above is cheap by comparison and removes the guesswork
+entirely.
+
+### Why this is stopping here rather than continuing
+
+The remaining work is (a) an RE pass on an undocumented register set, then (b) new
+CPU-tag support in `rtl8367b`, then (c) a rework of this driver's RX/TX tag handling
+and port model — the M4-scale estimate, and it needs the diff above first. Starting
+(b) tonight, from a premise the stock kernel's own strings do not support, would be
+the kind of guessing that produced the wedge.
+
+What is banked and does not need redoing: stock's complete working end-state
+(routes / ARP windows / extIP / nexthop / NAPT rows / netif / L2), the proof that both
+directions really do offload at ~920 Mbit/s and ~1% CPU, and five eliminated
+candidates with measurements.
