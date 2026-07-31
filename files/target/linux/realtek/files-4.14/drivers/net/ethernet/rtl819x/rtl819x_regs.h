@@ -133,6 +133,19 @@
 #define MEMCR				(0x34 + SWMISC_BASE)	/* 0xBB804234 MEM CTRL */
 #define MEMCR_INIT_CMD			0x24		/* start table-SRAM init */
 #define MEMCR_INIT_DONE			0x2400		/* init-done poll mask/value */
+/* ★ The L4 (TCP/UDP NAPT) table has its OWN SRAM-clear bit, which MEMCR_INIT_CMD
+ * (0x24 = bits 2,5; done = bits 10,13) does NOT cover. Vendor
+ * rtl8651_clearAsicNaptTable(), gated #if CONFIG_RTL_8198C || CONFIG_RTL_8197F —
+ * i.e. written for this exact chip:
+ *     REG32(MEMCR) &= ~(1<<1);
+ *     REG32(MEMCR) |=  (1<<1);        // L4
+ *     while ((REG32(MEMCR) & (1<<9)) != (1<<9)) ;   // wait L4 clear done
+ * Without it the L4 table SRAM is never initialised, so the lookup engine may never
+ * honour per-row TLU writes — which matches every symptom seen: rows write and read
+ * back perfectly, yet no packet ever matches, and filling all 1024 indices changes
+ * nothing. */
+#define MEMCR_L4_CLEAR			(1 << 1)	/* toggle low->high to clear the L4 table */
+#define MEMCR_L4_CLEAR_DONE		(1 << 9)	/* polls high when the L4 clear finishes */
 
 /* CPUICR bit22 (vendor asicregs.h:303): NIC-engine descriptor soft-reset —
  * "Re-initialize all descriptors". Untried by the old recovery (which only

@@ -70,6 +70,11 @@ int rtl819x_rx_dump;
 module_param_named(rx_dump, rtl819x_rx_dump, int, 0644);
 MODULE_PARM_DESC(rx_dump, "hexdump the next N large RX frames (cached vs uncached view)");
 
+/* CPU-tag bring-up: print the source port of the next N received frames. */
+static int pid_dump;
+module_param(pid_dump, int, 0644);
+MODULE_PARM_DESC(pid_dump, "log source port/vid/asic0 for the next N RX frames (CPU-tag bring-up instrument)");
+
 /*
  * M7 FCS wedge signal: every large (>132 B) delivered frame gets its Ethernet
  * FCS software-verified (EXCLUDE_CRC is clear, so ph_len includes the 4 FCS
@@ -446,6 +451,39 @@ int32 New_swNic_receive(rtl_nicRx_info *info, int retryCount)
 		info->len = len - 4;
 		info->pid = ph->ph_portlist & 0x7;
 		info->vid = ph->ph_vlanId & 0x0fff;
+
+		/* CPU-tag bring-up instrument. (Under the old Fork A model the trunk was
+		 * the only ingress the SoC ever saw, so ph_portlist was a constant and
+		 * info->pid meaningless.) With the vendor CPU-tag mode on at
+		 * BOTH ends, the SoC MAC strips the 4-byte 0x8899 tag in hardware and
+		 * ph_portlist carries the REAL source jack — so this printing 2 for the
+		 * host and 4 for the WAN peer is the gate for that phase.
+		 * ph_asic0 is dumped too: it carries srcExtPortNum(0..1)/extPortList(8..11),
+		 * i.e. how the CPU (port 8) shows up once it is an extension port. */
+		if (unlikely(pid_dump > 0)) {
+			pid_dump--;
+			/* ph_asic0 bitfields, vendor common/mbuf.h:87-94 (LE):
+			 *   [1:0] srcExtPortNum  [2] l2Trans  [3] isOriginal
+			 *   [4]   hwFwd          [11:8] extPortList  [14:12] queueId
+			 * hwFwd  = "copy from HSA bit 200" -- the ASIC's own HARDWARE FORWARD
+			 *          flag: 1 means the switch already forwarded this frame.
+			 * isOrig = "DP included cpu port or more than one ext port" -- i.e.
+			 *          the destination portlist contained the CPU, so what we are
+			 *          holding is a COPY, not the only delivery.
+			 * Together they separate "the ASIC gave up and punted to us" (hwFwd=0)
+			 * from "the ASIC forwarded it and also copied us" (hwFwd=1,isOrig=1) --
+			 * the latter would mean the datapath is offloading while the CPU still
+			 * burns a full packet's work on every frame, which looks identical to
+			 * "no offload" in a bytes-through-CPU metric. */
+			pr_err("rtl819x pid: port=%u vid=%u hwFwd=%u isOrig=%u l2Tr=%u extPL=%u srcExt=%u asic0=%04x reason=%04x len=%u\n",
+			       info->pid, info->vid,
+			       (ph->ph_asic0 >> 4) & 1,	/* hwFwd */
+			       (ph->ph_asic0 >> 3) & 1,	/* isOriginal */
+			       (ph->ph_asic0 >> 2) & 1,	/* l2Trans */
+			       (ph->ph_asic0 >> 8) & 0xf,	/* extPortList */
+			       ph->ph_asic0 & 3,		/* srcExtPortNum */
+			       ph->ph_asic0, ph->ph_reason, len);
+		}
 		pr_err_once("rtl819x DP: first RX frame (len=%d)\n", info->len);
 
 		/* M7 FCS wedge signal (doc above): verify the hardware-provided FCS

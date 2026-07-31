@@ -10,8 +10,9 @@
 # so it cannot claim PCI 10ec:b822 — mainline rtw88 keeps the 5 GHz card. Both radios
 # live simultaneously (hardware precondition verified on silicon).
 #
-# ⚠ Not auto-loaded: AUTOLOAD is deliberately omitted while the driver is unproven on
-# hardware. Load it by hand with `insmod rtl8192cd` for bring-up testing.
+# Auto-loaded at boot (AUTOLOAD below). It is loaded LATE (priority 60) so mainline
+# rtw88 has already claimed PCI 10ec:b822 for the 5 GHz card; this driver only drives
+# the on-SoC 2.4 GHz WMAC, so the two never contend.
 
 define KernelPackage/rtl8192cd
   SUBMENU:=Wireless Drivers
@@ -19,6 +20,7 @@ define KernelPackage/rtl8192cd
   DEPENDS:=@TARGET_realtek
   KCONFIG:=CONFIG_RTL8192CD
   FILES:=$(LINUX_DIR)/drivers/net/wireless/rtl8192cd/rtl8192cd.ko
+  AUTOLOAD:=$(call AutoLoad,60,rtl8192cd)
 endef
 
 define KernelPackage/rtl8192cd/description
@@ -26,7 +28,8 @@ define KernelPackage/rtl8192cd/description
  MAC/PHY. Mainline has no driver for this radio, which is why the port was
  otherwise single-band. ~1.9 MB stripped.
 
- WORK IN PROGRESS: this compiles and links but has not been proven on hardware.
+ Proven on hardware: brings up wlan0 (+ 4 VAPs and the vxd interface) and the
+ 2.4 GHz AP associates. Coexists with rtw88 on 5 GHz.
 endef
 
 $(eval $(call KernelPackage,rtl8192cd))

@@ -1,0 +1,70 @@
+#!/bin/sh
+#
+# DIR-842 R1 (RTL8197F) — pin the 5 GHz (rtw88 / mac80211) wifi-iface to wlan1.
+#
+# WHY: mac80211.sh derives the interface name from the phy index, so phy0 -> wlan0.
+# The on-SoC 2.4 GHz radio is driven by the vendor rtl8192cd driver, which creates a
+# REAL netdev named wlan0 at module load. The two collide, and netifd ends up handing
+# hostapd the *vendor* netdev:
+#
+#   netifd:  radio0: Device setup failed: INTERFACE_CREATION_FAILED
+#   hostapd: Configuration file: /var/run/hostapd-phy0.conf (phy wlan0) --> new PHY
+#   hostapd: nl80211: Could not configure driver mode
+#   hostapd: nl80211 driver initialization failed.
+#
+# ...so the 5 GHz AP never starts, and /sys/class/ieee80211 shows a perfectly healthy
+# phy0 with no interface on it. The radio is fine — by hand,
+# `iw phy phy0 interface add wlan1 type __ap` succeeds immediately. Only the NAME is
+# wrong. Pinning it is the whole fix; verified on the bench, wlan1 comes up on
+# channel 36 and enters br-lan forwarding state alongside the vendor wlan0.
+#
+# This turned into a collision when rtl8192cd gained AUTOLOAD (commit 9edc6bc5a8) and
+# began claiming wlan0 before rtw88 was probed — the reverse of the mapping recorded
+# in 09_wireless-dualband-dir842's comment ("MEASURED ... rtw88 takes wlan1/phy1").
+# That comment is now stale as a statement of fact, which is exactly why the name is
+# pinned here rather than left to load order.
+#
+# ORDERING: 09_… seeds radio1 and runs BEFORE mac80211 detection has created radio0,
+# so on a first boot after a factory flash the mac80211 wifi-iface may not exist yet.
+# Try to generate it; if it still isn't there, exit non-zero. /etc/init.d/boot only
+# deletes a uci-defaults script that SUCCEEDS, so failing keeps this file and re-runs
+# it next boot instead of silently deleting it having done nothing.
+
+[ -x /sbin/wifi ] && ! uci -q get wireless.@wifi-iface[0] >/dev/null 2>&1 && \
+	wifi config >/dev/null 2>&1
+
+. /lib/functions.sh
+
+pinned=0
+
+# Pin by DEVICE TYPE, not by section name: which of radio0/radio1 is mac80211 depends
+# on detection order, and pinning wlan1 onto the vendor radio would push mac80211
+# naming into a WEXT driver that cannot use it. Only ever touch a type='mac80211'
+# radio, and only the first one (this board has exactly one).
+pin_mac80211_iface() {
+	local sec="$1" dev type cur
+
+	[ "$pinned" = 1 ] && return 0
+
+	config_get dev "$sec" device
+	[ -n "$dev" ] || return 0
+
+	type="$(uci -q get "wireless.$dev.type")"
+	[ "$type" = "mac80211" ] || return 0
+
+	cur="$(uci -q get "wireless.$sec.ifname")"
+	[ "$cur" = "wlan1" ] && { pinned=1; return 0; }
+
+	uci set "wireless.$sec.ifname"='wlan1'
+	pinned=1
+}
+
+config_load wireless
+config_foreach pin_mac80211_iface wifi-iface
+
+# No mac80211 radio in the config yet -> keep this script for the next boot.
+[ "$pinned" = 1 ] || exit 1
+
+uci commit wireless
+
+exit 0

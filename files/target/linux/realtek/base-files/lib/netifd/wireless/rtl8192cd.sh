@@ -2,6 +2,20 @@
 . /lib/functions.sh
 . /lib/netifd/netifd-wireless.sh
 
+# ★ MANDATORY, and its absence is silent. netifd-wireless.sh ships a NO-OP stub
+#   `add_driver() { return; }` (netifd-wireless.sh:12). The real implementation is
+#   installed only by init_wireless_driver() (netifd-wireless.sh:367), which each
+#   handler must call with "$@". Without this line the `add_driver rtl8192cd` at the
+#   bottom of this file expands to the stub, so netifd's driver probe
+#   (`popen("./rtl8192cd.sh '' dump")`, handler.c:96) reads ZERO bytes, no JSON is
+#   parsed, wireless_add_handler() is never reached, and the driver is never
+#   registered. config_parse_wireless_device() (config.c:332) then fails its
+#   avl_find_element() lookup for type='rtl8192cd' and `return`s WITHOUT LOGGING
+#   ANYTHING -- radio1 simply never becomes a wireless device, so `wifi up`,
+#   `wifi down`, and `ubus call network.wireless status` all ignore it entirely and
+#   wlan0 is never brought up. mac80211.sh:6 has this same call.
+init_wireless_driver "$@"
+
 # netifd wireless handler for the Realtek vendor rtl8192cd driver (WEXT build,
 # i.e. built WITHOUT -DRTK_NL80211).
 #
@@ -152,6 +166,36 @@ rtl8192cd_emit_vif() {
 	return 0
 }
 
+
+# ── Resolve the vendor radio's netdev by IDENTITY, never by name ──────────────
+# Which wlanN this driver gets depends on module load order relative to rtw88.
+# MEASURED on this board: rtw88's 5 GHz AP takes **wlan1** and the vendor root
+# device takes **wlan0** — the OPPOSITE of stock's convention. Hardcoding a name
+# is therefore actively dangerous: guessing wrong makes netifd down and
+# reconfigure rtw88's interface, silently killing the working 5 GHz AP.
+#
+# The vendor driver is uniquely identifiable by its procfs — only it creates
+# /proc/<ifname>/mib_all (8192cd_proc.c: proc_mkdir(dev->name) then
+# an unconditional "mib_all" entry). rtw88 creates no /proc/wlanN at all. An explicit uci 'phy' is honoured, but only if it really
+# is a vendor radio; otherwise we search. If nothing matches we return the
+# requested name unchanged so the caller reports NO_DEVICE rather than guessing.
+rtl_find_phy() {
+	local want="$1" i
+	[ -n "$want" ] && [ -e "/proc/$want/mib_all" ] && {
+		echo "$want"; return 0
+	}
+	for i in /sys/class/net/wlan*; do
+		[ -e "$i" ] || continue
+		i="${i##*/}"
+		# skip VAPs: the driver proc_mkdir()s one dir per netdev, so virtual
+		# interfaces (wlan0-va0, wlan0-vxd) match mib_all too. We want the root
+		# radio. Glob order happens to put the root first, but don't rely on it.
+		case "$i" in *-*) continue ;; esac
+		[ -e "/proc/$i/mib_all" ] && { echo "$i"; return 0; }
+	done
+	echo "${want:-wlan0}"
+}
+
 drv_rtl8192cd_setup() {
 	local phy_ifname _rtl_vifs=""
 	local channel htmode country band phy macaddr
@@ -161,12 +205,17 @@ drv_rtl8192cd_setup() {
 	json_get_vars channel htmode country band phy macaddr beacon_int dtim_period
 	json_select ..
 
-	# 'phy' here is the vendor netdev, not a cfg80211 phy. Default wlan1 so it
-	# cannot race rtw88 for wlan0 -- which also matches stock's convention
-	# (stock: wlan0 = 5 GHz RTL8822BE, wlan1 = 2.4 GHz on-SoC WMAC).
-	phy_ifname="${phy:-wlan1}"
+	# 'phy' here is the vendor netdev, not a cfg80211 phy. Resolved by identity
+	# (see rtl_find_phy) because the name depends on load order and rtw88 takes
+	# wlan1 on this board.
+	phy_ifname="$(rtl_find_phy "$phy")"
 
-	[ -d "/sys/class/net/$phy_ifname" ] || {
+	# Deliberately NOT just [ -d /sys/class/net/$phy_ifname ]: if the vendor
+	# module is not loaded, rtl_find_phy falls back to the requested name, and a
+	# bare netdev test would then happily pass on rtw88's interface and push
+	# vendor MIBs into the 5 GHz AP. Require the vendor procfs so a missing
+	# driver reports NO_DEVICE instead of clobbering the other radio.
+	[ -e "/proc/$phy_ifname/mib_all" ] || {
 		wireless_set_retry 0
 		wireless_setup_failed NO_DEVICE
 		return 1
@@ -215,8 +264,9 @@ drv_rtl8192cd_teardown() {
 	json_get_vars phy
 	json_select ..
 
-	phy_ifname="${phy:-wlan1}"
-	[ -d "/sys/class/net/$phy_ifname" ] && $IFCONFIG "$phy_ifname" down
+	phy_ifname="$(rtl_find_phy "$phy")"
+	# same identity check as setup -- never down an interface that is not ours
+	[ -e "/proc/$phy_ifname/mib_all" ] && $IFCONFIG "$phy_ifname" down
 	rm -f "$CFGFILE"
 
 	return 0

@@ -760,6 +760,12 @@ static int rtl8367b_init_regs(struct rtl8366_smi *smi)
  * Detect the chip so reset_chip()/setup() can preserve the power-on config and
  * only layer swconfig VLAN management on top.
  */
+/* Apply stock's 0x890-0x892 = (1 << cpu_port) narrowing on the 8367S. 1 = on. */
+static int dir842_cpu_port_mask;	/* default OFF -- see below */
+module_param(dir842_cpu_port_mask, int, 0644);
+MODULE_PARM_DESC(dir842_cpu_port_mask,
+		 "DIR-842: write 8367S regs 0x890-0x892 = 1<<cpu_port at probe, as stock does (1=on default, 0=leave the loader's 0x00ff).");
+
 static bool rtl8367b_is_8367s(struct rtl8366_smi *smi)
 {
 	u32 chip_num = 0;
@@ -1033,7 +1039,14 @@ int rtl8367s_cpu_tag_enable(void)
 	 * insufficient for the SoC RX-decode; the source-port-tag insertion needs
 	 * 0x890-0x893=0xff and 0x121a/b=0xb5 (set by init_8367r's fn 0x801c7258 path). */
 	rtl8366_smi_write_reg(smi, 0x1219, 0x0040);
-	rtl8366_smi_write_reg(smi, 0x121a, 0x00b5);
+	/* ★ 0x2b1, not the loader's 0x00b5. 0x2b1 = EN(bit0) | INSERTMODE=0 "to ALL"
+	 * (bits2:1) | TRAP_PORT=6(bits5:3) | RXBYTECOUNT(bit7) | TAG_FORMAT=1 4-byte
+	 * (bit9). The loader leaves 0x00b5 = enabled but INSERTMODE=2 ("to NONE") in the
+	 * 8-byte format -- the tag is turned on and then never inserted, and that one
+	 * field is what hid the real jacks from the SoC. Vendor RTL8367R_cpu_tag(),
+	 * rtl8367r/rtk_api.c:19641. (The second 0x00b5 write further down is the Fork A
+	 * path and must stay as-is: it is only reached with CPU-tag decode OFF.) */
+	rtl8366_smi_write_reg(smi, 0x121a, 0x02b1);
 	rtl8366_smi_write_reg(smi, 0x121b, 0x00b5);
 	rtl8366_smi_write_reg(smi, 0x0890, 0x00ff);
 	rtl8366_smi_write_reg(smi, 0x0891, 0x00ff);
@@ -1144,6 +1157,38 @@ static int rtl8367b_setup(struct rtl8366_smi *smi)
 		for (dr = 0x0890; dr <= 0x0893; dr++) {
 			rtl8366_smi_read_reg(smi, dr, &dv);
 			printk(KERN_ERR "DIR842 8367Sdump[%04x]=%04x\n", dr, dv);
+		}
+
+		/* ★ STOCK PARITY, decoded from the stock kernel itself. At
+		 * 0x801c7394-0x801c73c0 stock writes regs 0x890/0x891/0x892 with
+		 * (1 << cpu_port) -- three reg_write() calls whose register number rides
+		 * each jal's delay slot:
+		 *     lw a1,-30012(s0) ; cpu_port
+		 *     sllv a1,s1,a1    ; 1 << cpu_port
+		 *     jal <reg_write>  ; li a0,0x890  (then 0x891, 0x892)
+		 * The D-Link loader leaves all three at 0x00ff (every port) -- which is what
+		 * this board boots with -- so stock NARROWS them to the CPU port and this
+		 * port never did. Reg 0x1219 already reads 0x0040 = 1<<6 from the loader,
+		 * independently confirming cpu_port 6 here.
+		 *
+		 * Undocumented in the open driver; the only claim is that stock sets them
+		 * this way and we did not.
+		 *
+		 * ✗ MEASURED: applying this ALONE kills the datapath outright (100% loss
+		 * both directions the moment it lands). That is consistent with these being
+		 * port-membership/flood masks: narrowing them to the CPU port strands every
+		 * frame at the CPU unless the REST of stock's switch model is in place too.
+		 * So stock's settings are a coherent whole and cannot be adopted piecemeal --
+		 * which is itself the clearest evidence yet that closing hardware offload
+		 * needs the full model, not individual register parity. Default OFF; set to
+		 * 1 only together with the rest of the cascade work. */
+		if (dir842_cpu_port_mask) {
+			u32 m = 1u << smi->cpu_port;
+
+			for (dr = 0x0890; dr <= 0x0892; dr++)
+				rtl8366_smi_write_reg(smi, dr, m);
+			printk(KERN_ERR "DIR842: 8367S 0x890-0x892 <- %04x (1<<cpu_port %u) stock parity\n",
+			       m, smi->cpu_port);
 		}
 
 		/* ---- RTL8367S EXT1 (CPU RGMII uplink) COLD bring-up (flashed boot only) ----

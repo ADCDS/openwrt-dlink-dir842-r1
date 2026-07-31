@@ -8,11 +8,32 @@
 # to be seeded here. Handler: /lib/netifd/wireless/rtl8192cd.sh
 #
 # Radio map (see docs/VENDOR-PARITY-INVENTORY.md R4/G1):
-#   radio0 / phy0 / wlan0 : RTL8822BE on PCIe, 5 GHz, mac80211 (rtw88) + hostapd
-#   radio1 /  --  / wlan1 : on-SoC RTL8197F WMAC, 2.4 GHz, rtl8192cd (WEXT),
+#   radio0 / phy1 / wlan1 : RTL8822BE on PCIe, 5 GHz, mac80211 (rtw88) + hostapd
+#   radio1 /  --  / wlan0 : on-SoC RTL8197F WMAC, 2.4 GHz, rtl8192cd (WEXT),
 #                           in-kernel WPA2-PSK (8192cd_psk.c) — NOT hostapd
 #
-# wlan1 is pinned for the vendor radio so it cannot race rtw88 for wlan0.
+# ⚠ STALE AS OF 2026-07-31 — the paragraph below says rtw88 takes wlan1/phy1. It
+# does NOT any more. Since rtl8192cd gained AUTOLOAD (9edc6bc5a8) the vendor driver
+# is probed first and claims wlan0, and rtw88's wiphy comes up as **phy0** — from
+# which mac80211.sh derives the name **wlan0**, colliding head-on with the vendor
+# netdev. netifd then handed hostapd the vendor interface and the 5 GHz AP never
+# started (INTERFACE_CREATION_FAILED / "nl80211: Could not configure driver mode").
+# Fixed by pinning the mac80211 ifname to wlan1 in 10_wireless-5g-ifname-dir842 —
+# read that file before touching any of this. The lesson stands even though the
+# mapping flipped: DO NOT rely on load order to keep these two radios apart.
+#
+# ★ Note the names: MEASURED on this board (twice, before any insmod), rtw88
+# takes wlan1/phy1 and the vendor root device takes wlan0 — the OPPOSITE of
+# stock's convention. An earlier version of this file pinned phy='wlan1' and
+# ifname='wlan1' for the vendor radio on the assumption that stock's mapping
+# held; that would have made `wifi up` push vendor MIBs into rtw88's interface
+# and down it, silently killing the working 5 GHz AP.
+#
+# Neither name is pinned here now. The handler resolves the vendor netdev by
+# IDENTITY (/proc/<ifname>/mib_all, which only rtl8192cd creates) rather than by
+# name, because the name depends on module load order and is not stable. The
+# wifi-iface ifname is left unset so it follows the resolved radio — that part is
+# still correct and still the right approach for the VENDOR radio.
 
 # The driver ingests /etc/Wireless/RTL8192CD.dat on interface-up
 # (8192cd_comapi.c:3431, called from 8192cd_osdep.c:7703). Stock symlinks this
@@ -28,11 +49,16 @@ uci -q get wireless.radio1 >/dev/null && exit 0
 uci -q batch <<'EOF'
 set wireless.radio1='wifi-device'
 set wireless.radio1.type='rtl8192cd'
-set wireless.radio1.phy='wlan1'
 set wireless.radio1.hwmode='11g'
 set wireless.radio1.channel='6'
 set wireless.radio1.htmode='HT20'
-set wireless.radio1.band='7'
+# band = dot11BssType.net_work_type, a BITMASK (8192cd.h:875 enum NETWORK_TYPE):
+#   WIRELESS_11B=BIT(0)=1  WIRELESS_11G=BIT(1)=2  WIRELESS_11A=BIT(2)=4
+#   WIRELESS_11_24N=BIT(3)=8   =>  WIRELESS_MODE_24G = 1|2|8 = 11
+# This was '7' (=11b|11g|11a), which asks a 2.4 GHz radio for the 5 GHz-only OFDM
+# mode and drops 11n entirely. 11 is also the value the hand-driven bring-up that
+# actually associated a client used ("wlan0_band=11").
+set wireless.radio1.band='11'
 set wireless.radio1.country='1'
 set wireless.radio1.disabled='0'
 
@@ -40,7 +66,6 @@ set wireless.default_radio1='wifi-iface'
 set wireless.default_radio1.device='radio1'
 set wireless.default_radio1.network='lan'
 set wireless.default_radio1.mode='ap'
-set wireless.default_radio1.ifname='wlan1'
 set wireless.default_radio1.ssid='DIR842-2G'
 set wireless.default_radio1.encryption='psk2'
 set wireless.default_radio1.key='ChangeMeNow123'

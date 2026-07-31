@@ -173,7 +173,7 @@ struct rtl819x_eth_priv {
  * memberPort:6 | extMemberPort:3 | egressUntag:6 | extEgressUntag:3 | fid:2 |
  * hp:3 | rsvd:9; words 1..7 reserved (0).
  */
-static void sw_add_vlan(uint32 vid, uint32 member_mask, uint32 untag_mask)
+static void sw_add_vlan_fid(uint32 vid, uint32 member_mask, uint32 untag_mask, uint32 fid)
 {
 	uint32 entry[8] = { 0 };
 	int i, guard;
@@ -181,7 +181,8 @@ static void sw_add_vlan(uint32 vid, uint32 member_mask, uint32 untag_mask)
 	entry[0] = (member_mask & 0x3F)			/* memberPort   [5:0]  */
 		 | (((member_mask >> 6) & 0x7) << 6)	/* extMemberPort[8:6]  */
 		 | ((untag_mask & 0x3F) << 9)		/* egressUntag  [14:9] */
-		 | (((untag_mask >> 6) & 0x7) << 15);	/* extEgressUntag[17:15]*/
+		 | (((untag_mask >> 6) & 0x7) << 15)	/* extEgressUntag[17:15]*/
+		 | ((fid & 0x3) << 18);			/* fid          [19:18] */
 
 	for (guard = 0; guard < 100000 &&
 	     (REG32(SWTACR) & TLU_ACTION_MASK) != TLU_ACTION_DONE; guard++)
@@ -193,6 +194,20 @@ static void sw_add_vlan(uint32 vid, uint32 member_mask, uint32 untag_mask)
 	for (guard = 0; guard < 100000 &&
 	     (REG32(SWTACR) & TLU_ACTION_MASK) != TLU_ACTION_DONE; guard++)
 		barrier();
+}
+
+/* ★ FID: the L2/FDB lookup for a routed egress is keyed by {MAC, FID}, and the FID comes
+ * from the frame's VLAN entry. This driver writes peer L2 entries under fid 1 for the WAN
+ * side and fid 0 for the LAN side (rtl865x_asichal.c:404,644,700) -- but sw_add_vlan()
+ * never wrote the VLAN table's fid field at all, so BOTH VLANs claimed fid 0. The WAN
+ * peer's entry therefore lived in FID 1 while a WAN-bound lookup searched FID 0 and
+ * missed, leaving the ASIC with no egress to commit to. That is exactly the observed
+ * signature: the L4 NAPT row matches and reloads its age, yet every packet is delivered
+ * to the CPU. Fork A never noticed because it never resolved a per-port egress anyway.
+ * (The vendor keeps the same split: eFID on the 8367S, FID on the SoC.) */
+static void sw_add_vlan(uint32 vid, uint32 member_mask, uint32 untag_mask)
+{
+	sw_add_vlan_fid(vid, member_mask, untag_mask, 0);
 }
 
 /* Set a port's default VLAN id (PVID) — replicates vendor rtl8651_setAsicPvid. */
@@ -346,22 +361,64 @@ static void rtl819x_fabric_full_reset(void)
 		pr_err("rtl819x: fabric reset: MEMCR init timeout (%08x)\n",
 		       REG32(MEMCR));
 
+	/* ★ L4/NAPT table SRAM clear — a SEPARATE bit the init command above does not
+	 * cover (see MEMCR_L4_CLEAR in rtl819x_regs.h). Vendor rtl8651_clearAsicNaptTable()
+	 * is gated on CONFIG_RTL_8197F, so this is required on this silicon. */
+	REG32(MEMCR) &= ~MEMCR_L4_CLEAR;
+	REG32(MEMCR) |= MEMCR_L4_CLEAR;
+	for (guard = 0; guard < 100000 &&
+	     (REG32(MEMCR) & MEMCR_L4_CLEAR_DONE) != MEMCR_L4_CLEAR_DONE; guard++)
+		cpu_relax();
+	if ((REG32(MEMCR) & MEMCR_L4_CLEAR_DONE) != MEMCR_L4_CLEAR_DONE)
+		pr_err("rtl819x: L4 table clear timeout (MEMCR=%08x)\n", REG32(MEMCR));
+	else
+		pr_info("rtl819x: L4/NAPT table SRAM cleared (MEMCR=%08x)\n", REG32(MEMCR));
+
 	rtl819x_fabric_restore();
 	pr_err("rtl819x: fabric full reset done (SIRR FULL_RST + swcore clock cycle + MEMCR init + cfg restore)\n");
 }
 
-/* #14 (flashed-boot cold trunk) bench lever: force the FULL Fork-B trunk
- * cold replica in rtl865x_start() on a loader-configured boot, to validate
- * the replica is loader-exact (a true replica must be a data-plane NO-OP
- * over the loader's own bring-up — the old partial replica provably killed
- * the trunk in exactly this test). SoC SWCORE regs have no devmem path, so
- * this param is the only live lever for the SoC half:
- *   echo 1 > /sys/module/rtl819x/parameters/trunk_cold_force
- *   ip link set eth0 down; ip link set eth0 up
- * Self-clears once consumed. */
-static int trunk_cold_force;
-module_param(trunk_cold_force, int, 0644);
-MODULE_PARM_DESC(trunk_cold_force, "force the flashed-boot RGMII-trunk cold bring-up replica on next eth0 open");
+/* trunk_cold_force removed along with Fork A. It existed to force the trunk cold
+ * replica on a loader-configured boot, because the replica used to be gated on
+ * "loader has NOT already done it". CPU-tag mode needs the P0GMIICR tag bits that only
+ * that block programs, so the gate became unconditionally true the moment cpu_tag
+ * defaulted to 1 — i.e. the replica has already been running on every eth0 open, and
+ * the knob has been dead since then. rtl865x_start() also re-runs it after
+ * fabric_reset=3 (see the New_swNic_init + rtl865x_start pair), so there is nothing
+ * left to re-arm by hand. */
+int rtl8367s_cpu_tag_enable(void);	/* drivers/net/phy/rtl8367b.c */
+
+/* ---- CPU-tag ("port0 router") mode: the vendor's 8197F + 8367R arrangement ----
+ * This is now the ONLY model. It replicates what the vendor SDK does for exactly this
+ * SoC+switch pair (CONFIG_RTL_CPU_TAG, implied by CONFIG_RTL_8367R_SUPPORT): the SoC
+ * MAC inserts and strips a 4-byte Realtek 0x8899 tag on the trunk IN HARDWARE, carrying
+ * the source and destination port. The jacks appear to the SoC as its own ports 0-4
+ * with the CPU on port 8, exactly as the stock firmware's netif/L2 tables show.
+ *
+ * The 8367S end must agree (reg 0x121a = 0x2b1, armed by rtl8367s_cpu_tag_enable()
+ * below) or the link goes deaf — measured, 100% loss at every frame size. Both ends
+ * together or neither; either alone breaks the datapath.
+ *
+ * ---- HISTORICAL: what "Fork A" was, and why it is gone -----------------------------
+ * Fork A hid all five jacks behind the single RGMII trunk and picked the jack by VLAN
+ * ID *after* the frame left the SoC. The SoC switch therefore only ever saw ONE port,
+ * so a routed unicast had no distinct egress port to commit to and the ASIC trapped
+ * every packet to the CPU — which is why hardware NAT never engaged there despite the
+ * L4 NAPT rows matching. It was kept behind cpu_tag=0 as a fallback while CPU-tag mode
+ * was proven. It is proven: 891/906 Mbit with 0.0% of payload bytes crossing the CPU.
+ * Fork A was removed once that held across a cold NOR boot, so the datapath now has a
+ * single shape rather than two that had to be reasoned about together. Recover it from
+ * git history if a comparison is ever needed. */
+/* Board jack layout (DIR-842, confirmed in GWR1200ACV1.dts:113-120 and the vendor
+ * header): the RTL8367S carries the five GbE jacks as ports 0-4, with the WAN jack on
+ * port 4 and LAN on 0-3. In CPU-tag mode these become the SoC's own port numbers, and
+ * the CPU moves to port 8 (reachable only via the extMemberPort bit-slice). */
+#define GW_JACK_WAN		4
+#define GW_JACK_LAN_MASK	0x0F		/* jacks 0-3 */
+#define GW_PORT_CPU_TAGGED	8		/* CPU port number in CPU-tag mode */
+
+/* cpu_tag / Fork A removed — CPU-tag mode is unconditional (see the block comment
+ * above). rtl865x_asichal.c no longer externs it. */
 
 /* A-2 residual: DISABLE 802.3x PAUSE on the RGMII trunk (SoC-P0 <-> 8367S-EXT1),
  * applied in rtl865x_start(). MEASURED, and OPPOSITE the original hypothesis:
@@ -389,6 +446,40 @@ extern int rtl8367s_trunk_pause_set(int on);
 
 static void rtl865x_start(void)
 {
+	/*
+	 * ★ CF_NIC_LITTLE_ENDIAN (CPUICR1 bit 1) — byte order of the NIC master
+	 * Lexra bus. This was NEVER programmed here; the driver silently
+	 * inherited whatever the bootloader left, and the bootloader only sets
+	 * it when it runs its own network init. A TFTP RAM boot fetches the
+	 * image over the wire, so the bit is set (CPUICR1=0x82) and everything
+	 * works; a NOR flash boot never touches the NIC, leaves it clear
+	 * (CPUICR1=0x80), and the wired datapath is dead.
+	 *
+	 * With the bit clear the DMA engine writes every received frame into
+	 * DRAM 32-bit-word byte-swapped. Measured on the bench: a ping from
+	 * 00:e0:4c:12:59:90 to this box lands in the mbuf as
+	 *     51 fc 1c e0  e0 00 ef c9  90 59 12 4c  02 00 00 81  00 45 00 08
+	 * i.e. each word of "e0 1c fc 51 | c9 ef 00 e0 | 4c 12 59 90 |
+	 * 81 00 00 02 | 08 00 45 00" reversed. eth_type_trans() then reads the
+	 * destination MAC as 51:fc:1c:e0:e0:00 — octet 0 bit 0 set, so the
+	 * frame is classified PACKET_MULTICAST — and the EtherType as 0x0200
+	 * instead of 0x8100, so the 802.1Q untag path below is never taken.
+	 * The frames are received and counted but reach neither the bridge nor
+	 * the IP stack, so the box answers nothing. The fingerprint is
+	 * eth0.2 rx_packets and rx_multicast rising 1:1 while br-lan rx stays
+	 * flat. Vendor does this in its 8197F chip init,
+	 * AsicDriver/rtl865x_asicL2.c:7647.
+	 *
+	 * Set bit 1 ONLY. The vendor's line also ORs CF_TXRX_DIV_LX (bit 0) and
+	 * CF_TSO_ID_SEL (bit 4), but every boot that measured 890/900 Mbit of
+	 * hardware offload ran with exactly 0x82 — so reproduce the known-good
+	 * value and nothing more. Runs before the CPUICR write below so the bus
+	 * is in the right byte order before Tx/Rx are enabled, and before the
+	 * fabric snapshot at the end of this function so a fabric_reset
+	 * restores the corrected value rather than the loader's.
+	 */
+	REG32(CPUICR1) |= (1u << 1);
+
 	/* Enable Tx/Rx, 128-word Lexra bus burst, 2048-byte mbufs. */
 	REG32(CPUICR) = TXCMD | RXCMD | BUSBURST_128WORDS | MBUF_2048BYTES;
 
@@ -488,40 +579,47 @@ static void rtl865x_start(void)
 	{
 		int p;
 
-		for (p = 0; p <= 6; p++)		/* all ports (incl CPU 6) forwarding */
+		/* PCRP(n) is documented "port cfg 0..8". CPU-tag mode puts the CPU on
+		 * port 8, so the loop must reach it or the CPU port never leaves
+		 * blocking. (Fork A only ever went to 6.) */
+		for (p = 0; p <= GW_PORT_CPU_TAGGED; p++)
 			REG32(PCRP(p)) |= PCR_STP_FORWARDING;
 		/*
-		 * M6.2: two VLANs across the CPU<->RTL8367S RGMII trunk — VID 9 =
-		 * LAN, VID 8 = WAN. Members = 0x7F (all internal ports; a superset
-		 * so frames reach the CPU whichever internal port is the uplink).
-		 * untag mask 0x40 => only the CPU port (bit 6) egresses UNTAGGED
-		 * (clean frames into the RX ring; the poll loop re-attaches the
-		 * VID via hwaccel), the physical/trunk ports egress 802.1Q-TAGGED
-		 * so the external RTL8367S can split the frames per jack.
+		 * Two VLANs across the CPU <-> RTL8367S RGMII trunk: VID 2 = LAN,
+		 * VID 1 = WAN, matching stock's netif table.
+		 *
+		 * The jacks are REAL SoC ports in CPU-tag mode, so the two VLANs get
+		 * DISTINCT membership. (Fork A had to use a 0x7F superset in both,
+		 * which is precisely why LAN and WAN were indistinguishable by
+		 * membership and a routed unicast had no egress port to commit to.)
+		 *
+		 * Vendor reference (include/net/rtl/rtl865x_netif.h:626,760-765):
+		 *   RTL_CPU_PORT      8
+		 *   RTL_LANPORT_MASK  0x10f   jacks 0-3 + CPU port 8
+		 *   RTL_WANPORT_MASK  0x10    jack 4
+		 * sw_add_vlan()'s flat mask splits at bit 6, so bit 8 lands in
+		 * extMemberPort bit 2 = port 8. Board layout: WAN = jack 4.
+		 *
+		 * ⚠ The vendor's WAN mask omits the CPU port while its LAN mask
+		 * includes it. That asymmetry is real but unexplained, and dropping
+		 * the CPU out of the WAN VLAN is exactly how WAN dies silently. We
+		 * stay symmetric (CPU in both); the literal 0x10 is only worth trying
+		 * as a deliberate A/B.
+		 *
+		 * untag stays 0x00: our 8367S sends 802.1Q-TAGGED up the trunk and the
+		 * SoC reads the VID from the tag -- measured working. (The vendor
+		 * instead sends untagged and derives the VID from the ingress port's
+		 * PVID; both are coherent, ours is already proven.)
 		 */
-		/*
-		 * M6.2b: match STOCK's SoC VLAN — the CPU port is a TAGGED member
-		 * (stock VID2 LAN = member{0-3,8} untag{0-3}: port8/CPU tagged).
-		 * untag_mask 0x00 => nothing untagged, so tagged trunk frames reach
-		 * the CPU WITH the 802.1Q tag inline (proto ETH_P_8021Q) and the
-		 * poll's robust path leaves them for Linux skb_vlan_untag -> eth0.9.
-		 * (v1 used 0x40 = CPU untagged, and the SoC dropped the trunk frames
-		 * on the untagged CPU-egress path -> eth0 RX stayed ~0.)
-		 */
-		/*
-		 * M6.6 Fork A: coherent VID2(LAN)/VID1(WAN) across the trunk so the ASIC
-		 * L3 engine classifies netifs by VID (netif0=VID2, netif1=VID1) WITHOUT
-		 * the source-port CPU-tag (which breaks CPU RX). The external RTL8367S
-		 * tags each jack's frames with its VID and sends them TAGGED up the trunk;
-		 * the SoC distinguishes LAN/WAN purely by 802.1Q. Members 0x7F (all ports
-		 * incl CPU port6) is a superset so frames reach the CPU too; nothing
-		 * untagged so the trunk egress stays tagged (the 8367S needs the VID to
-		 * pick the jack). PVID2 = untagged ingress defaults to LAN.
-		 */
-		sw_add_vlan(2, 0x7F, 0x00);		/* LAN VID2: all ports tagged members */
-		sw_add_vlan(1, 0x7F, 0x00);		/* WAN VID1: all ports tagged members */
-		for (p = 0; p <= 6; p++)
-			sw_set_pvid(p, 2);		/* untagged ingress default -> LAN vid2 */
+		sw_add_vlan_fid(RTL865X_VID_LAN, 0x10F, 0x00, 0); /* jacks 0-3 + CPU8, fid0 */
+		sw_add_vlan_fid(RTL865X_VID_WAN, 0x110, 0x00, 1); /* jack 4    + CPU8, fid1 */
+		/* Per-jack PVID now that ports are distinct: the WAN jack must default
+		 * to the WAN VID, not LAN. Only matters for untagged ingress, but
+		 * leaving every port on LAN would mis-zone the WAN jack the moment
+		 * anything arrives untagged. */
+		for (p = 0; p <= GW_PORT_CPU_TAGGED; p++)
+			sw_set_pvid(p, (p == GW_JACK_WAN) ? RTL865X_VID_WAN
+							  : RTL865X_VID_LAN);
 		/* mode-2 fix: arm the CPU RX interrupt (GIMR switch-NIC line + CP0
 		 * IP4) BEFORE enabling global L2 forwarding, so the CPU is already
 		 * ready to drain the RX ring the instant frames flow. If L2-enable
@@ -543,9 +641,10 @@ static void rtl865x_start(void)
 		 * default is UTP (0) — loader-configured boots skip this block
 		 * UNTOUCHED (the #12 lesson: partial/duplicate re-writes over the
 		 * loader's coherent bring-up desync the RGMII pair). Live loader-
-		 * boot reference: P0GMIICR=0x00037d55, PITCR bit0=1. Bench lever:
-		 * trunk_cold_force=1 runs the replica on a loader boot (a loader-
-		 * exact replica must be a data-plane no-op). */
+		 * boot reference: P0GMIICR=0x00037d55, PITCR bit0=1. The replica now
+		 * runs on EVERY open including loader boots, which is itself the
+		 * standing proof that it is loader-exact: a correct replica must be a
+		 * data-plane no-op over the loader's own bring-up. */
 		pr_err("rtl819x trunk-pre : PITCR=%08x P0GMIICR=%08x MACCR=%08x PCRP0=%08x EXTPCR0=%08x MACCR1=%08x PAD=%08x\n",
 		       REG32(RTL819X_SWCORE_BASE + 0x4100),
 		       REG32(RTL819X_SWCORE_BASE + 0x414C),
@@ -560,11 +659,28 @@ static void rtl865x_start(void)
 		 * MACCR is a MAC-level reg (not an RGMII-pair timing reg), so writing
 		 * it over the loader's config is safe, unlike the gated PHY regs. */
 		REG32(RTL819X_SWCORE_BASE + 0x4000) |= (1u << 12) | SW_MACCR_LONG_TXE;
-		if (!(REG32(RTL819X_SWCORE_BASE + 0x4100) & (1u << 0)) ||
-		    trunk_cold_force) {
+		/* ★ Both ends of the RGMII trunk must agree, so arm the 8367S CPU-tag
+		 * insertion here, next to the SoC-side P0GMIICR bits below. The switch
+		 * ships with 0x121a=0x00b5 (tag ENABLED but INSERTMODE="to NONE"), so
+		 * without this the SoC decodes a tag the switch never inserts and the
+		 * datapath drops everything -- measured: 100%% loss at every frame size.
+		 * rtl8367s_cpu_tag_enable() is EXPORT_SYMBOL'd for exactly this and had
+		 * no callers; the value was previously poked in by hand via debugfs on
+		 * every boot. */
+		rtl8367s_cpu_tag_enable();
+
+		/* CPU-tag mode REQUIRES the P0GMIICR tag bits, which only this block
+		 * programs, so it runs UNCONDITIONALLY -- including on a loader boot
+		 * where PITCR bit0 is already set. This used to be gated on
+		 * "!loader-configured || trunk_cold_force || cpu_tag"; with cpu_tag
+		 * defaulting to 1 that gate was already always true, so making it
+		 * unconditional is a no-op in behaviour and removes the last Fork A
+		 * branch. A true replica must be a data-plane NO-OP over the loader's
+		 * own bring-up -- an earlier PARTIAL replica provably killed the trunk
+		 * in exactly this test, which is why every step below is loader-exact. */
+		{
 			u32 v;
 
-			trunk_cold_force = 0;
 			/* 1. board RGMII pad mux/drive (loader value) */
 			REG32(0xB8000850) =
 				(REG32(0xB8000850) & 0x019FFFFF) | 0xDA600000;
@@ -575,17 +691,25 @@ static void rtl865x_start(void)
 			v = REG32(RTL819X_SWCORE_BASE + 0x5108);
 			REG32(RTL819X_SWCORE_BASE + 0x5108) =
 				(v & ~(0xFu << 16)) | (0x8u << 16);
-			/* 4. P0GMIICR: GMAC=RGMII (bits[24:23]=0), NO CPU-tag
-			 * (bits[26:25]=0 — Fork A), CF_SEL_RGTXC bits[19:18]=0
-			 * (loader-live value; =3 only in stock's CPU-tag mode —
-			 * fallback variant B), loader fields bits[17:16]=3 +
-			 * bits[15:8]=0x7d, delays TX(bit4)+RX=5. Conf_done
-			 * (bit6) stays CLEAR here — latched LAST, after the
-			 * settle, exactly like the loader. Target: 0x00037d15. */
+			/* 4. P0GMIICR: GMAC=RGMII (bits[24:23]=0), loader fields
+			 * bits[17:16]=3 + bits[15:8]=0x7d, delays TX(bit4)+RX=5.
+			 * Conf_done (bit6) stays CLEAR here — latched LAST, after
+			 * the settle, exactly like the loader.
+			 *
+			 * CPU-tag mode: the vendor's 8197F+8367R arrangement, copied
+			 * from init_8197f_p0() (sdk rtl865x_asicL2.c:6408):
+			 *   P0GMIICR |= (3 << CF_SEL_RGTXC_OFFSET);
+			 *   P0GMIICR |= (CFG_CPUC_TAG | CFG_TX_CPUC_TAG);  bits 25,26
+			 *   MACCR1   |= PORT0_ROUTER_MODE;                 bit0 (step 2)
+			 * The SoC MAC then inserts/strips the 4-byte 0x8899 tag in
+			 * HARDWARE, so the RX descriptor's spa carries the real jack
+			 * and TX can name a destination port. Conf_done still latches
+			 * last, below — that ordering is what the loader relies on. */
 			v = REG32(RTL819X_SWCORE_BASE + 0x414C);
 			v &= ~((3u << 25) | (3u << 23) | (3u << 18) |
 			       (3u << 16) | (0xFFu << 8) | 0xFFu);
 			v |= (3u << 16) | (0x7Du << 8) | (1u << 4) | (5u << 0);
+			v |= (3u << 25) | (3u << 18);	/* CFG_CPUC_TAG|CFG_TX_CPUC_TAG, CF_SEL_RGTXC */
 			REG32(RTL819X_SWCORE_BASE + 0x414C) = v;
 			/* 5. PITCR port0 = RGMII (default UTP!) */
 			REG32(RTL819X_SWCORE_BASE + 0x4100) |= (1u << 0);
@@ -594,7 +718,18 @@ static void rtl865x_start(void)
 			 * ForceLink(23)|EnForceMode(25) = 0x02940009, then the
 			 * vendor EnForceMode double-toggle latch
 			 * (TOGGLE_BIT_IN_REG_TWICE, sdk-ref asicCom.c). */
-			v = REG32(RTL819X_SWCORE_BASE + 0x4104) | 0x02940009u;
+			/* ★ Multi-bit FIELDS must be CLEARED before being OR'd in, or
+			 * whatever the loader left merges with what we want. This used to
+			 * be a bare `| 0x02940009`, which is correct only if the loader
+			 * happens to leave ForceSpeed[20:19] at 0 or 2. A NOR cold boot
+			 * leaves it at 1 (100M), and 1|2 = 3 = the RESERVED speed code:
+			 * the MAC then sits in force mode with an invalid speed and the
+			 * port passes nothing. Measured: PCRP0=0x42fc0039 on a cold flash
+			 * boot (100% loss, even to the router's own LAN IP) versus
+			 * 0x16942039 on a RAM boot (working) — ForceSpeed 3 vs 2.
+			 * IPMSTP_PortST[22:21] is masked for the same reason. */
+			v = (REG32(RTL819X_SWCORE_BASE + 0x4104)
+			     & ~((3u << 19) | (3u << 21))) | 0x02940009u;
 			REG32(RTL819X_SWCORE_BASE + 0x4104) = v;
 			REG32(RTL819X_SWCORE_BASE + 0x4104) = v ^ (1u << 25);
 			REG32(RTL819X_SWCORE_BASE + 0x4104) = v;

@@ -148,6 +148,21 @@ module_param(pppoe_hw_offload, bool, 0644);
 MODULE_PARM_DESC(pppoe_hw_offload,
 	"ASIC PPPoE encap offload: 1=on (default, ~157 Mbit bench-validated), 0=software forwarding");
 
+/* Bench instrument: log why an offer was declined. Every decline path below is a
+ * silent -EOPNOTSUPP, which makes "no row ever installs" indistinguishable from
+ * "the offer never arrived" -- exactly the ambiguity that cost a full debug cycle.
+ * Ratelimited; set hwnat_debug=0 to silence. */
+static int hwnat_debug = 1;
+module_param(hwnat_debug, int, 0644);
+MODULE_PARM_DESC(hwnat_debug, "log why hwnat declines a flow-offload offer (1=on)");
+
+#define HWNAT_DECLINE(fmt, ...)						\
+	do {								\
+		if (hwnat_debug)					\
+			pr_info_ratelimited("rtl819x hwnat: decline " fmt "\n", ##__VA_ARGS__); \
+		return -EOPNOTSUPP;					\
+	} while (0)
+
 int rtl819x_hwnat_flow_offload_check(struct flow_offload_hw_path *path)
 {
 	/* Two accepted path shapes once the upper layers have flattened onto eth0
@@ -163,7 +178,7 @@ int rtl819x_hwnat_flow_offload_check(struct flow_offload_hw_path *path)
 	 *                         a connected session always has a nonzero sid. */
 	if (path->flags == (FLOW_OFFLOAD_PATH_ETHERNET | FLOW_OFFLOAD_PATH_VLAN)) {
 		if (path->vlan_id != RTL865X_VID_LAN && path->vlan_id != RTL865X_VID_WAN)
-			return -EOPNOTSUPP;
+			HWNAT_DECLINE("check: vid=%u not a datapath VID", path->vlan_id);
 		return 0;
 	}
 
@@ -177,7 +192,8 @@ int rtl819x_hwnat_flow_offload_check(struct flow_offload_hw_path *path)
 		return 0;
 	}
 
-	return -EOPNOTSUPP;
+	HWNAT_DECLINE("check: flags=%x vid=%u (want ETHERNET|VLAN or PPPOE|VLAN)",
+		      path->flags, path->vlan_id);
 }
 
 /* ------------------------------------------------------------------ ADD / DEL */
@@ -232,6 +248,57 @@ static void hwnat_flush_locked(void)
  * Build both NAPT rows for one LAN->WAN masquerade flow and write them. Caller holds
  * rtl865x_hal_lock. Returns 0 on success, <0 to decline (flow stays in software).
  */
+/* ---- NAPT row key/action field sweep knobs -------------------------------
+ * The fill-all discriminator proved the ASIC reaches a row and REJECTS its key, so the
+ * fault is in these fields. Each is exposed so a host-side sweep can flip one at a time
+ * and let the chip's own trap reason vote (reason 7 = still rejected, anything else =
+ * the row was accepted). -1 means "use the built-in default".
+ *
+ * ★ napt_collision is the strongest suspect. This driver sets collision=collision2=1 on
+ * every ACTIVE row, justified as "vendor: always set on a dedicated row" -- but the R6/B3
+ * work records the opposite reading, that collision=collision2=1 is how a FREE row is
+ * marked. If that reading is right, every row we write is flagged as free/collided and
+ * the lookup walks straight past it, which is exactly "no matched NAPT entry". */
+static int napt_collision;	/* bit0 = collision, bit1 = collision2; default 0 = PROVEN */
+module_param(napt_collision, int, 0644);
+MODULE_PARM_DESC(napt_collision, "NAPT row collision bits: -1=default(3), 0=neither, 1=collision, 2=collision2, 3=both");
+static int napt_static = -1;
+module_param(napt_static, int, 0644);
+MODULE_PARM_DESC(napt_static, "NAPT row isStatic: -1=default(1), 0, 1");
+static int napt_dedicate = -1;
+module_param(napt_dedicate, int, 0644);
+MODULE_PARM_DESC(napt_dedicate, "NAPT row dedicate: -1=default(0), 0, 1");
+static int napt_tcpflag = -1;
+module_param(napt_tcpflag, int, 0644);
+MODULE_PARM_DESC(napt_tcpflag, "NAPT outbound row TCPFlag: -1=default(3), 0..7");
+
+/* NAPT row key byte order: 1 = network (htonl/htons, previous), 0 = host order. */
+
+/* ★ The G (global/masqueraded port) encoding in offset/selEIdx is a SEPARATE byte
+ * order from the key above -- napt_key_htonl only ever swapped intIPAddr/intPort, so
+ * this axis has never been varied. The vendor writes the raw HOST-order port:
+ *     entry.offset  = insideGlobalPort >> RTL8651_TCPUDPTBL_BITS;   (asicL4.c:183)
+ *     entry.selEIdx = insideGlobalPort &  (RTL8651_TCPUDPTBL_SIZE-1);  (asicL4.c:207)
+ * this driver has always written htons(gport). 1 = htons (previous behaviour),
+ * 0 = host order (what the vendor code literally does). */
+/* ★ Byte order of the HASH INPUTS (distinct from the key and from G).
+ * gw_napt_hash1() is a verified-faithful port of the vendor's modelLayer4Hash1()
+ * (naptModel.c) -- the bit mapping was diffed field by field and matches. What was
+ * never checked is what we feed it. The vendor's hsb fields come off the packet in
+ * network order, so its htonl()/htons() on a little-endian build yield the NUMERIC
+ * value the silicon hashes. This driver has already normalised to host order
+ * upstream (int_ip = ntohl(...); int_port = ntohs(...)), so applying htonl()/htons()
+ * again is a DOUBLE conversion that swaps it right back -- landing every row at a
+ * byte-swapped index the hardware never probes. Self-consistently, since our write
+ * and our readback both use it. 1 = htonl/htons (previous behaviour), 0 = feed the
+ * host-order values straight through (what the vendor effectively hashes). */
+
+
+/* Diagnostic: fill every NAPT index with the outbound row (see hwnat_program_rows). */
+static int napt_fill_all;
+module_param(napt_fill_all, int, 0644);
+MODULE_PARM_DESC(napt_fill_all, "DIAG: write the outbound NAPT row at all 1024 indices to test whether the index derivation is the fault (0=off)");
+
 static int hwnat_program_rows(u32 is_tcp, u32 int_ip, u16 int_port, u16 gport,
 			      u32 rem_ip, u16 rem_port, u16 idx_out, u16 idx_in)
 {
@@ -241,20 +308,46 @@ static int hwnat_program_rows(u32 is_tcp, u32 int_ip, u16 int_port, u16 gport,
 	struct asic_napt_tcpudp e, v;
 	int rc;
 
+	/* ★ KEY BYTE ORDER. The napt_fill_all discriminator proved the INDEX is not the
+	 * fault: with all 1024 rows holding this row the ASIC still reported reason 7
+	 * ("no matched NAPT entry"), i.e. it reaches a row and REJECTS the key. Byte order
+	 * is the prime suspect, and it is precisely where the SDKs diverge -- 3.4.11B+ adds
+	 * htonl()/htons() in l4Driver/rtl865x_nat.c on the hash index and the outbound row
+	 * match, which our 3.4.9.x reference lacks (it computes unswapped at :325-326 while
+	 * swapping at :714-716). 1 = network order (previous behaviour), 0 = host order. */
 	memset(&e, 0, sizeof(e));
-	e.intIPAddr  = htonl(int_ip);		/* NETWORK order: the ASIC verifies the stored */
-	e.intPort    = htons(int_port);		/* key against the on-wire src (vendor nat.c:1129-1130) */
+	e.intIPAddr  = int_ip;
+	e.intPort    = int_port;
 	e.isTCP      = is_tcp;
 	e.valid      = 1;
-	e.collision  = 1;			/* vendor: always set on a dedicated row */
-	e.collision2 = 1;
-	e.isStatic   = 1;			/* vendor: driver-added NAPT rows are STATIC (nat.c:1134); a dynamic (isStatic=0) row with auto-learn OFF is matched but NOT forwarded */
-	e.dedicate   = 0;			/* vendor main path sets isDedicated=0 (nat.c:1133); dedicate=1 was mis-copied from the LIBERAL setter (asicL4.c:191) */
+	e.collision  =  napt_collision       & 1;
+	e.collision2 = (napt_collision >> 1) & 1;
+	e.isStatic   = (napt_static    < 0) ? 1 : !!napt_static;	/* vendor: driver-added rows are STATIC (nat.c:1134) */
+	e.dedicate   = (napt_dedicate  < 0) ? 0 : !!napt_dedicate;	/* vendor main path sets isDedicated=0 (nat.c:1133) */
 	e.agingTime  = RTL865X_NAPT_AGING_RELOAD;	/* start at the ceiling (fresh) */
 	e.selIPIdx   = 0;			/* -> extIP[0] = the WAN masquerade IP */
-	e.selEIdx    = htons(gport) & 0x3ff;	/* G in NETWORK order -- the ASIC writes it back */
-	e.offset     = htons(gport) >> 10;	/* as the on-wire src port (vendor nat.c:711-712) */
-	e.TCPFlag    = 0x3;			/* vendor outbound: 0x2 (unidirectional) | 0x1 (outbound), nat.c:1142 */
+	e.selEIdx    = gport & 0x3ff;
+	e.offset     = gport >> 10;
+	e.TCPFlag    = (napt_tcpflag < 0) ? 0x3 : (napt_tcpflag & 0x7);	/* vendor outbound: 0x2|0x1, nat.c:1142 */
+
+	/* ★ DIAGNOSTIC: napt_fill_all writes the OUTBOUND row at EVERY index, which
+	 * separates the two possible causes of the ASIC's "no matched NAPT entry" trap
+	 * (decoded reason 7) in a single shot:
+	 *   - if the trap DISAPPEARS, every index now holds a valid row, so the row
+	 *     CONTENT/key is acceptable to the silicon and our INDEX derivation is wrong;
+	 *   - if the trap PERSISTS, the hardware is reaching a row and rejecting it, so the
+	 *     KEY FIELDS are wrong and no amount of index fixing will help.
+	 * Debug only -- it destroys the inbound row and the whole table. */
+	if (napt_fill_all) {
+		u16 i;
+
+		for (i = 0; i < 1024; i++)
+			rtl865x_napt_write(i, &e);
+		pr_err("rtl819x hwnat: DIAG filled all 1024 NAPT rows with the outbound row "
+		       "(intIP=%pI4h intPort=%u G=%u) -- index derivation now cannot matter\n",
+		       &int_ip, int_port, gport);
+		return 0;
+	}
 
 	rc = rtl865x_napt_write(idx_out, &e);
 	if (rc)
@@ -273,9 +366,16 @@ static int hwnat_program_rows(u32 is_tcp, u32 int_ip, u16 int_port, u16 gport,
 	 * forward frames carried the peer MAC + correct src, return frames carried
 	 * 00:00:00:00:00:10 and an un-rewritten dst). intIPAddr/intPort (the un-NAT target)
 	 * are identical in both rows and stay as set above. */
-	e.offset   = htons(gport) & 0x3f;
-	e.selEIdx  = gw_napt_hash1(is_tcp, htonl(rem_ip), htons(rem_port), 0, 0) & 0x3ff;
-	e.selIPIdx = (htons(gport) & 0x3ff) >> 6;
+	e.offset   = gport & 0x3f;
+	/* ★ NUMERIC, like every other hash input. This was the last hardcoded htonl/htons
+	 * pair in the driver — it had no knob, so it stayed byte-swapped through the whole
+	 * byte-order investigation and kept the WAN->LAN direction at ~100% through-CPU
+	 * even after the outbound row started hardware-forwarding at 0.0%. The ASIC
+	 * recomputes this verification hash from the inbound packet's numeric {remIP,
+	 * remPort} and rejects the row on mismatch, so a swapped `very` fails every
+	 * inbound lookup. Numeric, exactly like the two row indices. */
+	e.selEIdx  = gw_napt_hash1(is_tcp, rem_ip, rem_port, 0, 0) & 0x3ff;
+	e.selIPIdx = (gport & 0x3ff) >> 6;
 	e.TCPFlag  = 0x2;			/* vendor inbound: 0x2 (unidirectional) | 0x0 (inbound), nat.c:1142 */
 	rc = rtl865x_napt_write(idx_in, &e);
 	if (rc) {
@@ -283,8 +383,17 @@ static int hwnat_program_rows(u32 is_tcp, u32 int_ip, u16 int_port, u16 gport,
 		return rc;
 	}
 
-	/* Read the outbound row back and sanity-check it landed. */
-	if (rtl865x_napt_read(idx_out, &v) || !v.valid || v.intIPAddr != htonl(int_ip)) {
+	/* Read the outbound row back and sanity-check it landed.
+	 *
+	 * ★ The comparison MUST use the same byte order the row was written with at the
+	 * top of this function. It used to hardcode htonl(int_ip): with napt_key_htonl=0
+	 * (host order — the proven setting) every install wrote a host-order key, failed
+	 * this check, tore both rows down and returned -EIO. The offload then silently
+	 * never engaged, and because the failure happens BEFORE the "+tcp" log line the
+	 * only visible symptom was a permanent trap reason 7 ("no matched NAPT entry")
+	 * with no row ever appearing — indistinguishable from the offer never arriving. */
+	if (rtl865x_napt_read(idx_out, &v) || !v.valid ||
+	    v.intIPAddr != int_ip) {
 		rtl865x_napt_clear(idx_out);
 		rtl865x_napt_clear(idx_in);
 		return -EIO;
@@ -311,27 +420,29 @@ static int hwnat_add_flow(struct flow_offload *flow,
 	/* Structural: LAN(vid2) src -> WAN(vid1) dest only; PPPoE (if present) can
 	 * only be the WAN side. */
 	if (src->vlan_id != RTL865X_VID_LAN || dest->vlan_id != RTL865X_VID_WAN)
-		return -EOPNOTSUPP;
+		HWNAT_DECLINE("add: src vid=%u dst vid=%u (want %u->%u), sflags=%x dflags=%x",
+			      src->vlan_id, dest->vlan_id, RTL865X_VID_LAN,
+			      RTL865X_VID_WAN, src->flags, dest->flags);
 	if (src->flags & FLOW_OFFLOAD_PATH_PPPOE)
-		return -EOPNOTSUPP;
+		HWNAT_DECLINE("add: PPPoE on the LAN side");
 	wan_pppoe = !!(dest->flags & FLOW_OFFLOAD_PATH_PPPOE);
 
 	/* Source-NAT masquerade only (no destination NAT / port forwards), and not a
 	 * flow that is already being torn down. */
 	if (!(flow->flags & FLOW_OFFLOAD_SNAT) || (flow->flags & FLOW_OFFLOAD_DNAT))
-		return -EOPNOTSUPP;
+		HWNAT_DECLINE("add: flow flags=%x (need SNAT, not DNAT)", flow->flags);
 	if (flow->flags & (FLOW_OFFLOAD_DYING | FLOW_OFFLOAD_TEARDOWN))
-		return -EOPNOTSUPP;
+		HWNAT_DECLINE("add: flow dying/teardown (flags=%x)", flow->flags);
 
 	/* IPv4 TCP/UDP only (ICMP et al. keep trapping to the CPU via NAPTF2CPU). */
 	if (o->l3proto != AF_INET)
-		return -EOPNOTSUPP;
+		HWNAT_DECLINE("add: l3proto=%u not IPv4", o->l3proto);
 	if (o->l4proto == IPPROTO_TCP)
 		is_tcp = 1;
 	else if (o->l4proto == IPPROTO_UDP)
 		is_tcp = 0;
 	else
-		return -EOPNOTSUPP;
+		HWNAT_DECLINE("add: l4proto=%u not TCP/UDP", o->l4proto);
 
 	/* Tuple extraction (all conntrack fields are network-order; the ASIC tables and
 	 * gw_napt_hash1() use host order). The REPLY tuple's destination is the actual
@@ -354,7 +465,8 @@ static int hwnat_add_flow(struct flow_offload *flow,
 	 * the flow — decline; the flow is dying with the old address anyway. */
 	wan_ip = hwnat_wan_ipv4(dev_net(dest->dev), r->iifidx);
 	if (!wan_ip || ext_ip != wan_ip)
-		return -EOPNOTSUPP;
+		HWNAT_DECLINE("add: extIP %pI4h != live WAN IP %pI4h (iifidx=%u)",
+			      &ext_ip, &wan_ip, r->iifidx);
 
 	/* The ASIC hashes/keys the ON-WIRE (network-order) header fields. The vendor
 	 * driver installs the outbound row at hash(htonl(intIP),htons(intPort),
@@ -367,8 +479,7 @@ static int hwnat_add_flow(struct flow_offload *flow,
 	 * row at a byte-swapped index the ASIC never looks up -> every outbound packet
 	 * misses, traps to the CPU, and the orphan row just ages out (the exact symptom).
 	 * Feed NETWORK order for the index AND for the stored key + G-encoding (below). */
-	idx_out = gw_napt_hash1(is_tcp, htonl(int_ip), htons(int_port),
-				htonl(rem_ip), htons(rem_port));
+	idx_out = gw_napt_hash1(is_tcp, int_ip, int_port, rem_ip, rem_port);
 	/* Return-path row: the ASIC hashes the INBOUND packet {src=rem, dst=ext:G} to
 	 * locate the reverse row, so it must live at hash(remIP,remPort,extIP,G) -- NOT at
 	 * G&0x3ff (that full-cone shortcut is not where the silicon looks). Vendor
@@ -377,8 +488,7 @@ static int hwnat_add_flow(struct flow_offload *flow,
 	 * WAN->LAN replies miss + trap to CPU (NAPTR_NOT_FOUND_DROP=0): the flow still works
 	 * but the return half is never HW-accelerated (and the old G&0x3ff row aliases an
 	 * unrelated inbound slot). */
-	idx_in  = gw_napt_hash1(is_tcp, htonl(rem_ip), htons(rem_port),
-				htonl(ext_ip), htons(gport));
+	idx_in  = gw_napt_hash1(is_tcp, rem_ip, rem_port, ext_ip, gport);
 
 	slot = kzalloc(sizeof(*slot), GFP_KERNEL);
 	if (!slot)
@@ -412,12 +522,28 @@ static int hwnat_add_flow(struct flow_offload *flow,
 	if (rc > 0)
 		hwnat_flush_locked();
 
+	/* Same for the LAN side: the client's MAC comes from the SRC path's
+	 * eth_dest (the address the reply direction egresses to) and its IP is the
+	 * flow's internal address. Without this the ASIC kept a build-time constant
+	 * -- one bench machine's MAC -- so the reply direction had no valid L2 and
+	 * the flow degraded to CPU forwarding on any real network. */
+	rc = rtl865x_lan_set_nexthop(src->eth_dest, int_ip);
+	if (rc < 0)
+		goto out_unlock;
+	if (rc > 0)
+		hwnat_flush_locked();
+
 	/* Both rows must be free in our shadow bitmap. A collision (or the pathological
 	 * case where the two indices coincide) declines cleanly to software — the
 	 * intended graceful fallback, not an error to chase. */
 	if (idx_out == idx_in ||
 	    test_bit(idx_out, hwnat_used) || test_bit(idx_in, hwnat_used)) {
 		rc = -ENOSPC;
+		if (hwnat_debug)
+			pr_info_ratelimited("rtl819x hwnat: decline add: rows busy out@%u(%d) in@%u(%d)%s\n",
+				idx_out, !!test_bit(idx_out, hwnat_used),
+				idx_in, !!test_bit(idx_in, hwnat_used),
+				idx_out == idx_in ? " SAME-INDEX" : "");
 		goto out_unlock;
 	}
 

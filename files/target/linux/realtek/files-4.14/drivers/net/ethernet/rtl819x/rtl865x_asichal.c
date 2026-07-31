@@ -32,6 +32,9 @@ DEFINE_MUTEX(rtl865x_hal_lock);
 #define TABSTS_MASK		0x1
 #define TABSTS_SUCCESS		0x0
 #define CMD_ADD			(1 << 1)		/* SWTACR add (hashed) */
+/* Vendor RTL865X_READ_MULTIPLECHECK: read twice, compare, retry up to 10x. */
+#define ASIC_READ_RETRIES	10
+#define ASIC_TBL_MAX_WORDS	11	/* 8 words, 11 on 8197F/8198C */
 /* R6: SWTCR0 WANRouteMode (bits[4:3]) — 0=Forward, 1=ToCpu, 2=Drop. Default 0 =
  * the known-good configuration this tree has run on. See the write site in gw_prog()
  * for the full rationale and the A/B procedure. */
@@ -43,6 +46,47 @@ DEFINE_MUTEX(rtl865x_hal_lock);
  * unconditionally; see rtl865x_napt_clear() for the analysis and the safe retry. */
 /* R6/B4: add stock's EnNATT2LOG(bit10)+ENFRAGTOACLPT(bit11) to SWTCR1 (=> 0x2E00).
  * Default 0 = the 0x2200 this tree has run on. */
+/* ★ SelCpuReason / EN_51B_CPU_REASON (SWTCR1 bit 8) — selects the CPU "reason"
+ * encoding reported in the RX packet header's ph_reason (a.k.a. why2cpu).
+ *
+ * Realtek's own bit-accurate ASIC model (l34Model.c, shipped in the "otto" U-Boot GPL
+ * drops) documents the reason field as:
+ *      bit15 rsv | [14:10] DDDDD | [9:5] SSSSS | [4:1] reason | [0] ACL-mirror flag
+ * with reason 1=pre-ACL trap, 2=ACL->CPU (bits[9:5] = ACL rule index), 3=ACL log->CPU,
+ * 4=ACL pass before DMAC==GMAC / srcNetif->enableRoute==0 / MTU / mcast,
+ * 5=L34 action required (TTL==0), 7=NO MATCHED NAPT ENTRY.
+ *
+ * ⚠ But every Realtek L34 test sets this bit BEFORE reading why2cpu, i.e. that table
+ * describes the 51B encoding. This driver writes SWTCR1 absolutely as 0x2200, leaving
+ * bit 8 CLEAR, so our captured 0x0c03/0x0c09/0x0c20 are in the LEGACY encoding and the
+ * table may not apply to them. Setting this makes the codes decodable against the model,
+ * which turns "the chip traps" into a specific reason. Purely diagnostic. */
+/* ★ extIP byte order. The ASIC classifies a frame's DESTINATION as NPE (NAPT-external)
+ * by matching it against the ext-int-IP table; if that match fails, dst degrades to RP
+ * and Realtek's _RTL8651_PROC matrix takes RP x RP = plain WAN-side routing, so reverse
+ * NAPT is never attempted. That is exactly what the decoded trap reason shows
+ * (WAN ingress: SSSSS=19 RP, DDDDD=19 RP).
+ *
+ * We store externalIP as htonl(ip) -- justified for the NAPT row HASH, which keys on
+ * on-wire fields -- but the extIP TABLE comparison may want the plain host-order word.
+ * The readback comment in gw_prog has always said "want w1=ac100001" while the register
+ * actually reads 010010ac, i.e. the two disagree. 1 = htonl (previous behaviour),
+ * 0 = plain host order. */
+
+/* ★ Raw SWTCR1 override for sweeping the L4 hash mode. The outbound trap reason is 7
+ * ("no matched NAPT entry") even though classification is correct (NPI x RP = NAPT
+ * outbound), so the hardware is looking the row up at an index/key we did not write.
+ * L4EnHash1 (bit13) and EnL4WayH (bit9) change the index derivation, so sweeping them
+ * against a live flow is the cheapest way to find the derivation the silicon uses.
+ * <0 = leave the computed value alone. */
+static int swtcr1_override = -1;
+module_param(swtcr1_override, int, 0644);
+MODULE_PARM_DESC(swtcr1_override, "raw SWTCR1 value (<0 = use the computed default 0x2200-family)");
+
+static int sel_cpu_reason;
+module_param(sel_cpu_reason, int, 0644);
+MODULE_PARM_DESC(sel_cpu_reason, "SWTCR1 bit8 EN_51B_CPU_REASON: 1 = use the 51B ph_reason encoding that Realtek's l34Model documents (default 0 = legacy)");
+
 static int swtcr1_trap_bits;
 module_param(swtcr1_trap_bits, int, 0644);
 MODULE_PARM_DESC(swtcr1_trap_bits,
@@ -53,7 +97,106 @@ module_param(napt_collision_prefill, int, 0644);
 MODULE_PARM_DESC(napt_collision_prefill,
 		 "R6/B3: free L4 rows carry collision=collision2=1 (0=off default, 1=on — known to break the datapath in this form)");
 
-static int wan_connected_route;
+static int wan_connected_route = 1;
+
+/* Stock carries NO /32 host route for the WAN peer -- traffic to it matches the
+ * connected /24 (process=RT_ARP) and NAT is triggered by the extIP entry's
+ * type(NAPT), not by a route process=5. Default 0 = stock parity. Set 1 to restore
+ * the old per-peer /32 NAPT-NextHop route for A/B comparison. */
+/* ★ Egress port mask for the routed-peer L2 entries.
+ * Measured on stock (docs): stock learns each host with a SINGLE-port mask --
+ *   00:e0:4c:12:59:90 FID:0 mbr(2 ) FWD     (LAN client, its jack)
+ *   e4:5f:01:04:98:af FID:1 mbr(4 ) FWD     (WAN peer,   its jack)
+ * while this port wrote every peer entry with 0x3f (flood ports 0-5, "the VID picks
+ * the jack"). A routed unicast cannot be hardware-forwarded to a flood mask -- the
+ * ASIC has no single egress port to commit to -- which is exactly the observed
+ * signature: the L4 NAPT row matches and reloads its age, yet every packet is still
+ * delivered to the CPU.
+ *
+ * ★ With CPU-tag mode the jacks ARE real SoC ports, so these carry stock's real
+ * per-jack numbers: LAN = 0x04 (jack 2, the host) and WAN = 0x10 (jack 4, the WAN
+ * peer). That is what makes hardware forwarding possible at all -- measured 891/906
+ * Mbit with 0.0%% of payload bytes crossing the CPU.
+ *
+ * Per-side, because the two peers live on DIFFERENT jacks: stock's L2 shows the LAN
+ * client at mbr(2) and the WAN peer at mbr(4). A single shared mask cannot be right
+ * for both (proved: forcing 0x10 on both sends LAN return traffic out the WAN jack
+ * and kills connectivity). Board layout: WAN = jack 4, LAN = jacks 0-3.
+ *
+ * HISTORICAL: under Fork A all jacks sat behind the RGMII trunk and the SoC saw only
+ * SoC port 0, so 0x01 was the only single-port value that worked and 0x3f was the old
+ * flood. The note that once stood here -- "a routed unicast can never resolve to
+ * anything but the trunk" -- was true ONLY of Fork A and is now disproven; do not
+ * carry it forward. Still runtime-tunable so a mask can be swept without a rebuild. */
+/* SWTCR0[13:5] MultiPortModeP, {Ext3..Ext1, Port0..Port5}, 0=Internal 1=External.
+ * 0x3F = the historical value (ports 0-5 External, ext ports Internal). Sweepable so
+ * the CPU-tag model can be tested against other settings without a rebuild; re-apply
+ * with `cat /proc/rtl865x_gw`. */
+/* ---- Register-window dump, for diffing against stock ----------------------
+ * Stock exposes /proc/rtl865x/memory; we had no equivalent, so a stock-vs-ours
+ * register comparison was impossible. Dump an arbitrary switch-core window on
+ * `cat /proc/rtl865x_gw` so both sides can be captured identically and diffed.
+ *
+ * ⚠ SKIP LIST: some registers have read side effects and must not be swept
+ * blindly or the dump perturbs what it measures:
+ *   CPUIISR (0xB801000C)  write-1-to-clear interrupt status
+ *   SWTACR  (ALE table cmd) / SWTCR0 bit19 STOP_TLU_READY  transient TLU state
+ * Defaults dump nothing; set regdump_base/regdump_n to arm it. Word-aligned. */
+static unsigned int regdump_base;
+static int regdump_n;
+module_param(regdump_base, uint, 0644);
+MODULE_PARM_DESC(regdump_base, "switch-core register window base (e.g. 0xBB804400); 0 = off");
+module_param(regdump_n, int, 0644);
+MODULE_PARM_DESC(regdump_n, "number of 32-bit words to dump from regdump_base");
+
+static bool gw_reg_has_side_effects(u32 a)
+{
+	return a == (RTL819X_SWCORE_BASE + 0x400C)	/* SWTACR: TLU command/status */
+	    || a == 0xB801000Cu;			/* CPUIISR: W1C */
+}
+
+static void gw_regdump(struct seq_file *m)
+{
+	int i;
+
+	if (!regdump_base || regdump_n <= 0)
+		return;
+	seq_printf(m, "[regdump base=%08x n=%d]\n", regdump_base, regdump_n);
+	for (i = 0; i < regdump_n; i++) {
+		u32 a = (regdump_base & ~3u) + (i * 4);
+
+		if (gw_reg_has_side_effects(a)) {
+			seq_printf(m, "  %08x = ........ (skipped: read side effects)\n", a);
+			continue;
+		}
+		seq_printf(m, "  %08x = %08x\n", a, REG32(a));
+	}
+}
+
+/* FFCR EnUnkUC2CPU: 0 = clear it (vendor gateway behaviour, unknown-DA floods),
+ * 1 = set it (trap to CPU), -1 = leave whatever the loader left. */
+static int ffcr_unkuc_to_cpu;
+module_param(ffcr_unkuc_to_cpu, int, 0644);
+MODULE_PARM_DESC(ffcr_unkuc_to_cpu, "FFCR unknown-unicast: 0=flood (vendor, default), 1=trap to CPU, -1=leave as-is");
+
+static int multiport_mode = 0x3F;
+module_param(multiport_mode, int, 0644);
+MODULE_PARM_DESC(multiport_mode, "SWTCR0 MultiPortModeP field [13:5] (default 0x3F = ports 0-5 External)");
+
+
+static int l2_mask_lan = 0x04;		/* jack 2 (LAN host) -- see below */
+module_param(l2_mask_lan, int, 0644);
+MODULE_PARM_DESC(l2_mask_lan,
+		 "Member portmask for the LAN client's L2 entry (default 0x0f = LAN jacks 0-3; set a single bit for one jack).");
+static int l2_mask_wan = 0x10;		/* jack 4 (WAN peer) -- see below */
+module_param(l2_mask_wan, int, 0644);
+MODULE_PARM_DESC(l2_mask_wan,
+		 "Member portmask for the WAN peer's L2 entry (default 0x10 = jack 4).");
+
+static int wan_peer_host_route;
+module_param(wan_peer_host_route, int, 0644);
+MODULE_PARM_DESC(wan_peer_host_route,
+		 "Program the WAN peer /32 as process=5 NAPT-NextHop at route idx0 (0=off, stock parity; 1=on, pre-stock-parity behaviour). Re-run `cat /proc/rtl865x_gw` to apply.");
 module_param(wan_connected_route, int, 0644);
 MODULE_PARM_DESC(wan_connected_route,
 		 "R6: program the WAN connected /24 as process=RT_ARP at route idx3 (0=off default, 1=on). Re-run `cat /proc/rtl865x_gw` to apply.");
@@ -148,7 +291,8 @@ int rtl865x_asic_read_entry(u32 type, u32 idx, void *entry)
 {
 	volatile u32 *base;
 	u32 *w = entry;
-	int i, n, rc;
+	u32 chk[ASIC_TBL_MAX_WORDS];
+	int i, n, rc, try;
 
 	if (type >= ARRAY_SIZE(asic_tbl_words) || !entry)
 		return -EINVAL;
@@ -159,12 +303,37 @@ int rtl865x_asic_read_entry(u32 type, u32 idx, void *entry)
 		return rc;
 
 	base = (volatile u32 *)(uintptr_t)ASIC_ADDR(type, idx);
-	for (i = 0; i < n; i++)
-		w[i] = base[i];
 
-	/* Vendor: dummy-read an unused ACL entry to refresh the ASIC read latch. */
-	(void)REG32(ASIC_ADDR(ASIC_TYPE_ACL_RULE, 1024));
-	return 0;
+	/* ★ The dummy read must come BEFORE the entry read, not after.
+	 *
+	 * Vendor _rtl8651_readAsicEntry() OPENS with it:
+	 *     "Dummy read. Must read an un-used table entry to refresh asic latch"
+	 * This code used to do it afterwards, which is worse than not doing it at all:
+	 * the latch then still held whatever the PRECEDING access left in it. After a
+	 * write that is the just-written entry, so a write+readback pair would confirm
+	 * itself out of the latch while the table RAM was never actually updated —
+	 * producing a "row" that reads back perfectly, is invisible to the forwarding
+	 * engine, and cannot be fixed by writing more indices. Refresh first, then read.
+	 *
+	 * The vendor also reads every table twice and retries on mismatch
+	 * (RTL865X_READ_MULTIPLECHECK) because this raw mapped access is known to glitch
+	 * on this silicon; a single clean read is not trustworthy. */
+	for (try = 0; try < ASIC_READ_RETRIES; try++) {
+		(void)REG32(ASIC_ADDR(ASIC_TYPE_ACL_RULE, 1024));
+		for (i = 0; i < n; i++)
+			w[i] = base[i];
+
+		(void)REG32(ASIC_ADDR(ASIC_TYPE_ACL_RULE, 1024));
+		for (i = 0; i < n; i++)
+			chk[i] = base[i];
+
+		if (!memcmp(w, chk, n * sizeof(u32)))
+			return 0;
+	}
+
+	pr_warn_ratelimited("rtl865x: table read type=%u idx=%u unstable after %d tries\n",
+			    type, idx, ASIC_READ_RETRIES);
+	return -EIO;
 }
 
 /* NOTE (M6.6 Phase-3 review): the original /proc/rtl865x_asic write+readback
@@ -194,6 +363,9 @@ int rtl865x_asic_read_entry(u32 type, u32 idx, void *entry)
 #define GW_TEACR		(RTL819X_SWCORE_BASE + 0x4400)
 #define GW_TEATCR		(RTL819X_SWCORE_BASE + 0x4404)	/* per-proto NAPT aging reload timeouts */
 #define GW_CSCR			(RTL819X_SWCORE_BASE + 0x4048)	/* checksum control */
+#define GW_FFCR			(RTL819X_SWCORE_BASE + 0x4428)	/* frame forwarding control (ALE_BASE+0x28) */
+#define GW_FFCR_UNKUC_2CPU	(1u << 1)	/* trap unknown-unicast to CPU */
+#define GW_FFCR_UNKMC_2CPU	(1u << 0)	/* trap unknown-multicast to CPU */
 #define GW_CSCR_L3L4CHK		((1 << 4) | (1 << 5))	/* EnL3ChkCal|EnL4ChkCal: recompute */
 /* THE cascade: SoC switch-core port 0 = the RGMII trunk to the RTL8367S. Enabling the
  * Realtek CPU/source-port tag decode on it makes the 5 jacks appear as SoC ports 0-4
@@ -305,15 +477,66 @@ static u32 gw_write_l2_full(const u8 *m, u32 member, u32 extmember,
 	return (row << 2) | 0;
 }
 
-/* test peers: hal on LAN switch-port 0 (VID2/fid0); tiny (RPi) on WAN port 4 (VID1/fid1) */
-static const u8 GW_MAC_HALLAN[6]  = { 0x54,0xbf,0x64,0x18,0xb8,0xde };	/* hal enp3s0 */
-static const u8 GW_MAC_TINYWAN[6] = { 0xe4,0x5f,0x01,0x04,0x98,0xaf };	/* tiny eth0 */
+/* Peer identities are LEARNED per-flow now (see the shadows below), not compiled
+ * in. The historical bench constants were hal enp3s0 54:bf:64:18:b8:de on the LAN
+ * (VID2/fid0) and tiny eth0 e4:5f:01:04:98:af on the WAN (VID1/fid1); they survive
+ * only as the boot defaults of the shadows. */
 
 /* ---- M7.2: live WAN-identity shadows (all guarded by rtl865x_hal_lock) ----
  * Learned at runtime from the flow-offload dest path (rtl819x_hwnat.c) and
  * replayed by gw_prog so /proc reprogram + the M7 fabric-reset rearm keep the
  * live identity. Boot defaults = the M6.6 bench rig (ethernet WAN via tiny). */
 static u8   gw_wan_gw_mac[6] = { 0xe4,0x5f,0x01,0x04,0x98,0xaf };	/* boot = GW_MAC_TINYWAN */
+
+/* ---- LAN-client identity shadows (same lock, same replay contract as the WAN
+ * ones above) ----
+ * ★ These used to be COMPILE-TIME CONSTANTS (GW_MAC_HALLAN / 0xC0A80002), i.e.
+ * one specific machine on one specific bench. That is fatal for a real router:
+ * the ASIC's LAN egress L2 entry and the LAN /32 route named a MAC/IP that no
+ * other network has, so no LAN client could ever be reached in hardware and the
+ * offload silently degraded to CPU forwarding for every flow. It also rotted in
+ * place here — the bench was rewired from hal's enp3s0 to a USB adapter and the
+ * ASIC kept pointing at the departed MAC (observed: L2 entry 54:bf:64:18:b8:de
+ * while the live client was 00:e0:4c:12:59:90).
+ * Now learned per-flow from the flow-offload SRC path, exactly as the WAN peer
+ * is learned from the dest path. Boot defaults kept only so a gw_prog before the
+ * first offload offer still writes something coherent. */
+static u8   gw_lan_client_mac[6] = { 0x54,0xbf,0x64,0x18,0xb8,0xde };
+static u32  gw_lan_client_ip     = 0xC0A80002;
+
+/* STOCK PARITY (measured from a live stock box, docs/M7-HWNAT-REVERSE-NAPT.md):
+ * stock carries NO /32 host routes. Both directions are plain connected-subnet
+ * routes with process=RT_ARP, and each host is resolved through that route's ARP
+ * window at a DETERMINISTIC row: window_base + host octet. Stock's live table:
+ *   192.168.0.2 -> ARP row   2   (LAN window base   0, field ARPStart=0 )
+ *   172.16.0.2  -> ARP row 258   (WAN window base 256, field ARPStart=32)
+ * ARPStart/ARPEnd are 6-bit fields in units of 8 rows, so field 0..31 = raw
+ * 0..255 (LAN) and field 32..63 = raw 256..511 (WAN).
+ *
+ * The nexthop's ARP pointer is a SEPARATE, small window: stock's /proc prints it
+ * as nextHop([5:0]20), i.e. a 6-bit index, and stock uses 20. We previously used
+ * 64, which does not fit 6 bits — it truncates to 0 and sends the ASIC to an empty
+ * ARP[0], so egress resolution never completes even though the L4 NAPT row matches
+ * and reloads its age. That is the shape of the bug we were chasing. */
+#define GW_ARP_NH_IDX		20	/* nexthop -> ARP row (must fit 6 bits) */
+#define GW_ARP_WIN_LAN		0	/* raw ARP row base for the LAN /24  */
+#define GW_ARP_WIN_WAN		256	/* raw ARP row base for the WAN /24  */
+
+/* Resolve one host inside its subnet route's ARP window: L2 entry for the MAC,
+ * then ARP[window + host octet] -> that L2 entry. Caller holds rtl865x_hal_lock. */
+static void gw_arp_add_host(u32 ip, const u8 *mac, bool wan)
+{
+	struct asic_arp a;
+	u32 l2 = gw_write_l2(mac, wan ? l2_mask_wan : l2_mask_lan, wan ? 1 : 0);
+
+	memset(&a, 0, sizeof(a));
+	a.valid = 1;
+	a.nextHop = l2;
+	a.aging = 0x1f;			/* max; TEACR bit0 freezes L2/ARP aging anyway */
+	rtl865x_asic_write_entry(ASIC_TYPE_ARP,
+				 (wan ? GW_ARP_WIN_WAN : GW_ARP_WIN_LAN) + (ip & 0xff),
+				 &a, true);
+}
 static bool gw_wan_is_pppoe;
 static u16  gw_wan_pppoe_sid;
 u32 rtl865x_wan_extip = RTL865X_WAN_EXTIP;
@@ -469,10 +692,13 @@ int rtl865x_set_wan_extip(u32 ip)
 
 	if (!ip)
 		return -EINVAL;
+	/* Shadow-compare must include the byte-order mode: otherwise flipping
+	 * a byte-order change at runtime was silently ignored because the IP is
+	 * unchanged (the knob is gone now; the value is always numeric). */
 	if (ip == rtl865x_wan_extip)
 		return 0;
 	memset(&ext, 0, sizeof(ext));
-	ext.externalIP = htonl(ip);	/* NETWORK order: the ASIC rewrites the src to this
+	ext.externalIP = ip;	/* NETWORK order: the ASIC rewrites the src to this
 					 * on-wire value (vendor nat.c:690 ext_host.ip=htonl);
 					 * host order = a byte-swapped src that the peer drops.
 					 * internalIP=0 + isOne2One=0 => many-to-one */
@@ -544,19 +770,19 @@ static u32 gw_wan_nexthop_prog_locked(void)
 	struct asic_arp a;
 	u32 wan_nh;
 
-	wan_nh = gw_write_l2(gw_wan_gw_mac, 0x3f, 1);	/* WAN peer -> trunk (VID1), fid1 */
+	wan_nh = gw_write_l2(gw_wan_gw_mac, l2_mask_wan, 1);	/* WAN peer -> trunk (VID1), fid1 */
 
 	memset(&a, 0, sizeof(a));
 	a.valid = 1;
 	a.nextHop = wan_nh;		/* ARP -> the L2 entry (peer MAC, trunk egress) */
 	a.aging = 0x1f;			/* max; TEACR bit0 freezes L2/ARP aging anyway */
-	rtl865x_asic_write_entry(ASIC_TYPE_ARP, 64, &a, true);
+	rtl865x_asic_write_entry(ASIC_TYPE_ARP, GW_ARP_NH_IDX, &a, true);
 
 	if (gw_wan_is_pppoe)
 		rtl865x_pppoe_set(0, gw_wan_pppoe_sid);
 
 	memset(&nh, 0, sizeof(nh));
-	nh.nextHop = 64;		/* ARP index (nexthop derefs ARP, NOT L2) */
+	nh.nextHop = GW_ARP_NH_IDX;	/* ARP index (nexthop derefs ARP, NOT L2) */
 	nh.dstVid = GW_VID_WAN;
 	nh.IPIndex = 0;			/* -> extIP[0] : the source-rewrite IP linkage */
 	nh.type = gw_wan_is_pppoe ? 1 : 0;	/* 1 = PPPoE encap via PPPoEIndex */
@@ -592,12 +818,65 @@ int rtl865x_wan_set_nexthop(const u8 *gw_mac, bool is_pppoe, u16 pppoe_sid)
 	return 1;
 }
 
+/* (Re)program the LAN egress chain from the shadows: client L2 entry (trunk
+ * egress, LAN fid0) + the client /32 host route pointing at it. Returns the L2
+ * index (gw_prog dumps it). Caller holds rtl865x_hal_lock. */
+static u32 gw_lan_nexthop_prog_locked(void)
+{
+	struct asic_l3route_l2 hr;
+	u32 lan_nh;
+
+	lan_nh = gw_write_l2(gw_lan_client_mac, l2_mask_lan, 0);	/* -> trunk (LAN vid2), fid0 */
+
+	/* STOCK PARITY: no /32 host route. The client is reached through route[2]
+	 * (LAN /24, process=RT_ARP, window 0..31 => raw 0..255) via its ARP row.
+	 * The /32 that used to live at route[1] was process=1(L2), which this
+	 * driver's own notes record as TRAPPING to the CPU rather than forwarding —
+	 * so it actively prevented the offload it was meant to enable. Route[1] is
+	 * now left invalid, exactly as stock leaves it. */
+	gw_arp_add_host(gw_lan_client_ip, gw_lan_client_mac, false);
+	{
+		struct asic_l3route_l2 dead;
+		memset(&dead, 0, sizeof(dead));
+		rtl865x_asic_write_entry(ASIC_TYPE_L3_ROUTING, 1, &dead, true);
+	}
+	return lan_nh;
+}
+
+/* Point the LAN egress at @mac / @ip (the client this flow returns to).
+ * Shadow-compared exactly like rtl865x_wan_set_nexthop(): 0 = already live,
+ * 1 = identity changed and the chain was reprogrammed (caller must flush its
+ * per-flow NAPT rows, since rows programmed under the old identity would send
+ * replies to the wrong MAC), <0 error. Caller holds rtl865x_hal_lock.
+ *
+ * NOTE this is a single-client shadow, matching the single /32 route slot the
+ * ASIC map reserves. With several active LAN clients it will thrash: each new
+ * client reprograms the entry and flushes, so flows re-offload continuously and
+ * effectively fall back to software. That is CORRECT but not yet optimal -- the
+ * general fix is to drive the /24 process=ARP route's ARP window (route[2],
+ * ARPStart=0/ARPEnd=31) with one ARP row per client instead of a single /32.
+ * Doing that right needs its own measurement pass; this change first makes the
+ * single-client case actually work on any network rather than on one bench. */
+int rtl865x_lan_set_nexthop(const u8 *mac, u32 ip)
+{
+	if (!mac || !ip)
+		return -EINVAL;
+	if (!memcmp(gw_lan_client_mac, mac, 6) && gw_lan_client_ip == ip)
+		return 0;
+
+	memcpy(gw_lan_client_mac, mac, 6);
+	gw_lan_client_ip = ip;
+	gw_lan_nexthop_prog_locked();
+	pr_info("rtl865x gw: LAN client -> %pM %pI4h\n", gw_lan_client_mac,
+		&gw_lan_client_ip);
+	return 1;
+}
+
 static int gw_prog(struct seq_file *m, void *v)
 {
 	struct asic_vlan vlan;
 	struct asic_netif nif;
 	struct asic_l3route_arp rt;
-	struct asic_l3route_l2 hr;
 	struct asic_l3route_nxthop nr;
 	u32 mac_hi, mac_lo, rb[8];
 	u32 mscr0, mscr1, hal_nh, tiny_nh;
@@ -656,6 +935,27 @@ static int gw_prog(struct seq_file *m, void *v)
 	REG32(GW_ALECR) |= GW_ALECR_EN_TTL1 | GW_ALECR_EN_PPPOE;	/* TTL-- on route + M7.2 PPPoE
 									 * auto-encap/decap (idle unless a
 									 * nexthop is type=1) */
+	/* ★ FFCR unknown-unicast policy. This driver never wrote FFCR at all, leaving
+	 * EnUnkUC2CPU at whatever the loader/reset left. The vendor's gateway mode
+	 * explicitly CLEARS it (rtl865x_asicL2.c:6966: FFCR &= ~EN_UNUNICAST_TOCPU) so an
+	 * unknown-DA unicast FLOODS rather than being punted to the CPU.
+	 *
+	 * Why this matters here: a routed frame whose egress L2 lookup misses becomes an
+	 * unknown-DA unicast. With the trap bit set the ASIC resolves its destination
+	 * portlist to the CPU and gives up on forwarding — which is exactly the signature
+	 * we measure (hwFwd=0, isOriginal=1, extPortList=8 i.e. the CPU port) even though
+	 * the L3 route and L4 NAPT row both matched.
+	 *
+	 * NOTE the historical warning above rtl865x_start(): v13/v14/v16 found that
+	 * ENABLING the FFCR/SWTCR0 trap-to-CPU path corrupted kernel RAM. That was about
+	 * turning traps ON; this clears one, which moves traffic away from the CPU, and
+	 * the unknown-multicast bit is left untouched. */
+	if (ffcr_unkuc_to_cpu == 0)
+		REG32(GW_FFCR) &= ~GW_FFCR_UNKUC_2CPU;
+	else if (ffcr_unkuc_to_cpu > 0)
+		REG32(GW_FFCR) |= GW_FFCR_UNKUC_2CPU;
+	pr_err("rtl865x gw: FFCR=%08x (unkUC2CPU knob=%d)\n", REG32(GW_FFCR), ffcr_unkuc_to_cpu);
+
 	REG32(GW_CSCR) |= GW_CSCR_L3L4CHK;			/* ★ recompute L3/L4 cksum after TTL-- / NAT rewrite (else the peer drops it) */
 	/* SWTCR0: VLAN netdec + mcast-internal as before, PLUS explicit NAPT policy
 	 * (the old read-modify-write PRESERVED the reset defaults of bits 0-2 — i.e.
@@ -698,7 +998,16 @@ static int gw_prog(struct seq_file *m, void *v)
 	 * before pinging (confound #5), and confirm the box is actually up (confound #4).
 	 * The R6 signal is the eth0.1 rx_packets delta during a sustained inbound transfer:
 	 * ~0 = hardware reverse engaged, ~every packet = still CPU-trapped. */
-	REG32(SWTCR0) = ((REG32(SWTCR0) & ~(3u << 16) & ~(3u << 3) & ~0x7u) | (0x3Fu << 5))
+	/* MultiPortModeP is SWTCR0[13:5] = {Ext3..Ext1, Port0..Port5}, "Internal(0) /
+	 * External(1)" per the vendor header. The old code ORed 0x3F in without ever
+	 * clearing the field, so it could only ever SET bits — ports 0-5 permanently
+	 * External and the ext ports permanently Internal. Under Fork A that was
+	 * inert (only the trunk existed); with the jacks now real ports and the CPU on
+	 * ext port 8 it is a live per-port setting, so clear the whole field and drive
+	 * it from a param to make it sweepable at runtime. */
+	REG32(SWTCR0) = ((REG32(SWTCR0) & ~(3u << 16) & ~(3u << 3) & ~0x7u
+			  & ~(0x1FFu << 5))
+			 | (((u32)multiport_mode & 0x1FFu) << 5))
 		      | (1u << 14) | (1u << 2)
 		      | ((u32)(wan_route_mode & 3u) << 3);
 	REG32(GW_MACCR1) |= (1u << 0);	/* M6.6 PORT0_ROUTER_MODE: put the trunk (SoC port0) in router mode — test whether it permits the L3-routed U-turn (egress back out the single trunk) that source-port filtering otherwise blocks, since hal(LAN)+tiny(WAN) are both behind port0 */
@@ -734,13 +1043,17 @@ static int gw_prog(struct seq_file *m, void *v)
 		acl_permit[7] = 0x07000000u;
 		for (a = 0; a < 256; a++)
 			rtl865x_asic_write_entry(ASIC_TYPE_ACL_RULE, a, acl_permit, true);
-		/* spec-acl-encoding: program DACLRCR (net-decision-miss default ACL range) — the
-		 * vendor's rtl865x_setDefACLForNetDecisionMiss (asicCom.c) writes
-		 * start_in | end_in<<7 | start_eg<<14 | end_eg<<21. We never set it; if a routed
-		 * packet's net-decision misses (VLAN->netif), the ASIC uses this range, and an
-		 * unprogrammed/DROP default kills forward before the permit is consulted. Point it
-		 * at ingress [0..3] (permit) + egress [253..253] (permit) so a miss still permits. */
-		REG32(GW_DACLRCR) = 0u | (3u << 7) | (253u << 14) | (253u << 21);
+		/* DACLRCR — the ACL range used when the net-decision (VLAN->netif) MISSES.
+		 * ★ The field offsets here were WRONG. This used 7-bit fields
+		 * (0 / <<7 / <<14 / <<21); on the 8197F they are 8-bit:
+		 *   ACLI_STA [7:0], ACLI_EDA [15:8], ACLO_STA [23:16], ACLO_EDA [31:24]
+		 * (sdk rtl865xc_asicregs.h:1600-1607). The old value 0x1FBF4180 therefore
+		 * decoded as ingress [128..65] and egress [191..31] — both INVERTED ranges
+		 * (start > end), which no rule can satisfy even though all 256 ACL slots
+		 * hold a catch-all permit.
+		 * The vendor writes PERMIT_ALL (253) into all four fields
+		 * (rtl865x_netif.c:3130 -> rtl865x_asicCom.c:371), i.e. 0xFDFDFDFD. */
+		REG32(GW_DACLRCR) = (253u << 0) | (253u << 8) | (253u << 16) | (253u << 24);
 
 		/* spec-acl-encoding RULE 2 — the WAN-ingress reverse-NAPT trigger. A frame whose
 		 * dst-MAC == our WAN MAC (00:e0:4c:81:96:c3) is "destined to me"; install a MAC-match
@@ -768,16 +1081,16 @@ static int gw_prog(struct seq_file *m, void *v)
 	 * sends them TAGGED up the trunk. So gw_prog does NOT touch P0GMIICR/PCRP0
 	 * or the 8367S far-end, and does NOT rewrite the SoC VLAN/PVID here
 	 * (rtl865x_start owns them coherently).
-	 * #14 UPDATE: the trunk/RGMII regs below (all except GW_CFG_CPUC_TAG) are
-	 * now programmed by rtl819x-eth.c rtl865x_start()'s FLASHED-boot cold path
-	 * (full init_97f_8367r replica, gated on PITCR bit0==0 / trunk_cold_force).
-	 * GW_CFG_CPUC_TAG (P0GMIICR bits[26:25]) stays deliberately UNUSED — Fork A.
-	 * The (void) markers remain because THIS file still only documents them.
+	 * UPDATE: the trunk/RGMII regs below are now ALL programmed by rtl819x-eth.c
+	 * rtl865x_start()'s cold replica, which runs unconditionally (Fork A and its
+	 * PITCR/trunk_cold_force gating are gone). GW_CFG_CPUC_TAG (P0GMIICR
+	 * bits[26:25]) is now SET there, not unused. The (void) markers remain
+	 * because THIS file still only documents them.
 	 */
 	(void)GW_PCRP0; (void)GW_P0GMIICR; (void)GW_CFG_CPUC_TAG;
 	(void)GW_PITCR; (void)GW_MACCR; (void)GW_MACCR1; (void)GW_EXTPCR0; (void)GW_RGMII_PAD;
 	(void)vlan;
-	seq_printf(m, "L3 rc=%d  MSCR %08x -> %08x  ALECR=%08x SWTCR0=%08x SWTCR1=%08x(live,pre-set)  (Fork A: VID-based, NO CPU-tag)\n",
+	seq_printf(m, "L3 rc=%d  MSCR %08x -> %08x  ALECR=%08x SWTCR0=%08x SWTCR1=%08x(live,pre-set)  (CPU-tag: per-jack ports)\n",
 		   rc, mscr0, mscr1, REG32(GW_ALECR), REG32(SWTCR0), REG32(SWTCR1));
 	{	/* spec-acl-encoding bisect: DACLRCR + ACL slot 0 (should be the catch-all permit
 		 * w7=0x07000000). If forward still drops with EN_IN_ACL on, this shows whether the
@@ -814,19 +1127,24 @@ static int gw_prog(struct seq_file *m, void *v)
 	{
 		static const u8 BC[6]  = { 0xff,0xff,0xff,0xff,0xff,0xff };
 		static const u8 CPM[6] = { 0x00,0x00,0x0a,0x00,0x00,0x0f };
-		/* Fork A: no CPU-tag, so jacks are NOT SoC ports 0-4 — everything external
-		 * is behind the trunk. Flood to physical ports 0-5 (0x3f; the trunk is one
-		 * of them, the VID picks the jack) + CPU port6 (extMember bit0=0x1, NOT the
-		 * CPU-tag model's port8). */
-		gw_write_l2_full(BC,  0x3f, 0x1, 1, 0, 1);	/* bcast   FID0 -> ports0-5 + CPU6 */
-		gw_write_l2_full(CPM, 0x00, 0x1, 1, 0, 1);	/* CPU-MAC FID0 (trap to CPU6) */
-		gw_write_l2_full(CPM, 0x00, 0x1, 1, 1, 1);	/* CPU-MAC FID1 (trap to CPU6) */
-		gw_write_l2_full(BC,  0x3f, 0x1, 1, 1, 1);	/* bcast   FID1 -> ports0-5 + CPU6 */
+		/* CPU-tag mode: the jacks ARE SoC ports 0-4, so use stock's exact
+		 * values — member 0x1f = jacks 0-4, extmember 0x4 = CPU port 8 — which
+		 * is what the comment above records from the live stock l2 dump.
+		 * (Fork A had to flood 0x3f/ext 0x1: everything external sat behind the
+		 * single trunk and the VID picked the jack.) */
+		u32 bc_mbr = 0x1f;
+		u32 ext    = 0x4;
+
+		gw_write_l2_full(BC,  bc_mbr, ext, 1, 0, 1);	/* bcast   FID0 -> jacks + CPU */
+		gw_write_l2_full(CPM, 0x00,   ext, 1, 0, 1);	/* CPU-MAC FID0 (trap to CPU) */
+		gw_write_l2_full(CPM, 0x00,   ext, 1, 1, 1);	/* CPU-MAC FID1 (trap to CPU) */
+		gw_write_l2_full(BC,  bc_mbr, ext, 1, 1, 1);	/* bcast   FID1 -> jacks + CPU */
 	}
-	/* 4b. L2 nexthop entries for the two peers (row forced by MAC/FID hash). Fork
-	 * A: egress the TRUNK (flood ports 0-5; the routed frame carries the egress
-	 * netif's VID so the 8367S sends it to the right jack). CPU excluded (no loop). */
-	hal_nh  = gw_write_l2(GW_MAC_HALLAN,  0x3f, 0);	/* hal  -> trunk (LAN vid2), fid0 */
+	/* 4b. L2 nexthop entries for the two peers (row forced by MAC/FID hash). Egress
+	 * the peer's REAL jack (l2_mask_lan / l2_mask_wan above), which is what lets the
+	 * ASIC hardware-forward a routed unicast. CPU excluded (no loop). (Fork A had to
+	 * flood ports 0-5 and let the egress netif's VID pick the jack downstream.) */
+	hal_nh  = gw_lan_nexthop_prog_locked();	/* LAN client L2 + /32 route, from the live shadows */
 	tiny_nh = gw_wan_nexthop_prog_locked();	/* M7.2: WAN peer chain (L2 + ARP[64] + nexthop[0..1]
 						 * + PPPoE row) from the live shadows; boot default
 						 * = tiny -> trunk (WAN vid1), fid1, ethernet */
@@ -875,15 +1193,18 @@ static int gw_prog(struct seq_file *m, void *v)
 	nr.internal = 0;			/* external dest => LAN->WAN direction detected */
 	nr.nhStart = 0; nr.nhNum = 0;		/* nexthop[0..1] (nhNum=0 encodes 2), nhStart<<1=0 */
 	nr.nhNxt = 0; nr.nhAlgo = 2; nr.IPDomain = 0;	/* nhAlgo=2 matches stock (STOCK-TABLES.md:42); nhAlgo=0 hung the fabric */
-	rtl865x_asic_write_entry(ASIC_TYPE_L3_ROUTING, 0, &nr, true);
+	if (wan_peer_host_route) {
+		rtl865x_asic_write_entry(ASIC_TYPE_L3_ROUTING, 0, &nr, true);
+	} else {
+		/* stock parity: leave idx0 invalid; the WAN /24 (idx3, process=RT_ARP)
+		 * resolves the peer through its ARP window and the extIP entry drives NAT */
+		struct asic_l3route_nxthop dead0;
+		memset(&dead0, 0, sizeof(dead0));
+		rtl865x_asic_write_entry(ASIC_TYPE_L3_ROUTING, 0, &dead0, true);
+	}
 
-	memset(&hr, 0, sizeof(hr));
-	hr.ipAddr = 0xC0A80002;			/* 192.168.0.2/32 = hal (LAN) */
-	hr.ipMask = gw_asicmask(32); hr.valid = 1; hr.process = 1; hr.netif = 0;
-	hr.internal = 1;			/* ★ source-side = INTERNAL (else this more-specific
-						 * /32 overrides the LAN /24 and mis-zones hal as external) */
-	hr.nextHop = hal_nh;
-	rtl865x_asic_write_entry(ASIC_TYPE_L3_ROUTING, 1, &hr, true);
+	/* ROUTE1 (the LAN client /32 -> its L2 entry) is written by
+	 * gw_lan_nexthop_prog_locked() above, from the live client shadows. */
 	/* /24 direct routes (process=ARP), most-specific-after the /32s. */
 	memset(&rt, 0, sizeof(rt));
 	rt.ipAddr = 0xC0A80000;			/* 192.168.0.0/24 -> LAN */
@@ -1023,7 +1344,7 @@ static int gw_prog(struct seq_file *m, void *v)
 	nr.process = 5;				/* NAPT NextHop -> outbound NAT */
 	nr.internal = 0;
 	nr.nhStart = 0; nr.nhNum = 0;		/* nexthop[0..1], same proven group as route[0] */
-	nr.nhNxt = 0; nr.nhAlgo = 2; nr.IPDomain = 0;
+	nr.nhNxt = 0; nr.nhAlgo = 2; nr.IPDomain = 6;	/* stock: IPDOMAIN(6) */
 	rtl865x_asic_write_entry(ASIC_TYPE_L3_ROUTING, 6, &nr, true);
 	nr.ipAddr = 0;				/* 0.0.0.0 (bottom half / true default) */
 	rtl865x_asic_write_entry(ASIC_TYPE_L3_ROUTING, 7, &nr, true);
@@ -1061,8 +1382,10 @@ static int gw_prog(struct seq_file *m, void *v)
 		 * then re-run `cat /proc/rtl865x_gw`. Low prior for fixing reverse-NAPT
 		 * (both bits are about trapping, not the NAPT lookup) but it is the last
 		 * stock-vs-port divergence left in this register. */
-		REG32(SWTCR1) = (1u << 9) | (1u << 13)
-			      | (swtcr1_trap_bits ? ((1u << 10) | (1u << 11)) : 0u);	/* 0x2200 = EnL4WayH(bit9) | L4EnHash1(bit13):
+		REG32(SWTCR1) = (swtcr1_override >= 0) ? (u32)swtcr1_override
+			      : ((1u << 9) | (1u << 13)
+			         | (sel_cpu_reason ? (1u << 8) : 0u)
+			         | (swtcr1_trap_bits ? ((1u << 10) | (1u << 11)) : 0u));	/* 0x2200 = EnL4WayH(bit9) | L4EnHash1(bit13):
 						 * VENDOR-EXACT. rtl865x_nat_init() enables enhanced-hash1
 						 * (_rtl8651_enableEnhancedHash1, nat.c:173) AND 4-way hash
 						 * (rtl865x_setNatFourWay(TRUE), nat.c:1779; "default enable in
@@ -1079,7 +1402,20 @@ static int gw_prog(struct seq_file *m, void *v)
 						 * WAN with a bogus nexthop MAC (00:00:00:00:00:10). */
 
 		memset(&ext, 0, sizeof(ext));
-		ext.externalIP = htonl(rtl865x_wan_extip);	/* NETWORK order (ASIC rewrite). M7.2 PPPoE: the LIVE masquerade IP
+		/* ★ NUMERIC. This used to hardcode htonl(), so gw_prog
+		 * re-byte-swapped the row on every /proc read and silently undid the
+		 * runtime knob — which is why flipping extip_htonl "never changed the
+		 * register" and the experiment stayed inconclusive for so long.
+		 *
+		 * This field is what decides NAPT-EXTERNAL (NPE) classification: the
+		 * classifier scans the ext/int-IP table for a row with
+		 * valid=1 && externalIP==dip && isLocalPublic==0 && isOne2One==0
+		 * (naptModel/l34Model modelLookupNaptIpAddr). On a miss the WAN IP falls
+		 * through to the RP default, and _RTL8651_PROC[RP][RP] = RT_RR = plain
+		 * WAN-side L3 routing — i.e. reverse NAPT is never even attempted, which
+		 * is precisely what the live capture showed (WAN-ingress replies decoding
+		 * to src=RP(19), dst=RP(19) instead of dst=NPE). */
+		ext.externalIP = rtl865x_wan_extip;	/* M7.2 PPPoE: the LIVE masquerade IP
 							 * (rtl865x_set_wan_extip tracks the ppp0
 							 * local IP; = RTL865X_WAN_EXTIP for a
 							 * static WAN). Using the static constant
@@ -1138,6 +1474,7 @@ static int gw_prog(struct seq_file *m, void *v)
 	if (!(rb[0] & 1) || ((rb[0] >> 1) & 0xFFF) != GW_VID_LAN) ok = 0;
 	rtl865x_asic_read_entry(ASIC_TYPE_NETIF, 1, rb);
 	if (!(rb[0] & 1) || ((rb[0] >> 1) & 0xFFF) != GW_VID_WAN) ok = 0;
+	gw_regdump(m);
 	seq_printf(m, "RESULT %s (gateway datapath %s in ASIC; MSCR=%08x)\n",
 		   ok ? "PASS" : "FAIL", ok ? "LIVE" : "not-live", REG32(MSCR));
 	pr_info("rtl865x gw: config programmed, netif readback %s\n", ok ? "PASS" : "FAIL");

@@ -207,6 +207,10 @@ extern u32 rtl865x_wan_extip;	/* live extIP[0] (host order); boot = RTL865X_WAN_
 int rtl865x_set_wan_extip(u32 ip);
 int rtl865x_pppoe_set(u32 idx, u16 sid);	/* raw PPPoE session-table row write */
 int rtl865x_wan_set_nexthop(const u8 *gw_mac, bool is_pppoe, u16 pppoe_sid);
+/* Learn the LAN client this flow returns to (MAC + IP) into the ASIC's LAN
+ * egress chain. Same contract as rtl865x_wan_set_nexthop: 0 = unchanged,
+ * 1 = reprogrammed (caller flushes rows), <0 error. */
+int rtl865x_lan_set_nexthop(const u8 *mac, u32 ip);
 
 /* M7: re-run the full gw scaffolding program (== `cat /proc/rtl865x_gw` minus
  * the dump) from kernel context after a fabric full reset. Takes
