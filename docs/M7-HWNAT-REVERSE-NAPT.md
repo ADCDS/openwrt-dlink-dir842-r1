@@ -1318,15 +1318,19 @@ Decoded from the netif words already captured, no boot cycle needed:
 **Egress ACL is already stock-identical (253..253) on both netifs** — that candidate is
 eliminated without touching the box.
 
-⚠ Loose end: the WAN ingress range decodes as **[2..6]**, not stock's **[4..6]**, i.e.
-overlapping the LAN netif's [0..3]. The end field is certain (the driver's own readback
-uses `(w2>>7)&0xff` and both ends match: 3 and 6); the *start* field boundary is my
-assumption (`w2 & 0x7f`), and it is right for NETIF0 (0) but yields 2 for NETIF1 where
-the driver comments claim 4. So this is either a real overlap bug or my field boundary
-is wrong — unresolved, and worth 10 minutes with the vendor struct next session.
+✓ **Loose end RESOLVED — there is no bug.** My first decode was wrong: `inACLStart` is
+a **split field**, `(inACLStartH << 1) | inACLStartL`, with the low bit living in the
+top bit of word1 (`struct asic_netif`, rtl865x_asichal.h:151-152). Decoding it properly:
 
-It cannot be the whole story: hardware forwarding fails in the **upload** direction too,
-which ingresses on the LAN netif whose range [0..3] is correct. But an overlapping WAN
-ingress range would let WAN-ingress frames match LAN ACL slots, which is exactly the
-kind of thing that traps a reply, so it should be settled before the cascade work rather
-than left as a variable.
+    NETIF0 (LAN vid2): ingressACL[0..3]  egressACL[253..253]
+    NETIF1 (WAN vid1): ingressACL[4..6]  egressACL[253..253]
+    stock:             LAN ingress 0-3,  WAN ingress 4-6, both egress 253-253
+
+**Our netif ACL configuration is byte-for-byte what stock uses**, ingress and egress,
+on both interfaces. Nothing to chase here, and nothing for the next session to spend
+ten minutes on — the whole netif ACL block is eliminated as a candidate.
+
+That is now eight candidates eliminated by measurement or decode, and it further
+narrows the remaining difference to the switch/port model itself: the tables this port
+programs are correct, they are simply being programmed into a fabric that has only one
+port to work with.
