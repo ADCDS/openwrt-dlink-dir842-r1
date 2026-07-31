@@ -647,6 +647,13 @@ configure it. **That assumption is false.** The vendor firmware, on this exact s
 with `hw_nat=1` and its own driver, offloads **forward only**. There is no hidden
 register, table or bit we were missing — there is no reverse offload to find.
 
+> ⚠ **Read the "R6 REVISITED" section at the end of this file before acting on what
+> follows.** This part is correct about *where* packets go and survived a deliberate
+> falsification attempt. But the throughput conclusions drawn from it below are NOT
+> supported: the test ran on a **100 Mb/s** WAN link, so it cannot bound gigabit at all.
+> The live question turned out to be **CPU cost per packet**, and this port is ~6× more
+> expensive than it should be (≈1 packet per NAPI poll).
+
 This retroactively explains every negative in this investigation and vindicates them:
 the encoding was proven identical to stock because it *is* identical; the four
 falsified candidates were falsified because none of them could have worked; B1–B4 had
@@ -673,3 +680,110 @@ Stock removed, OpenWrt factory image written back and byte-verified, box boots f
 NOR, and RAM-boot verified at 0% loss on LAN 56 B, LAN 1400 B and NAT.
 ⚠ Note for future reflashes: write the **factory** image, not `sysupgrade` — the loader
 rejects the latter with `magic not found!!!` (it lacks the D-Link boot magic from M7.1).
+
+---
+
+## ★★★ R6 REVISITED (2026-07-30, later): "stock does not offload" was measured
+## correctly but OVER-GENERALISED — the gigabit question is a CPU-COST question
+
+Prompted by the operator's objection: *"if stock does not offload, how was I able to
+download at gigabit speed on stock?"* That is a fair challenge and it exposes a real
+error of reasoning in the section above.
+
+### 1. What the stock measurement does and does not establish
+
+It establishes **where** packets go (CPU, not ASIC). It says **nothing** about **how
+fast** they can go — and the section above slid from the first to the second when it
+implied there was nothing left worth chasing.
+
+⚠ The stock test ran over the bench WAN link, which negotiates **100 Mb/s** (documented
+at line 169 of this file). At ~94 Mbit the CPU sees ~7,800 pkt/s, which is a trivial
+load. **Gigabit was never observable on this bench**, so the measurement cannot
+contradict a gigabit field observation.
+
+### 2. An attempt to falsify the stock result — FAILED, so the result stands
+
+Hypothesis: stock's WAN was configured **by hand** (`ifconfig eth1` + a hand-written
+`iptables MASQUERADE`), bypassing stock's own config path, so the ASIC's **extIP table**
+was never programmed — and inbound classification needs it. That would make the trap an
+artifact of the bench, not a property of the silicon.
+
+**Refuted by the vendor source.** `rtl865x_nat.c:678`, first statement of
+`rtl865x_addNaptConnection()`:
+
+    /* Make sure natip */
+    retval = rtl865x_getIpIdxByExtIp(htonl(naptEntry->extIp), &ipidx);
+    if(retval != SUCCESS)
+        return RTL_EINVALIDINPUT;
+
+Adding a NAPT mapping **hard-fails** if the external IP is absent from the ASIC IP
+table — no row is added in *either* direction. Stock's forward path was **fully
+offloaded** (10 CPU packets for 63 MB), so rows *were* being added, so the lookup
+succeeded, so **the extIP table was populated**. The bench did not cripple the test.
+
+(Also checked and dead: `/proc/localPublic`, the one path that calls `rtl865x_addIp`,
+is written by **no file in the stock rootfs** — verified with positive controls — and
+the `localPublic` symbol is absent from the stock kernel. So that is not the mechanism
+either.)
+
+**⇒ Stock genuinely traps every inbound packet. The R6 finding is sound.**
+
+### 3. The reconciliation: trapping is only slow if the trap is EXPENSIVE
+
+Both statements can be true at once — *stock traps every download packet* and *stock
+downloads fast* — provided the per-packet CPU cost is low. So the real question was
+never "hardware or not", it is **cost per packet**. Measured today, on this port:
+
+| run | load | result |
+|---|---|---|
+| bounded 20 MB download (WAN→LAN, `iperf3 -R -n 20M`) | 83.8 Mbit/s, 2.00 s | **107 jiffies busy (2 sys + 105 softirq) = 1.07 s CPU ⇒ 53.5% of one core** |
+| 30 s download (line rate while healthy) | ~94 Mbit/s | 295 jiffies busy over the window; same ballpark (~59%) |
+
+`HZ=100` confirmed self-consistently (602 jiffies over a ~6 s window).
+
+**Extrapolation:** 53.5% CPU at 83.8 Mbit ⇒ 0.64 %CPU per Mbit ⇒ **~600% of one core at
+940 Mbit**. This port's CPU-forwarded download path therefore saturates at roughly
+**155–160 Mbit/s**. Gigabit is ~6× out of reach *for this port*.
+
+Since stock traps the same packets on the same silicon and (per the operator) does reach
+gigabit, **stock's trapped path must be several times cheaper per packet than ours.**
+
+### 4. Root cause of our per-packet cost: the RX path does ~1 packet per NAPI poll
+
+Straight from the driver's own instrumentation during a line-rate download:
+
+    poll#56320  t=284.633  rx_pkts=45745
+    poll#62464  t=285.296  rx_pkts=52752
+    -> 6,144 polls for 7,007 packets = 1.14 packets per NAPI poll
+
+and every trace line reads `rx_done=0` or `rx_done=1` — **each poll returns after at
+most one packet.** A healthy NAPI drains 8–64 per poll. We are paying full poll/IRQ
+overhead per packet, which is exactly the kind of constant factor that explains a ~6×
+gap against a vendor driver doing the same logical work.
+
+### 5. What this changes
+
+- ✗ **Wrong target:** "find the missing hardware reverse-NAPT bit." It does not exist —
+  section above proved that, and this section did not disturb it.
+- ✓ **Right target:** make the CPU path cheap. Fix RX batching first (≤1 packet/poll is
+  a bug, not a tuning knob). That is a pure-software win, needs no ASIC secrets, and is
+  worth up to ~6× on the download path.
+- The earlier note that stock's forward offload is far more complete (~0.2 vs 147 CPU
+  pkt/MB) still stands as a second, independent win.
+
+### 6. ⚠ R2 IS NOT CLOSED — the wedge reproduces under forwarded load
+
+While measuring the above, a sustained 30 s forwarded download **wedged the entire
+datapath**: host→box *and* box→tiny both went to 100% loss, while the CPU stayed
+responsive on serial. All three bench guards were verified intact at the time (host
+IPv4, host route, tiny's `br0` address), so this is not confound #4/#5.
+
+- `runout=0` and `USEDDSC` 18–28 throughout — **not** descriptor exhaustion, so this is
+  a different failure from the classic large-frame RX wedge.
+- **`fabric_reset=3` did NOT recover it.** The reset ran to completion and reprogrammed
+  everything (`recovery level 3 complete`, `netif readback PASS`) and the path stayed
+  dead. Only a power-cycle/RAM-boot recovered it.
+
+R2's gate passed on **box-terminating ICMP**, and its own write-up flagged the coverage
+gap ("not bidirectional *forwarded* saturation ... that scenario is still untested").
+That untested scenario is the one that fails. **R2 should be reopened.**
