@@ -1334,3 +1334,49 @@ That is now eight candidates eliminated by measurement or decode, and it further
 narrows the remaining difference to the switch/port model itself: the tables this port
 programs are correct, they are simply being programmed into a fabric that has only one
 port to work with.
+
+## RE breadcrumbs for the cascade work — method proven, scope measured
+
+The stock kernel's kallsyms are compressed, so there are no symbols — but **plain
+disassembly works**, and it already produced one exact result (the
+`0x890/0x891/0x892 = 1<<cpu_port` decode at `0x801c7394`). Do not be put off by the
+absence of `cpu_tag`/`cascade` strings; the configuration is there, it is just
+unnamed.
+
+Setup for anyone continuing:
+
+    decompress: LZMA stream at file offset 0x3818 of mtd3-kernel.bin
+                -> 5,987,929 bytes, load base 0x80000000
+                (md5 of the region flashed/verified: d3a35f39...)
+    disassemble: mipsel-openwrt-linux-musl-objdump -D -b binary \
+                 -m mips:isa32r2 -EL --adjust-vma=0x80000000 stock-vmlinux.bin \
+                 --start-address=... --stop-address=...
+    ★ MIPS delay slots: the instruction AFTER each `jal` belongs to the call --
+      that is where the register number lands (li a0,0x890 etc.). Read them as
+      arguments, not as the next statement.
+
+Immediate-reference scan already done (register number as an addiu/ori immediate):
+
+| reg | sites |
+|---|---|
+| 0x0890 | 27, incl. `0x801c7018`, `0x801c73a0`, `0x801cf350`, `0x801cf378` |
+| 0x0891 | 4, incl. `0x801c7024`, `0x801c73b0`, `0x801cf3a0` |
+| 0x1219 | 3: `0x801c74a0`, `0x801c918c`, `0x801c91b4` |
+| 0x121a | 15, incl. `0x801c7478`, `0x801c74b4`, `0x801c90e8`, `0x801c910c`, `0x801c9138`, `0x801c9164` |
+
+⚠ The `0x801c90d4`-`0x801c9170` cluster is **accessor wrappers**, not configuration:
+each is a 4-instruction shim calling a generic field helper with the register in `a0`
+and a bit offset in `a1` — e.g. `0x801c90d4` -> `0x801c8e00(0x121a, 0, val)` and
+`0x801c911c` -> `0x801c8f00(0x121a, 56, val)`. The *values* live in their callers, so
+recovering the cascade setup means walking the call graph up through several accessor
+layers without symbols. That is the real cost of this task, and it is why it is scoped
+as its own project rather than a fix: the technique is proven and cheap per-site, the
+graph is what is large.
+
+Suggested order for the next session:
+1. `0x801c7018`/`0x801c7024` — the *other* 0x890/0x891 cluster, likely the paired
+   read/enable next to the write already decoded.
+2. `0x801c74a0` — the 0x1219 site inside the same init function as the decoded writes,
+   i.e. the EXT1 config applied in the same breath as the CPU-port narrowing.
+3. Then the SoC side: how netif members come to be jacks `0 1 2 3` / `4` with CPU at
+   extension port 8, which is the half that Fork A actually lacks.
