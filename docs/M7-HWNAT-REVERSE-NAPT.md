@@ -1306,3 +1306,27 @@ The clean way to settle it during the cascade work: once jacks are visible as se
 SoC ports, a LAN→WAN flow becomes a genuinely two-port case. If offload engages then,
 the inference was right. If it still does not, the remaining difference is elsewhere
 and the stock tables captured above are the reference to diff against next.
+
+### Closed for free: egress ACL already matches stock — and one loose end on WAN ingress
+
+Decoded from the netif words already captured, no boot cycle needed:
+
+    NETIF0 (LAN vid2): w2=0xfefe8180 -> ingressACL[0..3]  egressACL[253..253]
+    NETIF1 (WAN vid1): w2=0xfefe8302 -> ingressACL[2..6]  egressACL[253..253]
+    stock:              LAN ingress 0-3, WAN ingress 4-6, BOTH egress 253-253
+
+**Egress ACL is already stock-identical (253..253) on both netifs** — that candidate is
+eliminated without touching the box.
+
+⚠ Loose end: the WAN ingress range decodes as **[2..6]**, not stock's **[4..6]**, i.e.
+overlapping the LAN netif's [0..3]. The end field is certain (the driver's own readback
+uses `(w2>>7)&0xff` and both ends match: 3 and 6); the *start* field boundary is my
+assumption (`w2 & 0x7f`), and it is right for NETIF0 (0) but yields 2 for NETIF1 where
+the driver comments claim 4. So this is either a real overlap bug or my field boundary
+is wrong — unresolved, and worth 10 minutes with the vendor struct next session.
+
+It cannot be the whole story: hardware forwarding fails in the **upload** direction too,
+which ingresses on the LAN netif whose range [0..3] is correct. But an overlapping WAN
+ingress range would let WAN-ingress frames match LAN ACL slots, which is exactly the
+kind of thing that traps a reply, so it should be settled before the cascade work rather
+than left as a variable.
