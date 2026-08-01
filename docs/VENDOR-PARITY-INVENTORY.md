@@ -1,5 +1,12 @@
 # Vendor firmware inventory & parity checklist — DIR-842 R1
 
+> ℹ️ **REFERENCE INVENTORY, partly superseded.** The file-level facts here are still
+> the best record of what the stock firmware contains. Some *conclusions* have since
+> been overturned — notably §161's "stock does 600–800 Mbit is NOT evidenced": stock
+> was later measured at **913/923 Mbit**, and this port now reaches **891/896**. See
+> [`RETRACTIONS-AND-METHOD.md`](RETRACTIONS-AND-METHOD.md) before trusting a
+> conclusion in this file.
+
 Source of truth for the R1–R6 parity work. Everything here is **read from files on
 disk**, not inferred, unless marked *(inferred)*.
 

@@ -125,7 +125,7 @@ files/  (path-preserving overlay onto the OpenWrt tree)
     base-files/etc/uci-defaults/99-dir842-m5
                   First-boot gateway config: LAN eth0.2 192.168.0.1 + WAN eth0.1
                   static 172.16.0.1/24 (both MACs pinned to the ASIC netifs),
-                  the 8367S VID cascade, fw3 flow_offloading_hw, and a 5 GHz WPA2
+                  the 8367S VID cascade, fw3 flow_offloading_hw, and an OPEN (unencrypted) 5 GHz
                   AP on the RTL8822BE (pinned wlan MAC — efuse is blank).
     base-files/etc/{rc.local,sysctl.d/30-hwnat.conf}
                   Boot: re-apply the 8367S config + program the ASIC datapath;

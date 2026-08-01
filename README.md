@@ -28,8 +28,10 @@ CPU ~99.7 % idle. As far as we know this is the first working mainline OpenWrt
 > **The safe way to try this is the initramfs image**, which is XMODEM'd into RAM and
 > **never writes flash** — a power-cycle discards it entirely. Do that first.
 >
-> Default images have **no root password** and a **placeholder WiFi PSK**
-> (`ChangeMeNow123`). Set both before putting this on a real network.
+> Default images have **no root password**, a **placeholder 2.4 GHz PSK**
+> (`ChangeMeNow123`), and — most importantly — the **5 GHz AP is OPEN**
+> (`encryption='none'`, `99-dir842-m5:188`). A default image broadcasts an
+> unencrypted network. Fix all three before this touches a real network.
 
 ## Status
 
@@ -63,7 +65,7 @@ CPU ~99.7 % idle. As far as we know this is the first working mainline OpenWrt
   bench (one host on a LAN jack, one Pi on the WAN jack). Treat it as pre-production.
 - **Blank WiFi efuse** — this board keeps no RTL8822BE calibration on-chip, so TX power
   is uncalibrated (works, but not "loud"); handled in software (default RFE + pinned MAC).
-- **Download throughput is variable** (~810–906 Mbit) with 1–2 k TCP retransmits per
+- **Download throughput is variable** (**681–906 Mbit** across runs) with 1200–2500 TCP retransmits per
   10 s run. The router is not the bottleneck (CPU 0.3 %, zero interface errors), but the
   loss source is not yet identified. Take a range, not a single run.
 - The ASIC's inbound NAPT row is **full-cone**: a masquerade source-port collision
@@ -102,15 +104,24 @@ VENDOR_SDK=/path/to/rtl819x-sdk ./build.sh
 Without `VENDOR_SDK` the build still succeeds — you get wired, the switch, NAT,
 hardware offload and 5 GHz. You lose only the 2.4 GHz radio.
 
+> ⚠️ **The `VENDOR_SDK=` path is not yet verified end to end.** A file audit
+> (see [`docs/WIFI-DUAL-BAND.md`](docs/WIFI-DUAL-BAND.md), open item 5) found that
+> `g3-rtl8192cd-4.14-port.patch` is diffed against `package/kernel/rtl8192cd/…`
+> while `build.sh` unpacks to `target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/`
+> and applies `-p1`, so the paths may not meet; and `g3-rtl8192cd-portflags.mk`
+> still carries `CONFIG_BAND_5G_ON_WLAN0=y` / `CONFIG_PHY_EAT_40MHZ=y`. Expect to
+> fix the patch level and those flags. The 2.4 GHz radio itself is known-good on
+> hardware — it is the *published build path* for it that is unproven.
+
 **Build environment:** the ggbruno fork is from 2020 (kernel 4.14 / gcc 8.4). Build on a
 **Debian 11 (bullseye)-era** host or container; very new toolchains fail the old host
 tools.
 
-```bash
-docker run --rm -v "$PWD":/build -w /build debian:bullseye \
-  bash -c 'apt-get update && apt-get install -y build-essential git file \
-    libncurses-dev zlib1g-dev gawk gettext unzip python3 rsync wget && ./build.sh'
-```
+The exact, working container recipe — a non-root `builder` user (OpenWrt refuses to
+build as root), `python2`, and the full host-tool list — is in
+[`docs/BENCH.md`](docs/BENCH.md) §7. Use that Dockerfile rather than a one-liner;
+earlier revisions of this README shipped a `debian:bullseye` one-liner that ran as
+root with `python3` only and does not complete a build.
 
 ## Installing
 

@@ -1,8 +1,14 @@
 # M7 — Large-frame CPU-RX wedge (breaks DHCP, SSH, any large box-terminating packet)
 
-**Platform:** D-Link DIR-842 rev C1 — RTL8197F SoC (MIPS 24Kc), ported vendor
+> ⚠️ **HISTORICAL JOURNAL.** Written during the M7 diagnostic; the root cause and
+> fix below still stand, but the surrounding platform description does not — the
+> port now boots from NOR, not only from RAM. Read [`README.md`](README.md) first.
+
+**Platform:** D-Link DIR-842 **rev R1** — RTL8197F SoC (MIPS 24Kc), ported vendor
 two-ring pkthdr+mbuf CPU-port DMA engine (`drivers/net/ethernet/rtl819x/`),
-mainline OpenWrt 4.14, RAM-booted initramfs on the bench.
+mainline OpenWrt 4.14. (An earlier revision of this file said "rev C1"; that was
+wrong and dangerous — the C1 is a **MediaTek** board and this work would brick it.
+Only the RTL8197F rev R1 is in scope.)
 
 **Status: RESOLVED — self-healing fix committed + HW-validated** (openwrt tree
 `ba13a96` driver, `e5737c5` dhcp-broadcast). Root cause = an RX-FIFO drain-lag

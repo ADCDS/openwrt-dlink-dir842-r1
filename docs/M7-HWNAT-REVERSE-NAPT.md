@@ -1,8 +1,18 @@
 # M7 — DIR-842 (RTL8197F) hardware NAT: forward DONE, reverse-NAPT investigation
 
-**Status:** LAN→WAN forward hardware-NAT **works, corruption-free** (first on
-mainline). WAN→LAN **reverse**-NAPT is root-caused through 7 layers to **two
-isolated remaining blockers**. This doc is the continuation map.
+> ⚠️ **HISTORICAL INVESTIGATION LOG — the problem described below is SOLVED.**
+> Written 2026-07-17 … 07-31 *while the answer was unknown*. Both directions now
+> hardware-offload at line rate: **891 Mbit up / 896 Mbit down at 0.0 % of payload
+> bytes through the CPU**. The answer, and the root cause, are in
+> [`HWNAT-OFFLOAD.md`](HWNAT-OFFLOAD.md) — read that first.
+>
+> This file is kept because the *reasoning* and above all the **retractions** are
+> the most valuable record in the project. Several conclusions below were later
+> inverted; the important ones are marked ✗ RETRACTED in place.
+
+**Original status line (superseded):** LAN→WAN forward hardware-NAT works,
+corruption-free; WAN→LAN reverse-NAPT root-caused to two isolated remaining
+blockers. Both are closed — see `HWNAT-OFFLOAD.md`.
 
 Openwrt tree branch `Realtek`. Relevant commits (newest first):
 `9562db2` (asichal: corruption fix + ingress-ACL infra), `3cd6ec0` (hwnat: reverse
@@ -39,7 +49,12 @@ hal enp3s0 (LAN 192.168.0.2/24, no default route, static route 172.16.0.0/24 via
 A LAN→WAN TCP/UDP reply (tiny → extIP 172.16.0.1:G) must be reverse-NAPT'd
 (dst extIP:G → LAN-client 192.168.0.2:intPort) and routed out the LAN. It wasn't.
 
-1. **Byte order (85f01c9)** — ASIC hashes/keys the ON-WIRE (network-order) fields;
+1. **Byte order (85f01c9)** — ✗ **RETRACTED, AND EXACTLY INVERTED.** The ASIC keys
+   and hashes on **NUMERIC (host-order)** values, not on-wire network order. The
+   vendor's `htonl()` at the ASIC boundary is `ntohl()` in disguise, because its
+   `naptEntry` fields are raw `__be32` straight from conntrack. Fixed in
+   `8d315c331b`; see `rtl819x_hwnat.c` and `HWNAT-OFFLOAD.md`. The original
+   (wrong) claim was: ASIC hashes/keys the ON-WIRE (network-order) fields;
    host order wrote rows at byte-swapped indices → 100% miss. Fixed → forward matches.
 2. **NAPT action bits** — isStatic=1, dedicate=0, TCPFlag 0x3/0x2 (vendor nat.c:1133-42).
 3. **Inbound VERIFICATION row (3cd6ec0)** — the reply row is NOT a copy of the outbound
@@ -367,7 +382,9 @@ this port. Specifically confirmed:
   `offset_i = extPort & 0x3f`, `selIP_i = (extPort>>6) & 0xf`,
   `selE_i = very & 0x3ff` where `very = HASH(proto|2, htonl(remIp), htons(remPort),0,0)`.
   TCPFlag 3 outbound / 2 inbound. This is exactly what the port already programs.
-- All hash inputs are NETWORK order; `gw_napt_hash1()` is a verbatim correct
+- ✗ **RETRACTED (first clause only):** "All hash inputs are NETWORK order" is the
+  inverse of the truth — they are **NUMERIC/host order** (`8d315c331b`). The rest of
+  this bullet stands: `gw_napt_hash1()` is a verbatim correct
   transcription of `rtl8651_naptTcpUdpTableIndex` @`0x8019df88`.
 - There is **no** separate NAPTR table, no per-flow ACL entry, no per-entry
   inbound-enable bit, and no per-row nexthop in use (`NHIDX`/`NHIDXValid` are 0).

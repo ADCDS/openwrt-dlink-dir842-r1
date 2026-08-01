@@ -1,6 +1,11 @@
 # M7 — RGMII Trunk L2-Forwarding Fix (8367S EXT1 ↔ SoC-P0)
 
-**Date:** 2026-07-17 · **Status:** ✅ FIXED for loader/RAM boots (verified on HW); flashed-boot cold path still open.
+> ⚠️ **SUPERSEDED** by [`SWITCH-AND-DATAPATH.md`](SWITCH-AND-DATAPATH.md), which
+> absorbs this material. Kept for the original diagnostic detail.
+> The "flashed-boot cold path still open" caveat below is **closed**: the cause was
+> `CPUICR1` bit 1 `CF_NIC_LITTLE_ENDIAN` (commit `07fa6a8627`).
+
+**Date:** 2026-07-17 · **Original status:** ✅ FIXED for loader/RAM boots (verified on HW); flashed-boot cold path still open.
 
 This was the "final blocker" for the DIR-842 gateway: L2 **data** did not forward across
 the RTL8197F↔RTL8367S RGMII trunk in either direction, even though every link reported
