@@ -53,10 +53,12 @@ CPU ~99.7 % idle. As far as we know this is the first working mainline OpenWrt
   | **offload on** | **891 up / 896 down Mbit** | **0.0 %** | **0.3 %** |
 
   Runtime toggle: `echo 1 > /sys/module/rtl819x/parameters/hwnat`.
-- **5 GHz WiFi** — on-board **RTL8822BE** (PCIe) via **rtw88**, WPA2 AP. RTL8197F +
+- **5 GHz WiFi** — on-board **RTL8822BE** (PCIe) via **rtw88**, AP mode (⚠ the
+  shipped config is **open** — see the warning above; WPA2 itself works). RTL8197F +
   PCIe WiFi had never worked in OpenWrt before (see *Engineering notes*).
 - **2.4 GHz WiFi** — the on-SoC WMAC via the vendor `rtl8192cd` driver (WEXT, in-kernel
-  WPA2-PSK). **Requires the vendor SDK at build time** — see *Building*.
+  WPA2-PSK). Works on the hardware; ⚠ **this repo publishes no build path for it yet** —
+  the port ships only as a patch-record. See *Building*.
 - **Both radios concurrently**, both bridged into `br-lan`.
 
 **Known limitations**
@@ -89,29 +91,22 @@ Output in `openwrt/bin/targets/realtek/rtl8197f/`:
 | `*-squashfs-factory.bin` | NOR flash via the loader's `AUTOBURN`. **Replaces stock.** |
 | `*-squashfs-sysupgrade.bin` | NOR flash via `sysupgrade`. **Replaces stock.** |
 
-**2.4 GHz needs the vendor SDK.** Two pieces of that path are Realtek SDK sources that
-this repo deliberately does **not** redistribute — ~37 `include/net/rtl/*` headers and
-the ~120-file `rtl8192cd` driver, all carrying *"Copyright Realtek Semiconductor
-Corporation. All rights reserved."* with no license grant, and none of them present in
-the pinned ggbruno base. What *is* shipped here is our own work against them:
-`g4-rtl-headers-4.14-port.patch` and `g3-rtl8192cd-4.14-port.patch`, plus the
-BSD-licensed `net80211` headers.
+**2.4 GHz: the radio works on the hardware, but this repo publishes no build path
+for it yet.** The on-SoC WMAC needs two pieces of Realtek SDK source that this repo
+deliberately does **not** redistribute — ~37 `include/net/rtl/*` headers and the
+~120-file `rtl8192cd` driver, all carrying *"Copyright Realtek Semiconductor
+Corporation. All rights reserved."* with no license grant, and none of them present
+in the pinned ggbruno base. Our port of them ships as a readable record —
+`g3-rtl8192cd-4.14-port.patch` (driver) and `g4-rtl-headers-4.14-port.patch`
+(headers) — but is **not wired into `build.sh`**: the driver patch only applies to
+the exact vintage of the tree it was developed on, and wiring it to a raw SDK
+import instead was verified broken by dry-run. An earlier revision of this repo
+advertised a `VENDOR_SDK=` flag for exactly that; it was withdrawn rather than
+shipped broken. What reintroducing it would need is recorded in
+[`docs/WIFI-DUAL-BAND.md`](docs/WIFI-DUAL-BAND.md) §9 item 5.
 
-```bash
-VENDOR_SDK=/path/to/rtl819x-sdk ./build.sh
-```
-
-Without `VENDOR_SDK` the build still succeeds — you get wired, the switch, NAT,
-hardware offload and 5 GHz. You lose only the 2.4 GHz radio.
-
-> ⚠️ **The `VENDOR_SDK=` path is not yet verified end to end.** A file audit
-> (see [`docs/WIFI-DUAL-BAND.md`](docs/WIFI-DUAL-BAND.md), open item 5) found that
-> `g3-rtl8192cd-4.14-port.patch` is diffed against `package/kernel/rtl8192cd/…`
-> while `build.sh` unpacks to `target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/`
-> and applies `-p1`, so the paths may not meet; and `g3-rtl8192cd-portflags.mk`
-> still carries `CONFIG_BAND_5G_ON_WLAN0=y` / `CONFIG_PHY_EAT_40MHZ=y`. Expect to
-> fix the patch level and those flags. The 2.4 GHz radio itself is known-good on
-> hardware — it is the *published build path* for it that is unproven.
+The build gives you wired, the switch, NAT, hardware offload and 5 GHz; you lose
+only the 2.4 GHz radio.
 
 **Build environment:** the ggbruno fork is from 2020 (kernel 4.14 / gcc 8.4). Build on a
 **Debian 11 (bullseye)-era** host or container; very new toolchains fail the old host

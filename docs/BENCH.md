@@ -705,7 +705,10 @@ bench result.
 **Always use `grep -ra` / `grep -a` under the SDK.** This caused missed findings **twice** —
 most expensively, the CPU-tag reference implementation (`rtl865x_asicL2.c` and
 `rtl8367r/rtk_api.c`) sat there unfound for the whole project. **This matters to any reader of
-this repo**, because the 2.4 GHz build path points you at that SDK (`VENDOR_SDK=`, `build.sh:59-73`).
+this repo** who obtains that SDK to work on the 2.4 GHz port — this repo no longer publishes
+a build-time import of it (the `VENDOR_SDK=` flag was withdrawn as broken,
+[`WIFI-DUAL-BAND.md`](WIFI-DUAL-BAND.md) §9 item 5), but the patches and journals point into
+that tree throughout.
 
 ### 11.14 `uci-defaults` scripts are SOURCED, not exec'd
 
@@ -717,6 +720,10 @@ legitimate "keep me, retry next boot" idiom.
 `uci_delete()` asserts `ptr->s` (`list.c:590`) so it fails, and `uci -q batch` swallows the
 error and continues. `99-dir842-m5:158` intends to wipe the whole package; **`radio1` survives
 BY ACCIDENT.** If uci ever changes that behaviour, `radio1` disappears.
+✅ **Confirmed on-box 2026-08-02** (scratch-config test: `uci: Invalid argument`, exit 1, all
+four wifi sections survive), and the line now carries a KEEP-AS-IS comment in the script
+itself so nobody "repairs" it into a working wipe. Full resolution:
+[`WIFI-DUAL-BAND.md`](WIFI-DUAL-BAND.md) §9 item 6.
 
 ### 11.16 `wifi up radio0` at runtime hung the box hard
 

@@ -673,9 +673,14 @@ resolving to `int` in one translation unit (the failure appears around
 `8192cd_proc.o`). The driver defines neither `current_thread_info` nor `thread_info`,
 so something it pulls in is shadowing it indirectly.
 
-**The complete working flag set** (preserved verbatim as `g3-rtl8192cd-portflags.mk`
-in this repo — it is the real deliverable, since reconstructing it took the whole
-session):
+**The complete working flag set** (the real deliverable, since reconstructing it took
+the whole session — it was preserved verbatim as `g3-rtl8192cd-portflags.mk`;
+**[2026-08-02: that file has been REMOVED from the repo** — it froze this G3-era set,
+which the final build later corrected on three flags (`CONFIG_BAND_2G_ON_WLAN0`,
+`PHY_EAT_40MHZ` off, `CONFIG_RTL_COMAPI_CFGFILE=y` — the "three silent failures" of
+[`WIFI-DUAL-BAND.md`](WIFI-DUAL-BAND.md) §4), and nothing ever included it. The
+working set lives in the `+` side of `g3-rtl8192cd-4.14-port.patch`'s `Makefile`
+hunks; see WIFI-DUAL-BAND §9 item 5.]**):
 
 | # | flag | why |
 |---|---|---|
@@ -745,8 +750,10 @@ all, which matches the symptom exactly and would explain why neither `-I` nor
 Stop reasoning about the include graph from outside; that has now failed on this file
 five times. Read what the preprocessor actually did.
 
-Everything else is banked: `g3-rtl8192cd-portflags.mk` in this repo holds the complete
-working flag set, and the traps above are recorded so none are rediscovered.
+Everything else is banked: the complete working flag set is recorded in the `+` side
+of `g3-rtl8192cd-4.14-port.patch`'s `Makefile` hunks (`g3-rtl8192cd-portflags.mk`,
+which froze an earlier iteration of it, was removed 2026-08-02 — see the note above),
+and the traps above are recorded so none are rediscovered.
 
 #### R4/G4 — hardware precondition CONFIRMED on silicon
 

@@ -33,10 +33,13 @@ Stock drives *both* radios with `rtl8192cd` and never loads rtw88/mac80211 at al
 **wlan0 = 2.4 GHz (vendor), wlan1 = 5 GHz (rtw88)** — the opposite. Any stock log,
 `iwpriv` recipe or MIB name you copy across bands will land on the wrong radio.
 
-**2.4 GHz requires the vendor SDK at build time** (`VENDOR_SDK=`, see
-[`../README.md`](../README.md)). Without it the build still succeeds and you lose *only*
-2.4 GHz — wired, switch, NAT, hardware offload and 5 GHz are unaffected
-(`build.sh:58-77`).
+**This repo currently publishes no build path for 2.4 GHz.** `build.sh` gives you
+everything else — wired, switch, NAT, hardware offload, 5 GHz. The port of the vendor
+driver ships as `g3-rtl8192cd-4.14-port.patch` (+ `g4-rtl-headers-4.14-port.patch`
+for the headers) — a record of the work, not a wired-in build step: an earlier
+`VENDOR_SDK=` raw-SDK import was verified broken by dry-run 2026-08-02 and withdrawn
+(§9 item 5 records the evidence and what reintroducing it needs). The 2.4 GHz radio
+on the bench box was built from the live working tree, not through any import.
 
 `rtl8192cd` is **100 % real GPL-style source, no blobs** — 279 `.c` + 363 `.h`,
 539 038 LoC of `.c`, `MODULE_LICENSE("GPL")`; the only binaries are chip firmware. It is
@@ -532,29 +535,53 @@ Notes that save time:
    rejected. It works today only because the seed sets `country='1'`
    (`09_wireless-dualband-dir842:65`). The mac80211 side, independently, uses `country='BR'`
    (`99-dir842-m5:167`) — correct there, and *not* interchangeable.
-5. ⚠ **Publish drift in the 2.4 GHz build path — found while writing this doc, not yet
-   fixed.** Read from the files, **not** confirmed by running a build:
-   - `g3-rtl8192cd-portflags.mk:105,109` still ship **`CONFIG_BAND_5G_ON_WLAN0=y`** and
-     **`CONFIG_PHY_EAT_40MHZ=y`**, and the file has no `CONFIG_RTL_COMAPI_CFGFILE`. Those
-     are precisely the three settings §4 identifies as wrong or missing. The live build
-     tree's `…/rtl8192cd/Makefile:189,224,233` has `CONFIG_BAND_2G_ON_WLAN0=y`,
-     `PHY_EAT_40MHZ` commented **off**, and `CONFIG_RTL_COMAPI_CFGFILE=y`.
-   - Nothing in the live tree includes a `portflags.mk`, and no such file exists there —
-     `build.sh:73` copies one in, but the corrected flags live in the driver's `Makefile`.
-   - `g3-rtl8192cd-4.14-port.patch` is diffed against **`package/kernel/rtl8192cd/…`** (the
-     8devices layout it was developed on), while `build.sh:66-72` unpacks the SDK to
-     **`target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/`** and applies it
-     with `-p1`. Those paths do not meet. (`g4-rtl-headers-4.14-port.patch` *is* diffed
-     against the destination layout and does line up.)
+5. ⚠→✅ **The `VENDOR_SDK=` build path was WITHDRAWN 2026-08-02 — verified broken by
+   dry-run, then removed rather than shipped broken.** `build.sh` no longer accepts
+   `VENDOR_SDK=`; the two port patches stay in the repo root as the record of the
+   work. The dry-run evidence is kept here so a future reintroduction does not start
+   from zero:
+   - **Wrong patch base, fatal on its own.** `g3-rtl8192cd-4.14-port.patch` is rooted
+     at `package/kernel/rtl8192cd/…` — the 8devices layout it was developed on, which
+     its own diff headers record — and that path exists nowhere in the pinned base,
+     so `patch -p1` matches nothing. (`g4-rtl-headers-4.14-port.patch` *is* rooted at
+     the destination layout and lines up.)
+   - **Re-rooted onto the SDK layout it still fails: 15 hunks across nine files.**
+     `Makefile` 4/4, `Kconfig` 1/1, `8192cd_cfg.h` 2/2, `8192cd_dfs.c`,
+     `8192cd_util.c` — all "(different line endings)", the SDK files are CRLF — plus
+     real content drift in `8192cd_osdep.c` 2/4, `8192cd_rx.c`, `8192cd_tx.c`,
+     `wifi.h` 2/4. The Makefile hunks are the load-bearing ones: they carry
+     `CONFIG_BAND_2G_ON_WLAN0=y` and `CONFIG_RTL_COMAPI_CFGFILE=y`.
+   - **The SDK layout lacks sources the ported Makefile requires**: `8192cd_11v.*`
+     and `8192cd_debug.c` (both referenced by the working Makefile), plus
+     `phydm_soml.*`, `8192cd_smart_roaming.c`, `btcoexist/`, and three
+     `WlanHAL/Data/8197F/` PHY/TXPWR tables (live driver dir: 128 top-level entries;
+     SDK: 119). The patch itself creates only `8192cd_owrt_bsp.c` and
+     `Makefile.vendor` — the other missing files have no source to come from.
+   - **`g3-rtl8192cd-portflags.mk` was deleted with the feature.** Its flags
+     (`CONFIG_BAND_5G_ON_WLAN0=y`, `CONFIG_PHY_EAT_40MHZ=y`, no
+     `CONFIG_RTL_COMAPI_CFGFILE`) were the G3-era set that §4's three silent failures
+     later corrected; nothing ever included it, and the working flag set is already
+     recorded in the `+` side of the g3 patch's `Makefile` hunks. Ground truth
+     remains the live build tree's `…/rtl8192cd/Makefile:189,224,233`.
 
-   Net: a `VENDOR_SDK=` build from this repo, as published, is unlikely to reproduce the
-   working 2.4 GHz driver. Reconcile against the live tree before publishing.
-6. ⚠ **uci-defaults ordering hazard — reasoned from the code, never observed failing.**
-   `/etc/init.d/boot:10-16` runs `/etc/uci-defaults/*` in `ls` order, so `09_` → `10_` →
-   `99-`. `99-dir842-m5:158` starts with **`delete wireless`**, which on a genuinely virgin
-   overlay would wipe the `radio1` stanza `09_` had just seeded — and `09_` self-deletes on
-   success, so it would not re-seed. The boot that verified dual-band from a factory flash
-   notes *"/etc/uci-defaults was empty after the first boot"*, which implies `radio0`
-   already existed when `10_` ran, i.e. that boot was not virgin-overlay. **Unverified in
-   either direction.** Worth a deliberate wipe-and-boot test, or moving the 5 GHz seed out
-   of the `delete wireless` block.
+   Net: reintroducing 2.4 GHz reproduction needs the **matching 8devices-vintage
+   tree** the patch was developed against — or regenerating the patch against the
+   SDK layout with line endings normalised and the nine missing sources supplied —
+   not a path rewrite.
+6. ✅ **RESOLVED 2026-08-02 — the `delete wireless` ordering hazard does not exist;
+   measured on-box.** Whole-config `uci delete wireless` (no section name) is an
+   **invalid statement**: it returns `uci: Invalid argument` (exit 1) and deletes
+   nothing — inside the `uci -q batch` at `99-dir842-m5:158` it is a silent no-op.
+   Proven two ways: against a scratch config (`uci -c /tmp/ucitest` — all four wifi
+   sections survived it), and on the running box, where `99-`'s overlay whiteout
+   shows it ran yet `radio1` still carries `09_`'s exact seed. The earlier analysis
+   ("would wipe the radio1 stanza on a virgin overlay") assumed the statement worked;
+   it never has — [`BENCH.md`](BENCH.md) §11.15 had in fact already read the mechanism
+   from uci source (`uci_delete()` asserts `ptr->s`, `list.c:590`), and this
+   measurement confirms it on the box. ⚠ The corollary, now commented on the batch itself: do **not**
+   "repair" that line into a working per-section wipe — deleting `radio1` after `09_`
+   has self-deleted is exactly the 5 GHz-only trap the original analysis feared. If a
+   reset of the 5 GHz config is ever wanted there, target it:
+   `delete wireless.radio0` / `delete wireless.default_radio0`. (Residual and
+   low-stakes: whether `radio0` exists yet when `10_` first runs on a truly virgin
+   overlay — `10_`'s `exit 1` retry-next-boot guard covers both outcomes.)

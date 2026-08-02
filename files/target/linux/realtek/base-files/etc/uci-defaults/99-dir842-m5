@@ -154,6 +154,14 @@ esac
 # --- 5 GHz AP on the PCIe RTL8822BE (rtw88); 2x2 VHT80. hwmode 11a = 5 GHz on
 #     this 4.14-era netifd. country BR unlocks the UNII-1 channels for beaconing
 #     (world/'00' marks them no-IR). macaddr set because the efuse is blank. ---
+# ⚠ The batch below opens with `delete wireless` — KEEP AS-IS, it is a NO-OP and
+#   that is load-bearing. Whole-config `uci delete wireless` (no section) is an
+#   INVALID statement: "uci: Invalid argument", exit 1, deletes NOTHING — silent
+#   under `-q batch` (measured on-box 2026-08-02; docs/WIFI-DUAL-BAND.md §9 item 6).
+#   It has never wiped 09_'s radio1 seed. Do NOT "repair" it into working
+#   per-section deletes: 09_ self-deletes after seeding, so a real radio1 wipe here
+#   would ship a 5 GHz-only box on a virgin overlay. To reset only this radio:
+#   delete wireless.radio0 / delete wireless.default_radio0.
 uci -q batch <<'EOF'
 delete wireless
 set wireless.radio0='wifi-device'

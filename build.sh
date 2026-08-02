@@ -18,8 +18,13 @@
 # fail to build the old host tools. See README.md for a container one-liner.
 #
 #   ./build.sh                                  # wired + 5 GHz WiFi + HW NAT offload
-#   VENDOR_SDK=/path/to/rtl819x-sdk ./build.sh  # ...plus the 2.4 GHz radio
 #   PROFILE=~/dir842-profile ./build.sh         # ...plus a private pre-configured profile
+#
+# ⚠ 2.4 GHz is NOT built — this repo currently publishes no build path for that
+#   radio. The on-SoC WMAC needs the vendor rtl8192cd driver (not redistributable
+#   here) plus our port of it; the port is recorded in g3-rtl8192cd-4.14-port.patch
+#   but is deliberately not wired into this script. See README "Building" and
+#   docs/WIFI-DUAL-BAND.md §9 item 5 for why, and for what wiring it up would need.
 set -e
 cd "$(dirname "$0")"
 SELF_DIR="$(pwd)"
@@ -35,46 +40,19 @@ git checkout 8a0ccb93f3431bcf8f5c5d03d4acc2c8e442de67
 # Overlay DIR-842 device support + fixes (path-preserving)
 cp -a ../files/. .
 
-# ---- vendor SDK import (optional, needed ONLY for the 2.4 GHz radio) ----------
-#
-# ★ WHY THIS IS NOT VENDORED IN THIS REPO. Two pieces of the 2.4 GHz path come from
-# Realtek's RTL819x SDK and are NOT redistributable here:
-#
-#   include/net/rtl/*                  ~37 headers, each carrying
-#                                      "Copyright Realtek Semiconductor Corporation.
-#                                       All rights reserved." with NO license grant.
-#   drivers/net/wireless/rtl8192cd/*   the vendor WMAC driver (~120 files), same.
-#
-# Neither is present in the pinned ggbruno base, so shipping them here would mean
-# publishing proprietary source that is not otherwise public. What this repo DOES
-# ship is our own work against them: two port patches, plus the BSD-licensed
-# net80211 headers (which carry an explicit redistribution grant) in files/.
-#
-# Point VENDOR_SDK at an extracted RTL819x SDK tree containing
-# target/linux/realtek/files/{include/net/rtl,drivers/net/wireless/rtl8192cd}.
-#
-# WITHOUT it the build still succeeds and you get: wired ethernet, the RTL8367S
-# switch, WAN/LAN, NAT, hardware NAT offload, and the 5 GHz RTL8822BE radio (rtw88,
-# fully mainline). You lose ONLY the 2.4 GHz radio.
-if [ -n "${VENDOR_SDK:-}" ]; then
-	SDKF="$VENDOR_SDK/target/linux/realtek/files"
-	[ -d "$SDKF/include/net/rtl" ] || { echo "ERROR: VENDOR_SDK=$VENDOR_SDK has no target/linux/realtek/files/include/net/rtl" >&2; exit 1; }
-	[ -d "$SDKF/drivers/net/wireless/rtl8192cd" ] || { echo "ERROR: VENDOR_SDK has no .../drivers/net/wireless/rtl8192cd" >&2; exit 1; }
-	echo ">>> VENDOR_SDK=$VENDOR_SDK: importing vendor headers + rtl8192cd, then applying port patches"
-
-	DST=target/linux/realtek/files-4.14
-	mkdir -p "$DST/include/net" "$DST/drivers/net/wireless"
-	cp -a "$SDKF/include/net/rtl"                "$DST/include/net/rtl"
-	cp -a "$SDKF/drivers/net/wireless/rtl8192cd" "$DST/drivers/net/wireless/rtl8192cd"
-
-	# Our 4.14 port work on top of the pristine SDK sources.
-	patch -p1 --forward < "$SELF_DIR/g4-rtl-headers-4.14-port.patch"
-	patch -p1 --forward < "$SELF_DIR/g3-rtl8192cd-4.14-port.patch"
-	cp "$SELF_DIR/g3-rtl8192cd-portflags.mk" "$DST/drivers/net/wireless/rtl8192cd/portflags.mk"
-else
-	echo ">>> VENDOR_SDK not set: building WITHOUT the 2.4 GHz radio."
-	echo "    (wired, switch, NAT, hardware offload and 5 GHz rtw88 are all unaffected)"
-fi
+# ---- 2.4 GHz radio: no import path here (deliberate) ---------------------------
+# The 2.4 GHz WMAC needs Realtek's rtl8192cd driver (~120 files) plus ~37
+# include/net/rtl headers, all carrying "Copyright Realtek Semiconductor
+# Corporation. All rights reserved." with NO license grant and absent from the
+# pinned ggbruno base — so they are not redistributed in this repo. Our port of
+# them is recorded in g3-rtl8192cd-4.14-port.patch and
+# g4-rtl-headers-4.14-port.patch (repo root) but is NOT wired into this build:
+# the driver patch needs the 8devices-vintage tree it was developed on, and an
+# earlier raw-SDK import (VENDOR_SDK=) was verified broken by dry-run 2026-08-02
+# and withdrawn — docs/WIFI-DUAL-BAND.md §9 item 5 records the details and what a
+# working reintroduction needs. Everything else — wired ethernet, the RTL8367S
+# switch, WAN/LAN, NAT, hardware NAT offload, 5 GHz rtw88 — builds unaffected.
+echo ">>> NOTE: the 2.4 GHz radio is not built (no published build path yet — see README)."
 
 # ---- optional: private profile overlay (PROFILE=/path/to/profile) ----
 # Bakes a private, secret-bearing profile into the image as custom rootfs files

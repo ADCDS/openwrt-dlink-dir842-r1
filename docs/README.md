@@ -37,12 +37,12 @@ This is a **bench project**; it has never been run as a household gateway.
 
 **(a) You want to build and flash it.**
 
-1. [`../README.md`](../README.md) — the warnings first, then `build.sh`, `VENDOR_SDK=`,
-   and `tools/sign-dlink.py`.
+1. [`../README.md`](../README.md) — the warnings first, then `build.sh` and
+   `tools/sign-dlink.py`.
 2. [`BENCH.md`](BENCH.md) — serial is **38400 8N1** (`ramboot.sh:20`), how to catch the
    loader, `ramboot.sh` / `flash-nor.sh`, and power control.
-3. [`WIFI-DUAL-BAND.md`](WIFI-DUAL-BAND.md) — only if you need 2.4 GHz, which needs the
-   vendor SDK at build time.
+3. [`WIFI-DUAL-BAND.md`](WIFI-DUAL-BAND.md) — only if you care about 2.4 GHz, for which
+   this repo publishes no build path yet (the port ships as a patch-record; §9 item 5).
 
 **(b) You want to understand how the hardware offload was achieved.**
 
@@ -125,10 +125,11 @@ sequence of wrong models is the most reusable content in them.
   *"All rights reserved."* with no licence grant (e.g.
   `include/net/rtl/rtl865x_netif.h`: `Copyright c Realtek Semiconductor Corporation, 2008` /
   `All rights reserved.`).
-- **The ~37 `include/net/rtl/*` headers and the ~120-file `rtl8192cd` driver.** Imported at
-  build time via `VENDOR_SDK=` — see [`../README.md`](../README.md) and
-  [`../MANIFEST.txt`](../MANIFEST.txt). What ships here is our own work against them, as the
-  two port patches in the repo root.
+- **The ~37 `include/net/rtl/*` headers and the ~120-file `rtl8192cd` driver.** No import
+  path for them is published either — the earlier `VENDOR_SDK=` build flag was verified
+  broken and withdrawn 2026-08-02 ([`WIFI-DUAL-BAND.md`](WIFI-DUAL-BAND.md) §9 item 5) —
+  so the 2.4 GHz radio does not build from this repo. What ships is our own work against
+  them, as the two port patches in the repo root.
 - **The 8 MB stock NOR backup.** It is the only remaining copy of stock for a flashed unit;
   take your own before you flash.
 - **The raw serial boot log.**
