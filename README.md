@@ -153,6 +153,17 @@ This is published because it is what makes the port usable at all — it is a bo
 integrity check on a device you own, not a content-protection or anti-tamper measure,
 and without it the flash path cannot be reproduced by anyone else.
 
+### Going back to stock (fully reversible)
+
+Installing OpenWrt overwrites **only** the firmware region — your unit's bootloader, MAC
+address, and RF calibration live in separate flash partitions that no install step
+touches — so you can return to a pristine D-Link firmware at any time, and back to OpenWrt
+again, as often as you like. The restore is verified on hardware in both directions; from
+a running OpenWrt it is a single `mtd write - firmware` (the same operation stock's own
+updater performs). Full instructions, including where to get official D-Link firmware
+(this repo does **not** redistribute it) and the serial-console recovery route:
+**[docs/RESTORE-STOCK.md](docs/RESTORE-STOCK.md)**.
+
 ## Engineering notes
 
 - **PCIe / RTL8822BE bring-up.** The stock loader trains the PCIe link but OpenWrt's
