@@ -202,14 +202,21 @@ set wireless.default_radio0.macaddr="$DIR842_WIFI_MAC"
 commit wireless
 EOF
 
-# --- Force BROADCAST DHCP offers. The box->client UNICAST offer to a just-learned
-#     client MAC is not reliably delivered (box-originated cold-unicast, task #13 /
-#     the RGMII-trunk L2-lookup egress); broadcast offers DO get through. OpenWrt's
-#     `option dhcpbroadcast` only emits the tag-conditional
-#     `dhcp-broadcast=tag:needs-broadcast`, which does NOT cover normal clients — so
-#     drop the UNCONDITIONAL raw option into /etc/dnsmasq.conf, which dnsmasq reads
-#     as an extra conf-file (see dnsmasq.init). Ref: docs/M7-LARGE-FRAME-RX-WEDGE.md.
-grep -qx 'dhcp-broadcast' /etc/dnsmasq.conf 2>/dev/null || echo 'dhcp-broadcast' >> /etc/dnsmasq.conf
+# --- (R4, 2026-08-16) The old unconditional `dhcp-broadcast` dnsmasq option is GONE.
+#     It was a Fork-A-era workaround: the box->client UNICAST offer to a just-learned
+#     client MAC was not reliably delivered over the RGMII trunk (box-originated
+#     cold-unicast, task #13), so offers were forced broadcast. Both halves flipped
+#     since:
+#       * the workaround became UNNECESSARY — with CPU-tag mode + per-jack L2 a fresh
+#         random-MAC wired client leases fine on unicast offers (measured: macvlan
+#         netns, DISCOVER->OFFER->ACK->bound);
+#       * the workaround became HARMFUL — broadcast TX from the 5 GHz rtw88 AP is not
+#         delivered (client associates, unicast data flows, but every broadcast OFFER
+#         vanishes), so 5 GHz clients could never complete DHCP. Removing it fixed
+#         5 GHz DHCP on the spot (measured on-box).
+#     If a cold-unicast regression ever resurfaces, prefer `option dhcpbroadcast` per
+#     host or fix the L2 path — do NOT bring the blanket option back, it re-breaks
+#     5 GHz DHCP. Ref: docs/M7-LARGE-FRAME-RX-WEDGE.md (history), README (5 GHz).
 
 exit 0
 
