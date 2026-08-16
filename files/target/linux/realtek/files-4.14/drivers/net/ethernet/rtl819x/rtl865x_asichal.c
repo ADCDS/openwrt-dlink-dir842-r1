@@ -541,6 +541,18 @@ static bool gw_wan_is_pppoe;
 static u16  gw_wan_pppoe_sid;
 u32 rtl865x_wan_extip = RTL865X_WAN_EXTIP;
 
+/* ★ issue #1 (A-2) root cause: the WAN connected-route companion ARP entry
+ * (written in gw_prog's wan_connected_route block for a WAN-subnet peer) points
+ * at the WAN peer's L2 row, which is MAC-HASH-DERIVED and therefore MOVES when the
+ * peer MAC is learned. gw_prog set it once at boot from the boot-default MAC's
+ * hash row; the per-flow nexthop update relearns the real MAC into a DIFFERENT
+ * row and updates the nexthop-chain ARP (GW_ARP_NH_IDX) but left THIS companion
+ * pointing at the stale boot row -> offloaded forward frames to a WAN-subnet host
+ * egress with a dead dst MAC -> bulk TCP stalls while ICMP (CPU) and default-route
+ * (internet) offload are unaffected. gw_wan_nexthop_prog_locked() now re-points it
+ * on every reprogram. 0 = not programmed (no wan_connected_route peer). */
+static u32 gw_wan_conn_arp_idx;
+
 /* ---- M6.6 Phase 2: static NAPT (hardware NAT src-rewrite) ---- */
 #define ASIC_TYPE_EXT_INT_IP	5	/* external/WAN-IP table (16 entries, 3 words) — absent from hal.h's enum */
 #define SWTCR1			(ALE_BASE + 0x1C)	/* EnL4WayH(bit9)/L4EnHash1(bit13) — not in rtl819x_regs.h */
@@ -789,6 +801,22 @@ static u32 gw_wan_nexthop_prog_locked(void)
 	nh.PPPoEIndex = 0;		/* single WAN session -> PPPoE table row 0 */
 	rtl865x_asic_write_entry(ASIC_TYPE_NEXT_HOP, 0, &nh, true);
 	rtl865x_asic_write_entry(ASIC_TYPE_NEXT_HOP, 1, &nh, true);
+
+	/* ★ issue #1 fix: keep the WAN connected-route companion ARP pointing at the
+	 * CURRENT peer L2 row. wan_nh is MAC-hash-derived and moves when the peer MAC
+	 * is learned; without this the companion (set once by gw_prog from the boot
+	 * default) is left aimed at the stale boot row and same-subnet forward frames
+	 * die at egress. No-op at boot (idx still 0; gw_prog writes it explicitly a
+	 * few lines later); active on every per-flow relearn thereafter. */
+	if (gw_wan_conn_arp_idx) {
+		struct asic_arp ca;
+
+		memset(&ca, 0, sizeof(ca));
+		ca.valid = 1;
+		ca.nextHop = wan_nh;
+		ca.aging = 0x1f;
+		rtl865x_asic_write_entry(ASIC_TYPE_ARP, gw_wan_conn_arp_idx, &ca, true);
+	}
 	return wan_nh;
 }
 
@@ -1320,6 +1348,7 @@ static int gw_prog(struct seq_file *m, void *v)
 		wa.nextHop = tiny_nh;		/* L2 row for the WAN peer MAC */
 		wa.aging = 0x1f;
 		rtl865x_asic_write_entry(ASIC_TYPE_ARP, 256 + 2, &wa, true);
+		gw_wan_conn_arp_idx = 256 + 2;	/* issue #1: let per-flow relearn re-point it */
 	} else {
 		/* Phase 3 default: keep idx3 dead so a stale warm-reload entry cannot
 		 * shadow the process=5 NAPT route at idx0. */
@@ -1518,6 +1547,77 @@ static const struct file_operations gw_proc_fops = {
 /* M6.6 DIAGNOSTIC: read-only scan of all 1024 L4/NAPT rows — dumps every valid
  * entry (Phase 3: including the live 6-bit agingTime, so the conntrack-installed
  * rows and their decay can be watched from userspace). Does NOT reprogram. */
+/* A-2 INSTRUMENT: side-effect-free dump of the whole ASIC scaffolding state.
+ * The ONLY other place these tables were readable was the gw_prog readback --
+ * which PROGRAMS the datapath as a side effect of the read and therefore CURES
+ * the very fault being observed (issue #1). This entry reads and prints, and
+ * nothing else, so a stalled box can finally be observed. Prints every non-zero
+ * row raw; interpretation belongs to the stalled-vs-cured diff, not this code.
+ * NAPT rows are read THREE times each (the read path is latched -- see
+ * rtl865x_napt_read) so a read-engine lie shows up as unstable triplets. */
+static void dump_table(struct seq_file *m, const char *tag, int type, int lo, int hi)
+{
+	u32 rb[8];
+	int i;
+
+	for (i = lo; i <= hi; i++) {
+		memset(rb, 0, sizeof(rb));
+		if (rtl865x_asic_read_entry(type, i, rb))
+			continue;
+		if (!(rb[0] | rb[1] | rb[2] | rb[3]))
+			continue;
+		seq_printf(m, "  %s[%4d] %08x %08x %08x %08x\n",
+			   tag, i, rb[0], rb[1], rb[2], rb[3]);
+	}
+}
+
+static int gw_dump_show(struct seq_file *m, void *v)
+{
+	u32 rb[8], rc[8], rd[8];
+	int i;
+
+	mutex_lock(&rtl865x_hal_lock);
+	seq_printf(m, "[rtl865x scaffolding dump -- READ ONLY, no programming]\n");
+	seq_printf(m, "MSCR=%08x SWTCR0=%08x SWTCR1=%08x ALECR=%08x DACLRCR=%08x TEATCR=%08x FFCR=%08x\n",
+		   REG32(MSCR), REG32(SWTCR0), REG32(SWTCR1), REG32(GW_ALECR),
+		   REG32(GW_DACLRCR), REG32(GW_TEATCR), REG32(FFCR));
+	seq_printf(m, "SWTASR=%08x SWTAA=%08x L3ENG=%08x\n",
+		   REG32(SWTASR), REG32(SWTAA), REG32(ASIC_L3_ENGINE_CFG));
+	dump_table(m, "VLAN ", ASIC_TYPE_VLAN,       0, 8);
+	dump_table(m, "NETIF", ASIC_TYPE_NETIF,      0, 7);
+	dump_table(m, "ROUTE", ASIC_TYPE_L3_ROUTING, 0, 7);
+	dump_table(m, "EXTIP", ASIC_TYPE_EXT_INT_IP, 0, 15);
+	dump_table(m, "NH   ", ASIC_TYPE_NEXT_HOP,   0, 31);
+	dump_table(m, "PPPOE", ASIC_TYPE_PPPOE,      0, 7);
+	dump_table(m, "ARP  ", ASIC_TYPE_ARP,        0, 511);
+	dump_table(m, "L2   ", ASIC_TYPE_L2_SWITCH,  0, 1023);
+	/* NAPT triple-read: catch a lying/latched read engine in the act. */
+	seq_printf(m, "NAPT rows valid in any of 3 sweeps (idx: w1a/w1b/w1c):\n");
+	for (i = 0; i < 1024; i++) {
+		memset(rb, 0, sizeof(rb)); memset(rc, 0, sizeof(rc)); memset(rd, 0, sizeof(rd));
+		rtl865x_asic_read_entry(ASIC_TYPE_L4_TCP_UDP, i, rb);
+		rtl865x_asic_read_entry(ASIC_TYPE_L4_TCP_UDP, i, rc);
+		rtl865x_asic_read_entry(ASIC_TYPE_L4_TCP_UDP, i, rd);
+		if ((rb[1] | rc[1] | rd[1]) & 1)
+			seq_printf(m, "  NAPT[%4d] %08x/%08x/%08x w0=%08x w2=%08x%s\n",
+				   i, rb[1], rc[1], rd[1], rd[0], rd[2],
+				   (rb[1] != rc[1] || rc[1] != rd[1]) ? "  UNSTABLE" : "");
+	}
+	mutex_unlock(&rtl865x_hal_lock);
+	seq_printf(m, "[end dump]\n");
+	return 0;
+}
+
+static int gw_dump_open(struct inode *inode, struct file *file)
+{
+	return single_open_size(file, gw_dump_show, NULL, 128 * 1024);
+}
+
+static const struct file_operations gw_dump_fops = {
+	.owner = THIS_MODULE, .open = gw_dump_open,
+	.read = seq_read, .llseek = seq_lseek, .release = single_release,
+};
+
 static int napt_scan_show(struct seq_file *m, void *v)
 {
 	int i, n = 0;
@@ -1618,6 +1718,7 @@ static const struct file_operations fabric_fops = {
 static int __init rtl865x_asichal_init(void)
 {
 	proc_create("rtl865x_gw", 0444, NULL, &gw_proc_fops);
+	proc_create("rtl865x_dump", 0444, NULL, &gw_dump_fops);
 	proc_create("rtl865x_napt", 0444, NULL, &napt_scan_fops);
 	proc_create("rtl865x_fabric", 0444, NULL, &fabric_fops);
 	pr_info("rtl865x asic-hal: /proc/rtl865x_{gw,napt,fabric} ready (M6.6)\n");
