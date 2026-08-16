@@ -1,6 +1,6 @@
 # Prebuilt images
 
-Built 2026-08-16 from this repo at commit `d26ad62` by the exact clean-room path the
+Built 2026-08-16 from this repo at commit `c7608dd` by the exact clean-room path the
 README documents: fresh clone → `./build.sh` inside the Debian 11 (bullseye) container
 from `docs/BENCH.md` §7. Nothing outside this repository went into them, which also
 means **no 2.4 GHz radio** — these are wired + 5 GHz + hardware-NAT images (see the

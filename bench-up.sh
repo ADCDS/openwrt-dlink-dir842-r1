@@ -27,6 +27,12 @@ sudo ip neigh flush dev "$IF" 2>/dev/null
 # 2. tiny's bench WAN address lives on br0 (NOT eth0) and is lost on reboot.
 ssh -o ConnectTimeout=8 tiny 'ip addr show br0 | grep -q "172.16.0.2" || sudo ip addr add 172.16.0.2/24 dev br0' 2>/dev/null
 
+# 2b. Box: pin the bench WAN address. The SHIPPED default is a DHCP client (correct for
+#     a real uplink), but this bench has no DHCP server on the WAN side — the peer is a
+#     static 172.16.0.2. Without this the WAN comes up address-less and every NAT path
+#     reads 100% loss. Idempotent; only rewrites when it is not already static.
+say 'uci -q get network.wan.ipaddr | grep -q 172.16.0.1 || { uci set network.wan.proto=static; uci set network.wan.ipaddr=172.16.0.1; uci set network.wan.netmask=255.255.255.0; uci commit network; /etc/init.d/network reload; }; echo WANSET' 12
+
 # 3. Box: program the ASIC gateway (routes/mode/extIP/ACL). This WIPES the L2 tables,
 #    so it must come BEFORE the warm-up, never after.
 say 'cat /proc/rtl865x_gw | grep RESULT' 6

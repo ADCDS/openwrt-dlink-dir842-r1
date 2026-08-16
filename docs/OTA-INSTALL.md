@@ -85,15 +85,18 @@ sha256sum -c sha256sums.txt
 **gigabit hardware NAT offload** (armed automatically at boot). The 2.4 GHz radio is *not*
 in the published build — see the README's *2.4 GHz* section for why.
 
-7. **Set up the WAN before expecting internet.** ⚠ The image ships `network.wan` as a
-   **static bench address (`172.16.0.1/24`)**, not a DHCP client — plug your modem in and
-   nothing will route until you change it. In LuCI: *Network → Interfaces → WAN → Protocol*
-   → **DHCP client** (or PPPoE with your ISP credentials) → Save & Apply. From the shell:
+7. **Plug your uplink into the Internet jack.** WAN ships as a **DHCP client**, so a cable
+   modem or an upstream router just works. If your ISP needs **PPPoE**, set it in LuCI —
+   *Network → Interfaces → WAN → Protocol → PPPoE* — or from the shell:
 
    ```sh
-   uci set network.wan.proto='dhcp'; uci -q delete network.wan.ipaddr
-   uci -q delete network.wan.netmask; uci commit network; /etc/init.d/network restart
+   uci set network.wan.proto='pppoe'
+   uci set network.wan.username='<isp-user>'; uci set network.wan.password='<isp-pass>'
+   uci commit network; /etc/init.d/network restart
    ```
+
+   Hardware offload works on either: the ASIC's masquerade IP is reprogrammed from the
+   live WAN address per flow (PPPoE sessions included).
 
 > ⚠ **Secure it before it faces a real network.** A default image boots an **open 5 GHz
 > AP** and **no root password**. Set a WPA2 passphrase on the radio and a root password

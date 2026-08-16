@@ -74,9 +74,9 @@ CPU ~99.7 % idle. As far as we know this is the first working mainline OpenWrt
 - **Pre-production.** Everything above is measured on an isolated bench (one host on a
   LAN jack, one Pi on the WAN jack), not from months of running someone's house. It
   routes, but treat it as pre-production and keep your backup.
-- **The WAN interface ships as a static bench address** (`172.16.0.1/24`), not a DHCP
-  client. Set `network.wan` to DHCP or PPPoE in LuCI before expecting internet — see
-  [`docs/OTA-INSTALL.md`](docs/OTA-INSTALL.md).
+- **WAN ships as a DHCP client.** If your ISP needs PPPoE (or a static address), set it in
+  LuCI — *Network → Interfaces → WAN*. Hardware offload follows a dynamic address: the
+  ASIC's masquerade IP is reprogrammed from the live WAN IP per flow.
 - **Blank WiFi efuse** — this board keeps no RTL8822BE calibration on-chip, so TX power
   is uncalibrated (works, but not "loud"); handled in software (default RFE + pinned MAC).
 - **Download throughput is variable** (**681–906 Mbit** across runs) with 1200–2500 TCP retransmits per

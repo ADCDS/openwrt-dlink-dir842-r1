@@ -131,7 +131,7 @@ therefore be **WAN = vlan1 / LAN = vlan2** to match the SoC ASIC. Recorded in fu
 | box LAN (`br-lan` / `eth0.2`) | `192.168.0.1` | `99-dir842-m5:61` |
 | build host bench NIC | `192.168.0.2/24` static | `bench-up.sh:23` |
 | bench WAN subnet | `172.16.0.0/24` | |
-| box WAN (`eth0.1`) | `172.16.0.1` static — **load-bearing, it is ASIC `extIP[0]`** | `99-dir842-m5:67` |
+| box WAN (`eth0.1`) | `172.16.0.1` static, **set by `bench-up.sh`** (the shipped default is a DHCP client; this bench has no WAN-side DHCP server). Load-bearing: it becomes ASIC `extIP[0]` | `bench-up.sh` step 2b |
 | Pi WAN peer | `172.16.0.2/24` on `br0` (earlier in the project: `172.16.0.9`) | `bench-up.sh:28` |
 | host route to the WAN side | `172.16.0.0/24 via 192.168.0.1 dev <bench NIC>` | `bench-up.sh:24,47` |
 

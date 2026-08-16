@@ -63,9 +63,23 @@ set network.lan.netmask='255.255.255.0'
 delete network.lan.ip6assign
 set network.wan='interface'
 set network.wan.ifname='eth0.1'
-set network.wan.proto='static'
-set network.wan.ipaddr='172.16.0.1'
-set network.wan.netmask='255.255.255.0'
+# WAN is a DHCP client — the default any router should ship with, so the box
+# routes as soon as a modem/uplink is plugged into the Internet jack. Change it
+# to PPPoE (or static) in LuCI for ISPs that need it.
+#
+# ★ This used to be a static 172.16.0.1/24 (the bench WAN peer's subnet). That is
+# a lab artifact, not a sane default: a user who flashed and plugged in a modem
+# got no internet and no explanation. The bench sets it explicitly instead —
+# see bench-up.sh.
+#
+# Hardware offload is unaffected by a dynamic address: the ASIC's masquerade
+# extIP[0] is (re)written from the LIVE WAN IP on every flow offload
+# (rtl819x_hwnat.c -> rtl865x_set_wan_extip), and a changed identity flushes the
+# rows programmed under the old one. RTL865X_WAN_EXTIP is only a boot-time
+# placeholder.
+set network.wan.proto='dhcp'
+delete network.wan.ipaddr
+delete network.wan.netmask
 delete network.wan6
 # ★ MAC constraint that still matters, even though nothing here sets a MAC:
 # WAN must be exactly LAN-1 (equivalently LAN = WAN+1). gw_prog programs the ASIC's
@@ -80,8 +94,9 @@ commit network
 EOF
 
 # --- M6.6 Phase 3: firewall + flow-offload. The default zones already ACCEPT
-# lan->wan and masquerade the wan zone (SRC -> 172.16.0.1, which is exactly the
-# ASIC extIP[0] the hwnat rows rewrite to). Enable software flow offloading and, on
+# lan->wan and masquerade the wan zone (SRC -> whatever the WAN's live local IP is,
+# which is exactly what the ASIC's extIP[0] is programmed to, per flow).
+# Enable software flow offloading and, on
 # top of it, HARDWARE offload: that emits the `-j FLOWOFFLOAD --hw` FORWARD rule that
 # actually drives our ndo_flow_offload hooks. nf_conntrack_acct gives per-flow byte/
 # packet counters so Phase 4 can watch them FREEZE when the ASIC takes over a flow.
