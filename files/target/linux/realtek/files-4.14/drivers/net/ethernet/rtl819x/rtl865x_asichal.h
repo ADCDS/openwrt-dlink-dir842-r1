@@ -205,6 +205,7 @@ void rtl865x_napt_prefill(void);
  * /proc reprogram or fabric-reset rearm reproduces the CURRENT WAN identity. */
 extern u32 rtl865x_wan_extip;	/* live extIP[0] (host order); boot = RTL865X_WAN_EXTIP */
 int rtl865x_set_wan_extip(u32 ip);
+int rtl865x_wan_netif_mac_sync(void);
 int rtl865x_pppoe_set(u32 idx, u16 sid);	/* raw PPPoE session-table row write */
 int rtl865x_wan_set_nexthop(const u8 *gw_mac, bool is_pppoe, u16 pppoe_sid);
 /* Learn the LAN client this flow returns to (MAC + IP) into the ASIC's LAN

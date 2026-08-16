@@ -515,6 +515,12 @@ static int hwnat_add_flow(struct flow_offload *flow,
 		goto out_unlock;
 	if (rc > 0)
 		hwnat_flush_locked();
+	/* And the WAN NETIF MAC itself: eth0.1 is destroyed/recreated on ifdown/ifup,
+	 * and a gw_prog run in the down-window programs netif[1] from a stale shadow.
+	 * The nexthop resync below never catches that (it keys on the PEER MAC), so
+	 * compare the live netdev MAC here and reprogram + flush on divergence. */
+	if (rtl865x_wan_netif_mac_sync() > 0)
+		hwnat_flush_locked();
 	rc = rtl865x_wan_set_nexthop(dest->eth_dest, wan_pppoe,
 				     wan_pppoe ? dest->pppoe_sid : 0);
 	if (rc < 0)

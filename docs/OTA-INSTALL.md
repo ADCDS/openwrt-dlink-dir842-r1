@@ -132,12 +132,12 @@ warms the tables within seconds and you never notice. If a freshly booted box re
 That is idempotent and is the supported recovery. (It disarms hardware offload, reprograms
 the ASIC tables, re-warms them, and re-arms offload.)
 
-**The same command re-engages offload after a WAN bounce.** If you `ifdown/ifup` the WAN
-(or your PPPoE session reconnects), hardware offload stops engaging and throughput drops to
-the software path (~500 Mbit, still working) until you run
-`/etc/init.d/dir842-asic restart`. A normal reboot does not need this. (The persistent
-*stall* once tracked as [issue #1](https://github.com/ADCDS/openwrt-dlink-dir842-r1/issues/1)
-— a big transfer hanging while pings worked — is fixed.)
+WAN bounces (`ifdown/ifup`, PPPoE reconnects, LuCI "Save & Apply" on the network config)
+need no manual step: the driver resyncs the ASIC's WAN identity against the live
+interface automatically, verified back at full offloaded throughput after each of those.
+(Both historical offload problems — the persistent *stall* tracked as
+[issue #1](https://github.com/ADCDS/openwrt-dlink-dir842-r1/issues/1) and the ~500 Mbit
+degradation after a WAN bounce — are fixed.)
 
 ### If the router's IP collides with something on your network
 

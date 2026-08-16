@@ -96,13 +96,17 @@ CPU ~99.7 % idle. As far as we know this is the first working mainline OpenWrt
   traps to the CPU, so software forwarding is the safe fallback — but note the shipped
   images **arm offload at boot**, so if you want the software path you must disarm it
   (`echo 0 > /sys/module/rtl819x/parameters/hwnat`, or `/etc/init.d/dir842-asic stop`).
-- **After a WAN interface bounce, offload drops to the software path** (~500 Mbit,
-  CPU-bound — not a stall; traffic keeps flowing) until it is re-engaged with
-  `/etc/init.d/dir842-asic restart`. A plain reboot or a fresh boot is unaffected; this
-  only follows an `ifdown/ifup` or a PPPoE reconnect. (The persistent *stall* that used to
-  live here — ["A-2" / issue #1](https://github.com/ADCDS/openwrt-dlink-dir842-r1/issues/1),
-  offloaded bulk TCP dying while ICMP passed — was root-caused to a stale connected-route
-  ARP binding and **fixed**; the ARP now re-points on every peer relearn.)
+- ~~After a WAN interface bounce, offload drops to the software path~~ — **fixed.**
+  Root cause: `ifdown wan` destroys `eth0.1`, and an ASIC reprogram in that window fell
+  back to a constant WAN-interface MAC; reverse-direction frames then missed
+  classification and ran on the CPU (~500 Mbit) until a manual reprogram. The driver now
+  keeps a last-known-good interface MAC and additionally resyncs the ASIC's WAN netif
+  against the live netdev on every flow offload. Verified: `ifdown/ifup` (quick and
+  30 s), a reprogram during the down-window, and a full `/etc/init.d/network restart` all
+  come back at ~895 Mbit offloaded with no manual step. (The persistent *stall* that used
+  to live here — ["A-2" / issue #1](https://github.com/ADCDS/openwrt-dlink-dir842-r1/issues/1),
+  offloaded bulk TCP dying while ICMP passed — was a stale connected-route ARP binding,
+  also fixed.)
 - `rtl819x: recovery level 3` fires ~2× per boot. Pre-existing, benign, unexplained.
 
 ## Building

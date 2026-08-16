@@ -404,21 +404,30 @@ static const u8 GW_MAC_WAN[6] = { 0x00,0xe0,0x4c,0x81,0x96,0xc3 };
  * userspace configures — including a MAC derived from flash by board.d — automatically
  * becomes the ASIC's netif MAC, keeping the two consistent by construction.
  */
-static void gw_netif_mac(const char *ifname, const u8 *fallback, u8 out[ETH_ALEN])
+/* Last-known-good live MACs. ★ Load-bearing: `ifdown wan` DESTROYS eth0.1 (netifd
+ * removes the VLAN netdev), so a gw_prog that runs while the WAN is down must NOT
+ * fall back to the compile-time constant — that programs netif[1] with a MAC the
+ * ASIC then compares reverse-direction frames against, and every WAN->LAN reply
+ * misses classification and traps to the CPU (~500 Mbit hybrid instead of ~895).
+ * The constant is only for the first boot, before the netdev has ever existed. */
+static u8 gw_wan_ifmac_shadow[ETH_ALEN];
+static u8 gw_lan_ifmac_shadow[ETH_ALEN];
+
+static void gw_netif_mac(const char *ifname, const u8 *fallback, u8 *shadow,
+			 u8 out[ETH_ALEN])
 {
 	struct net_device *dev = dev_get_by_name(&init_net, ifname);
 
-	if (dev) {
-		if (is_valid_ether_addr(dev->dev_addr))
-			ether_addr_copy(out, dev->dev_addr);
-		else
-			ether_addr_copy(out, fallback);
-		dev_put(dev);
+	if (dev && is_valid_ether_addr(dev->dev_addr)) {
+		ether_addr_copy(out, dev->dev_addr);
+		ether_addr_copy(shadow, dev->dev_addr);
+	} else if (is_valid_ether_addr(shadow)) {
+		ether_addr_copy(out, shadow);	/* device gone: keep last-known-good */
 	} else {
-		/* gw_prog can run before the VLAN netdevs exist (e.g. the rc.local
-		 * read at boot); the fallback keeps that path working unchanged. */
-		ether_addr_copy(out, fallback);
+		ether_addr_copy(out, fallback);	/* never seen: first-boot constant */
 	}
+	if (dev)
+		dev_put(dev);
 }
 
 static void gw_set_pvid(u32 port, u32 pvid)
@@ -754,7 +763,7 @@ static void gw_wan_netif_prog_locked(void)
 	u8 mac[ETH_ALEN];
 
 	memset(&nif, 0, sizeof(nif));
-	gw_netif_mac("eth0.1", GW_MAC_WAN, mac);	/* R3: per-unit MAC if userspace set one */
+	gw_netif_mac("eth0.1", GW_MAC_WAN, gw_wan_ifmac_shadow, mac);	/* R3: per-unit MAC if userspace set one */
 	mac_hi = (mac[0] << 21) | (mac[1] << 13) | (mac[2] << 5) | (mac[3] >> 3);
 	mac_lo = ((mac[3] & 0x7) << 16) | (mac[4] << 8) | mac[5];
 	nif.valid = 1; nif.vid = GW_VID_WAN; nif.mac18_0 = mac_lo; nif.mac47_19 = mac_hi;
@@ -843,6 +852,32 @@ int rtl865x_wan_set_nexthop(const u8 *gw_mac, bool is_pppoe, u16 pppoe_sid)
 	gw_wan_nexthop_prog_locked();
 	pr_info("rtl865x gw: WAN nexthop -> %pM %s(sid=%u)\n", gw_wan_gw_mac,
 		is_pppoe ? "PPPoE " : "ethernet ", pppoe_sid);
+	return 1;
+}
+
+/* Heal netif[1] <-> live-eth0.1 MAC divergence. The nexthop/extIP shadows are
+ * resynced per flow, but nothing re-derived the WAN NETIF MAC after the netdev was
+ * destroyed and recreated (ifdown/ifup, netifd reload) — if a gw_prog ran in the
+ * down-window, netif[1] kept a wrong MAC and reverse-direction frames missed
+ * classification forever (measured: ~508 Mbit at ~80% CPU, cured only by a manual
+ * gw_prog). Shadow-compared: 0 = in sync (or no netdev to compare against),
+ * 1 = reprogrammed (caller must flush per-flow rows — they were installed under
+ * the stale identity). Caller holds rtl865x_hal_lock. */
+int rtl865x_wan_netif_mac_sync(void)
+{
+	struct net_device *dev = dev_get_by_name(&init_net, "eth0.1");
+	bool stale;
+
+	if (!dev)
+		return 0;
+	stale = is_valid_ether_addr(dev->dev_addr) &&
+		!ether_addr_equal(dev->dev_addr, gw_wan_ifmac_shadow);
+	dev_put(dev);
+	if (!stale)
+		return 0;
+	gw_wan_netif_prog_locked();	/* re-reads the live MAC, updates the shadow */
+	pr_info("rtl865x gw: netif[1] MAC resynced to live eth0.1 (%pM)\n",
+		gw_wan_ifmac_shadow);
 	return 1;
 }
 
@@ -1134,7 +1169,7 @@ static int gw_prog(struct seq_file *m, void *v)
 	{	/* R3: per-unit MAC from the live LAN netif if userspace set one */
 		u8 lmac[ETH_ALEN];
 
-		gw_netif_mac("eth0.2", GW_MAC_LAN, lmac);
+		gw_netif_mac("eth0.2", GW_MAC_LAN, gw_lan_ifmac_shadow, lmac);
 		mac_hi = (lmac[0] << 21) | (lmac[1] << 13) | (lmac[2] << 5) | (lmac[3] >> 3);
 		mac_lo = ((lmac[3] & 0x7) << 16) | (lmac[4] << 8) | lmac[5];
 	}
