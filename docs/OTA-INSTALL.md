@@ -132,13 +132,12 @@ warms the tables within seconds and you never notice. If a freshly booted box re
 That is idempotent and is the supported recovery. (It disarms hardware offload, reprograms
 the ASIC tables, re-warms them, and re-arms offload.)
 
-**The same command fixes a stalled large transfer.** There is a known intermittent bug
-([issue #1](https://github.com/ADCDS/openwrt-dlink-dir842-r1/issues/1)): sustained
-line-rate bulk traffic can latch the switch fabric, so a big download stalls while pings
-and small requests keep working normally. `/etc/init.d/dir842-asic restart` clears it and
-restores full speed (measured: stalled → 896 Mbit). If it bothers you more than the speed
-is worth, run on the software path instead with
-`echo 0 > /sys/module/rtl819x/parameters/hwnat` (~180 Mbit, unaffected).
+**The same command re-engages offload after a WAN bounce.** If you `ifdown/ifup` the WAN
+(or your PPPoE session reconnects), hardware offload stops engaging and throughput drops to
+the software path (~500 Mbit, still working) until you run
+`/etc/init.d/dir842-asic restart`. A normal reboot does not need this. (The persistent
+*stall* once tracked as [issue #1](https://github.com/ADCDS/openwrt-dlink-dir842-r1/issues/1)
+— a big transfer hanging while pings worked — is fixed.)
 
 ### If the router's IP collides with something on your network
 
