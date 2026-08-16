@@ -223,7 +223,16 @@ define Device/GWR1200AC-V1
   # the Greatek 0x80a00000; the loader loads to start_addr and jumps there.
   CVIMG_LOADER_START_ADDR := 0x81000000
   IMAGE/factory.bin = append-kernel | append-fake-rootfs | append-rootfs | cvimg-kernel-cr6b | cvimg-pad-rootfs | dlink-md5-sign
-  IMAGE/sysupgrade.bin = append-kernel | append-fake-rootfs | append-rootfs | cvimg-kernel-cr6b | pad-rootfs | dlink-md5-sign
+  # ★ sysupgrade MUST sign BEFORE pad-rootfs. pad-rootfs appends the jffs2
+  # `deadc0de` rootfs_data marker and pads to BLOCKSIZE, so a trailer appended
+  # after it lands inside rootfs_data's FIRST erase block — which mount_root
+  # ERASES when it formats the overlay on first boot. The loader then fails
+  # `magic not found!!!` on every subsequent power-on and drops to TFTP: the
+  # box soft-bricks on its SECOND boot (found 2026-08-16 by the cold-boot gate;
+  # flash dump showed a jffs2 cleanmarker where the keyed-MD5 trailer used to
+  # be). With the sign first, the trailer sits in the squashfs partition's
+  # slack — same safe geometry the factory image always had.
+  IMAGE/sysupgrade.bin = append-kernel | append-fake-rootfs | append-rootfs | cvimg-kernel-cr6b | dlink-md5-sign | pad-rootfs
   # R3: declare the board's package set per-device instead of relying on a
   # hand-maintained seed config — a clean `make menuconfig` for this profile now
   # yields a working router (WiFi, PPPoE, LEDs, switch, diagnostics) instead of an
