@@ -14,7 +14,7 @@ PORT=/dev/ttyUSB0
 LOG=/home/agiu/dir842-r1-bootlog.txt
 FLAG=/tmp/ramboot-spam.flag
 TOMADA="${TOMADA:-/home/agiu/.local/bin/tomada}"
-IFACE="${IFACE:-enx00e04c125990}"	# host USB-eth cabled to the DIR-842 LAN
+IFACE="${IFACE:-eth1}"	# host NIC cabled to the DIR-842 LAN — override: IFACE=... ./ramboot.sh
 IMG="${1:-$(ls /home/agiu/dir842-build/openwrt/bin/targets/realtek/rtl8197f/*initramfs-kernel.bin | head -1)}"
 
 sr() { stty -F "$PORT" 38400 cs8 -parenb -cstopb -crtscts -ixon clocal raw -echo 2>/dev/null; }

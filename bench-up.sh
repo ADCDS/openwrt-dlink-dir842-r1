@@ -6,12 +6,12 @@
 #   bash bench-up.sh
 #
 # Topology (2026-07-21 rewire):
-#   host USB-eth enx00e04c125990 192.168.0.2/24 -> DIR-842 LAN jack (8367S port 2, 1000M)
+#   host USB-eth $IF 192.168.0.2/24 -> DIR-842 LAN jack (8367S port 2, 1000M)
 #   tiny br0 172.16.0.2/24 (eth0 is a br0 SLAVE)  -> DIR-842 WAN jack (8367S port 4, 100M)
 #   box: br-lan 192.168.0.1 (eth0.2) / eth0.1 172.16.0.1 ; loader IP 192.168.0.1 (IPCONFIG)
 set -u
 PORT=/dev/ttyUSB0
-IF=enx00e04c125990
+IF="${IF:-eth1}"	# host NIC cabled to the DIR-842 LAN — override: IF=... bash bench-up.sh
 say() { printf '\r%s\r' "$*" > "$PORT"; sleep "${2:-2}"; }
 
 # 1. Host side. NetworkManager strips manual addresses off this NIC -> unmanage it.

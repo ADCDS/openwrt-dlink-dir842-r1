@@ -15,23 +15,26 @@ CPU ~99.7 % idle. As far as we know this is the first working mainline OpenWrt
 > **This is for the DIR-842 rev R1 (RTL8197F) only.** Do not try it on other DIR-842
 > revisions or other devices.
 >
-> **Flashing REPLACES the stock firmware, and there is no vendor recovery path here.**
-> Earlier revisions of this README said the port was RAM-boot-only and that "a
-> power-cycle always returns you to stock". **That is no longer true.** The NOR image
-> boots from flash and survives a power cycle, which means:
+> **Flashing REPLACES the stock firmware.** The NOR image boots from flash and survives
+> a power cycle, so it does not go away on its own.
 >
-> - **Back up all 8 MB of NOR first, and keep that backup.** After flashing, stock
->   exists *only* in your backup. There is no D-Link recovery image for this.
-> - Recovery from a bad flash is over the **serial console** (RealTek loader → TFTP /
->   XMODEM). If you are not set up to open the case and attach a 3.3 V UART, stop here.
+> - **Back up all 8 MB of NOR first, and keep that backup off the router.** It is the
+>   only restore source guaranteed to be correct for *your* unit. **Making the backup
+>   needs a root shell on stock, which means a serial console** — see
+>   [`docs/RESTORE-STOCK.md`](docs/RESTORE-STOCK.md). Official D-Link firmware for this
+>   exact revision may or may not be downloadable in your region, so do not count on it.
+> - **Installing does not need serial** — you can flash over the network through
+>   D-Link's own web UI (see *Installing*). **Recovering a bad flash does**: the
+>   RealTek loader (TFTP/XMODEM) is the safety net, and it needs a 3.3 V UART on the
+>   board's header. Decide up front whether you are willing to open the case if it
+>   comes to that.
 >
-> **The safe way to try this is the initramfs image**, which is XMODEM'd into RAM and
-> **never writes flash** — a power-cycle discards it entirely. Do that first.
+> **The safest way to try this is the initramfs image**, which is loaded into RAM and
+> **never writes flash** — a power-cycle discards it entirely.
 >
-> Default images have **no root password**, a **placeholder 2.4 GHz PSK**
-> (`ChangeMeNow123`), and — most importantly — the **5 GHz AP is OPEN**
-> (`encryption='none'`, `99-dir842-m5:188`). A default image broadcasts an
-> unencrypted network. Fix all three before this touches a real network.
+> Default images have **no root password** and the **5 GHz AP is OPEN**
+> (`encryption='none'`, `files/…/uci-defaults/99-dir842-m5`). A default image
+> broadcasts an unencrypted network. Fix both before this touches a real network.
 
 ## Status
 
@@ -52,31 +55,46 @@ CPU ~99.7 % idle. As far as we know this is the first working mainline OpenWrt
   | offload off | 184 up / 187 down Mbit | ~100.6 % | ~52 % |
   | **offload on** | **891 up / 896 down Mbit** | **0.0 %** | **0.3 %** |
 
-  Armed automatically at boot (last step of the `dir842-asic` bring-up, after the ASIC
+  **Armed automatically at boot** by the `dir842-asic` service (last step, after the ASIC
   warm-up); runtime toggle: `echo 0/1 > /sys/module/rtl819x/parameters/hwnat`.
 - **5 GHz WiFi** — on-board **RTL8822BE** (PCIe) via **rtw88**, AP mode (⚠ the
   shipped config is **open** — see the warning above; WPA2 itself works). RTL8197F +
   PCIe WiFi had never worked in OpenWrt before (see *Engineering notes*).
+
+**Ported, but not in the images this repo builds**
+
 - **2.4 GHz WiFi** — the on-SoC WMAC via the vendor `rtl8192cd` driver (WEXT, in-kernel
-  WPA2-PSK). Works on the hardware; ⚠ **this repo publishes no build path for it yet** —
-  the port ships only as a patch-record. See *Building*.
-- **Both radios concurrently**, both bridged into `br-lan`.
+  WPA2-PSK) works on the hardware, and both radios run concurrently bridged into
+  `br-lan`. ⚠ **Images built from this repo have 5 GHz only**: the driver is not
+  redistributable here, so the port ships as a patch-record rather than a build path.
+  See *Building*.
 
 **Known limitations**
 
-- **Never run as a real household gateway.** Everything above is measured on an isolated
-  bench (one host on a LAN jack, one Pi on the WAN jack). Treat it as pre-production.
+- **Pre-production.** Everything above is measured on an isolated bench (one host on a
+  LAN jack, one Pi on the WAN jack), not from months of running someone's house. It
+  routes, but treat it as pre-production and keep your backup.
+- **The WAN interface ships as a static bench address** (`172.16.0.1/24`), not a DHCP
+  client. Set `network.wan` to DHCP or PPPoE in LuCI before expecting internet — see
+  [`docs/OTA-INSTALL.md`](docs/OTA-INSTALL.md).
 - **Blank WiFi efuse** — this board keeps no RTL8822BE calibration on-chip, so TX power
   is uncalibrated (works, but not "loud"); handled in software (default RFE + pinned MAC).
 - **Download throughput is variable** (**681–906 Mbit** across runs) with 1200–2500 TCP retransmits per
   10 s run. The router is not the bottleneck (CPU 0.3 %, zero interface errors), but the
   loss source is not yet identified. Take a range, not a single run.
 - The ASIC's inbound NAPT row is **full-cone**: a masquerade source-port collision
-  between an offloaded and a software flow can misdeliver packets. Offload is
-  default-off and a NAPT miss always traps to the CPU, so software is the safe fallback.
+  between an offloaded and a software flow can misdeliver packets. A NAPT miss always
+  traps to the CPU, so software forwarding is the safe fallback — but note the shipped
+  images **arm offload at boot**, so if you want the software path you must disarm it
+  (`echo 0 > /sys/module/rtl819x/parameters/hwnat`, or `/etc/init.d/dir842-asic stop`).
 - `rtl819x: recovery level 3` fires ~2× per boot. Pre-existing, benign, unexplained.
 
 ## Building
+
+**You do not need to build to install.** Prebuilt, signed images are attached to the
+[latest release](https://github.com/ADCDS/openwrt-dlink-dir842-r1/releases/latest) —
+download those and skip to *Installing*. Build only if you want to change something or
+verify the images yourself.
 
 ```bash
 git clone https://github.com/ADCDS/openwrt-dlink-dir842-r1
@@ -139,9 +157,18 @@ you garbage.
 
 ### RAM-boot (safe, no flash writes)
 
-1. Power on and spam `ESC` to catch the RealTek loader → `<RealTek>` prompt.
-2. `XMOD 81000000`, then send the initramfs image over XMODEM (~18 min at 38400).
+1. Power on and spam `ESC` to catch the RealTek loader → `<RealTek>` prompt. ★ There is
+   exactly **one ~1-second window per power-cycle**, and it opens immediately at
+   power-on — start spamming *before* you apply power, not after.
+2. Load the initramfs image, either:
+   - **over the network (fast, ~seconds):** `AUTOBURN 0`, `LOADADDR 81000000`, `TFTP +`,
+     then from your PC (on `192.168.0.2/24`) `curl -T initramfs.bin tftp://192.168.0.1/img`
+   - **over serial (~18 min at 38400):** `XMOD 81000000` — bare hex, **no `0x` prefix**,
+     which the loader rejects — then send the file with XMODEM (`sx -v img > /dev/ttyUSB0 < /dev/ttyUSB0`).
 3. `J 81000000` to jump. A power-cycle discards it and returns you to whatever is in flash.
+
+Full loader reference, including the exact automation used on the bench:
+[`docs/BENCH.md`](docs/BENCH.md) §8.
 
 ### NOR flash (replaces stock — back up first)
 
@@ -152,15 +179,25 @@ The loader verifies a D-Link trailer before it will boot an image from flash. It
 [cvimg image][ MD5(key || cvimg_image) : 16 ][ 00 C0 FF EE : 4 ]
 ```
 
-with the key embedded in the bootcode (`mtd0`) at offset `0x291bc`.
-`tools/sign-dlink.py` implements it:
+with the key embedded in the bootcode. ⚠ The offset `0x291bc` is into the
+**decompressed** bootcode, not into a raw `mtd0` dump (that offset in a raw dump reads
+`0xff`) — the bootcode is a gzip stream starting at `mtd0+0x7d70`; see
+[`docs/BENCH.md`](docs/BENCH.md) §"boot key".
+
+**Images built by `build.sh` — and the prebuilt release images — already carry this
+trailer** (the build runs `dlink-md5-sign`), so flash them as-is; there is no signing
+step. `tools/sign-dlink.py` implements the format for rebuilders and for signing images
+that do not already carry a trailer:
 
 ```bash
-tools/sign-dlink.py openwrt-...-squashfs-factory.bin signed.bin
+tools/sign-dlink.py unsigned.bin signed.bin
 ```
 
-Then, at the loader prompt: set the loader's IP, `AUTOBURN 1`, TFTP the signed image,
-and wait for `Flash Write Successed` before removing power.
+To flash from the loader: put your PC on `192.168.0.2/24`, then at the `<RealTek>`
+prompt `IPCONFIG 192.168.0.1` (sets the *loader's* address), `AUTOBURN 1`, `TFTP +`
+(the **loader** is the TFTP server), then push from the PC with
+`curl -T factory.bin tftp://192.168.0.1/img` and wait for `Flash Write Successed`
+before removing power.
 
 This is published because it is what makes the port usable at all — it is a boot-time
 integrity check on a device you own, not a content-protection or anti-tamper measure,
@@ -171,10 +208,12 @@ and without it the flash path cannot be reproduced by anyone else.
 Installing OpenWrt overwrites **only** the firmware region — your unit's bootloader, MAC
 address, and RF calibration live in separate flash partitions that no install step
 touches — so you can return to a pristine D-Link firmware at any time, and back to OpenWrt
-again, as often as you like. The restore is verified on hardware in both directions; from
-a running OpenWrt it is a single `mtd write - firmware` (the same operation stock's own
-updater performs). Full instructions, including where to get official D-Link firmware
-(this repo does **not** redistribute it) and the serial-console recovery route:
+again, as often as you like — **provided you have a stock image to restore from** (your
+own backup, or official D-Link firmware for this exact revision if you can obtain it).
+The restore is verified on hardware in both directions; from a running OpenWrt it is a
+single `mtd write - firmware` (the same operation stock's own updater performs). Full
+instructions, including how to obtain a stock image (this repo does **not** redistribute
+it) and the serial-console recovery route:
 **[docs/RESTORE-STOCK.md](docs/RESTORE-STOCK.md)**. For the whole round trip in one place —
 install over the air *and* revert — see **[docs/OTA-INSTALL.md](docs/OTA-INSTALL.md)**.
 

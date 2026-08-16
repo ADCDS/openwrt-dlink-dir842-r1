@@ -21,7 +21,7 @@
 #   carries ~2x the payload. Fine while the box saturates its CPU near 180 Mbit.
 set -u
 PORT=/dev/ttyUSB0
-IF="${IF:-enx00e04c125990}"
+IF="${IF:-eth1}"	# host NIC cabled to the DIR-842 LAN — override: IF=...
 NS=benchns
 say() { printf '\r%s\r' "$*" > "$PORT"; sleep "${2:-3}"; }
 

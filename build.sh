@@ -15,7 +15,7 @@
 #
 # Build environment: the ggbruno fork is from 2020 (kernel 4.14 / gcc 8.4). Use
 # a Debian 11 (bullseye)-era build host or container; very new toolchains can
-# fail to build the old host tools. See README.md for a container one-liner.
+# fail to build the old host tools. Use the Dockerfile in docs/BENCH.md section 7.
 #
 #   ./build.sh                                  # wired + 5 GHz WiFi + HW NAT offload
 #   PROFILE=~/dir842-profile ./build.sh         # ...plus a private pre-configured profile

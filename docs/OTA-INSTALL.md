@@ -34,13 +34,25 @@ flash partitions the firmware update never writes (see
 
 ## Before you flash (do this once)
 
-**Back up the whole 8 MB flash and keep it off the router.** It is your guaranteed way
-back. The one-time procedure is in
+**Back up the whole 8 MB flash and keep it off the router.** It is the only restore
+source guaranteed correct for *your* unit. Procedure:
 [RESTORE-STOCK.md → "Before you ever flash"](RESTORE-STOCK.md#before-you-ever-flash-back-up-do-this-once).
 
-Have the image ready: `openwrt-realtek-rtl8197f-GWR1200AC-V1-squashfs-factory.bin`, from
-this repo's **Releases** page or the [`images/`](../images) directory. Verify it with
-`sha256sum -c`.
+> ⚠ **Honest caveat about "no serial".** *Installing* needs no serial — that is what this
+> page demonstrates. But **taking the backup does** (it needs a root shell on stock, which
+> only the serial console gives you), and so does **recovering a bad flash** (the RealTek
+> loader). If you are not willing to open the case and attach a 3.3 V UART, then your only
+> way back is official D-Link firmware for your exact revision, which may not be
+> downloadable in your region. Decide that before you flash, not after.
+
+Have the image ready: `openwrt-realtek-rtl8197f-GWR1200AC-V1-squashfs-factory.bin`.
+Download it from the repo's **[latest release](https://github.com/ADCDS/openwrt-dlink-dir842-r1/releases/latest)**
+(the `.bin` files are release assets — they are not committed into the git tree) and
+verify it against the published `sha256sums.txt`:
+
+```sh
+sha256sum -c sha256sums.txt
+```
 
 ---
 
@@ -70,11 +82,26 @@ this repo's **Releases** page or the [`images/`](../images) directory. Verify it
    default, so your address doesn't even change. Reconnect (DHCP) and you're on OpenWrt.
 
 **What you get:** wired Ethernet, the RTL8367S switch, WAN/LAN, **5 GHz Wi-Fi**, and
-**gigabit hardware NAT offload**. The 2.4 GHz radio is *not* in the published build — see
-the README's *2.4 GHz* section for why.
+**gigabit hardware NAT offload** (armed automatically at boot). The 2.4 GHz radio is *not*
+in the published build — see the README's *2.4 GHz* section for why.
+
+7. **Set up the WAN before expecting internet.** ⚠ The image ships `network.wan` as a
+   **static bench address (`172.16.0.1/24`)**, not a DHCP client — plug your modem in and
+   nothing will route until you change it. In LuCI: *Network → Interfaces → WAN → Protocol*
+   → **DHCP client** (or PPPoE with your ISP credentials) → Save & Apply. From the shell:
+
+   ```sh
+   uci set network.wan.proto='dhcp'; uci -q delete network.wan.ipaddr
+   uci -q delete network.wan.netmask; uci commit network; /etc/init.d/network restart
+   ```
 
 > ⚠ **Secure it before it faces a real network.** A default image boots an **open 5 GHz
-> AP**, a placeholder 2.4 GHz PSK, and **no root password**. Set all three first.
+> AP** and **no root password**. Set a WPA2 passphrase on the radio and a root password
+> (`passwd`) first.
+
+> This port is **pre-production**: it routes at gigabit line rate on the bench, but it has
+> not been through months of household duty. Keep your backup, and don't make it the only
+> thing between your family and the internet on day one.
 
 ### If the router's IP collides with something on your network
 
@@ -118,6 +145,7 @@ On this exact hardware, with no serial cable and no exploit: logged into stock 3
 UI, uploaded the unsigned `…-squashfs-factory.bin` through **Local Update**, watched the
 serial console show stock's own updater write the image to the firmware region
 (`/dev/mtd5 … 0% → 100% → finish`), the box reboot, the loader validate the trailer
-(`Jump to image start=0x81000000`), and **OpenWrt (kernel 4.14.187, both radios up) boot to
-userspace**. The reverse direction (`mtd write` back to stock, then forward again) was
+(`Jump to image start=0x81000000`), and **OpenWrt (kernel 4.14.187) boot to userspace**.
+(The image used in that run was a local dual-band build; the *published* images are
+wired + 5 GHz, and install identically.) The reverse direction (`mtd write` back to stock, then forward again) was
 exercised repeatedly in the same session.

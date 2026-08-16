@@ -17,10 +17,10 @@ The port's own engineering history is a chain of self-corrections. Several of th
 claims that had already been written into these docs as settled fact and had steered days of
 work. Two concrete examples:
 
-- `docs/M7-HWNAT-REVERSE-NAPT.md:42` and `:370` still state, as a finding, that "**All hash
+- `docs/M7-HWNAT-REVERSE-NAPT.md` (the "all hash inputs are NETWORK order" passages) still state, as a finding, that "**All hash
   inputs are NETWORK order**". That is backwards, and it was the whole root cause. It stood
   for eleven days and every experiment run under it read flat. (Index #17.)
-- `docs/VENDOR-PARITY-INVENTORY.md:161` is headed "★ R6 correction: 'stock does 600–800 Mbit'
+- `docs/VENDOR-PARITY-INVENTORY.md` (the "R6 correction" section) is headed "★ R6 correction: 'stock does 600–800 Mbit'
   is NOT evidenced" — a retraction of a number that had been circulating as an acceptance
   target. That section is itself now obsolete: stock *was* subsequently measured. (Index #30.)
 
@@ -126,8 +126,8 @@ version = 1, and the vendor gates the entire header-table path on `p_dm[0x3E4] =
 **#12 — a whole session measured with the offload switched off (`38d335f93b`).**
 `hwnat` is a module parameter that defaults to **off** (`rtl819x_hwnat.c:69-71`,
 `bool rtl819x_hwnat_enabled;` — uninitialised) and the boot-time ASIC programming deliberately
-does not arm it (`base-files/etc/init.d/dir842-asic:23`, "hwnat is deliberately NOT armed
-here" — historical: since R4 2026-08-16 the service DOES arm it, after the warm-up).
+did not arm it at the time (the service's "hwnat is deliberately NOT armed here" comment;
+since R4 the service DOES arm it, after the warm-up).
 Every R6 number in that session therefore measured **software forwarding**, and twelve
 hypotheses were "falsified" against it. Redone with a **positive control**:
 
@@ -322,8 +322,9 @@ Each is an imperative, and each traces to a retraction above.
    shown capable of detecting offload. *(#12)*
 4. **COUPLED VARIABLES CANNOT BE A/B'd ONE AT A TIME.** Enumerate the coupling first, then move
    the whole group. *(#21, #19)*
-5. **STATE THE `hwnat` SETTING OF EVERY NUMBER.** It is **off after a cold boot by design**
-   (`rtl819x_hwnat.c:69`, `init.d/dir842-asic:23`). *(#12)*
+5. **STATE THE `hwnat` SETTING OF EVERY NUMBER.** The module parameter defaults to off
+   (`rtl819x_hwnat.c:69`), but **since R4 the `dir842-asic` service arms it at boot**, so a
+   cold-booted shipped image measures the *offloaded* path unless you disarm it. *(#12)*
 6. **NEVER MEASURE OUTSIDE THE HARNESS.** The asserts exist because each one corresponds to a
    conclusion this project already published and retracted. *(#20)*
 7. **ONE CLEAN RUN PROVES NOTHING FOR THE WEDGE CLASS OF BUG** — it reproduces ~1 in 3–4 heavy

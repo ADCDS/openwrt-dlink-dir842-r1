@@ -86,8 +86,8 @@ and cross-checked against the vendor SDK. It exposes a datapath programmer at
 **`rtl819x_hwnat.c`** — Linux conntrack → per-flow ASIC NAPT rows through the downstream
 `ndo_flow_offload` interface. Per flow it installs **two rows** (outbound + inbound),
 tracks them in a shadow bitmap, and runs an aging worker with a lost-DEL reaper. A NAPT
-miss **traps to the CPU**, so software forwarding is always the fallback — this is why
-offload can be default-off and still safe.
+miss **traps to the CPU**, so software forwarding is always the fallback — which is what
+makes running with offload armed safe.
 
 **Forwarding chain:** `route(process=5) → nexthop → ARP → L2`.
 
@@ -103,10 +103,18 @@ Runtime toggle:
 echo 1 > /sys/module/rtl819x/parameters/hwnat
 ```
 
-It is deliberately **OFF at boot**. `files/target/linux/realtek/base-files/etc/init.d/dir842-asic`
-(`START=97`) does `swconfig apply` → `fabric_reset=3` → `gw_prog` → L2 warm, and explicitly
-does **not** arm `hwnat`; the script says so in its own header comment. The module default
-is off too (`rtl819x_hwnat.c:69-72`, `"0=off (software fastpath only, default)"`).
+The **module parameter** defaults to off (`rtl819x_hwnat.c:69-72`,
+`"0=off (software fastpath only, default)"`), but **since R4 (2026-08-16) the shipped
+image arms it at boot**: `files/target/linux/realtek/base-files/etc/init.d/dir842-asic`
+(`START=97`) does MAC-poll → `swconfig apply` → `fabric_reset=3` → `gw_prog` → L2 warm →
+`echo 1 > /sys/module/rtl819x/parameters/hwnat` as its last step. Arming before the tables
+are warm kills the datapath, which is why it is last and why it is the service's job
+rather than a boot arg. To run on the software path instead:
+`echo 0 > /sys/module/rtl819x/parameters/hwnat` (or `/etc/init.d/dir842-asic stop`).
+
+*(Earlier revisions of this document said offload was deliberately off at boot. That was
+true before R4 — the reverse-NAPT path still trapped to the CPU then and a sustained
+download could wedge the box. Both of those are fixed.)*
 
 The whole M6.6 engine landed squashed in `d150b24606` (alias `f096f5d`, 2026-07-16; public
 mirror `2d9ef4a`).
@@ -136,7 +144,7 @@ Commit `8d315c331b` (2026-07-31 13:58). **This is the single most important fact
 repo, and the older docs state it backwards.**
 
 The premise that held for eleven days — introduced by `fd2cf06a07` (alias `85f01c9`,
-2026-07-20) and asserted at `docs/M7-HWNAT-REVERSE-NAPT.md:42` and `:370` — was:
+2026-07-20) and asserted at `docs/M7-HWNAT-REVERSE-NAPT.md` (the "all hash inputs are NETWORK order" passages) — was:
 
 > "the ASIC hashes/keys the ON-WIRE (network-order) header fields"
 
@@ -540,8 +548,10 @@ described in [`BENCH.md`](BENCH.md).
   in software — but its **inbound** packets match the first flow's row and are rewritten to
   the wrong host (`rtl819x_hwnat.c:36-46`). The same mechanism can hijack replies to the
   router's own connections. Low frequency, but silent. Stock avoided it by owning the whole
-  port namespace (it allocated every G). Mitigation: offload is **default-off**, and a NAPT
-  miss **always traps to the CPU**, so software is the safe fallback.
+  port namespace (it allocated every G). Mitigation: a NAPT miss **always traps to the
+  CPU**, so software is the safe fallback — but note the shipped image **arms offload at
+  boot** (R4), so choosing the software path is now an explicit
+  `echo 0 > /sys/module/rtl819x/parameters/hwnat`.
 - **Download throughput is variable** (**681–906 Mbit** across runs) with 1200–2500 TCP retransmits per 10 s
   run. The router is not the bottleneck (CPU 0.3 %, zero interface errors). **The loss
   source has not been identified.**

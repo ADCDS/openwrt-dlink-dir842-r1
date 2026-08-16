@@ -105,8 +105,8 @@ static int wan_connected_route = 1;
  * the old per-peer /32 NAPT-NextHop route for A/B comparison. */
 /* ★ Egress port mask for the routed-peer L2 entries.
  * Measured on stock (docs): stock learns each host with a SINGLE-port mask --
- *   00:e0:4c:12:59:90 FID:0 mbr(2 ) FWD     (LAN client, its jack)
- *   e4:5f:01:04:98:af FID:1 mbr(4 ) FWD     (WAN peer,   its jack)
+ *   aa:bb:cc:00:00:02 FID:0 mbr(2 ) FWD     (LAN client, its jack)
+ *   aa:bb:cc:00:00:03 FID:1 mbr(4 ) FWD     (WAN peer,   its jack)
  * while this port wrote every peer entry with 0x3f (flood ports 0-5, "the VID picks
  * the jack"). A routed unicast cannot be hardware-forwarded to a flood mask -- the
  * ASIC has no single egress port to commit to -- which is exactly the observed
@@ -478,8 +478,8 @@ static u32 gw_write_l2_full(const u8 *m, u32 member, u32 extmember,
 }
 
 /* Peer identities are LEARNED per-flow now (see the shadows below), not compiled
- * in. The historical bench constants were hal enp3s0 54:bf:64:18:b8:de on the LAN
- * (VID2/fid0) and tiny eth0 e4:5f:01:04:98:af on the WAN (VID1/fid1); they survive
+ * in. The historical bench constants were hal enp3s0 aa:bb:cc:00:00:01 on the LAN
+ * (VID2/fid0) and tiny eth0 aa:bb:cc:00:00:03 on the WAN (VID1/fid1); they survive
  * only as the boot defaults of the shadows. */
 
 /* ---- M7.2: live WAN-identity shadows (all guarded by rtl865x_hal_lock) ----
@@ -496,8 +496,8 @@ static u8   gw_wan_gw_mac[6] = { 0xe4,0x5f,0x01,0x04,0x98,0xaf };	/* boot = GW_M
  * other network has, so no LAN client could ever be reached in hardware and the
  * offload silently degraded to CPU forwarding for every flow. It also rotted in
  * place here — the bench was rewired from hal's enp3s0 to a USB adapter and the
- * ASIC kept pointing at the departed MAC (observed: L2 entry 54:bf:64:18:b8:de
- * while the live client was 00:e0:4c:12:59:90).
+ * ASIC kept pointing at the departed MAC (observed: L2 entry aa:bb:cc:00:00:01
+ * while the live client was aa:bb:cc:00:00:02).
  * Now learned per-flow from the flow-offload SRC path, exactly as the WAN peer
  * is learned from the dest path. Boot defaults kept only so a gw_prog before the
  * first offload offer still writes something coherent. */

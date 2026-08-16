@@ -26,7 +26,7 @@ aging, ring/CRC — the offload-engagement breakthrough).
 hal enp3s0 (LAN 192.168.0.2/24, no default route, static route 172.16.0.0/24 via .0.1)
    └─DIR-842 LAN jack── [DIR-842] ──WAN jack─┘ tiny eth0 (WAN 172.16.0.2/24)
         box LAN 192.168.0.1  box WAN 172.16.0.1 (=masquerade extIP, KEEP static)
-   box LAN MAC 00:e0:4c:81:96:c2   box WAN MAC 00:e0:4c:81:96:c3   hal enp3s0 54:bf:64:18:b8:de   tiny e4:5f:01:04:98:af
+   box LAN MAC 00:e0:4c:81:96:c2   box WAN MAC 00:e0:4c:81:96:c3   hal enp3s0 aa:bb:cc:00:00:01   tiny aa:bb:cc:00:00:03
 ```
 - OpenWrt is **RAM-booted only** via `catch-robust.sh` (ESC-spam→TFTP→J). **NOTE: the
   NOR flash now holds OpenWrt (Jul 18 build), NOT stock** — the M7.1 flash gate was
@@ -284,7 +284,7 @@ NAT flow with data going WAN→LAN:
 
     ssh -i <key> agiu@172.16.0.2 "dd if=/dev/zero bs=1M count=300" | dd of=/dev/null
 
-⚠ Two bench traps worth recording: `ssh tiny` resolves over Tailscale (100.64.0.14)
+⚠ Two bench traps worth recording: `ssh tiny` resolves over Tailscale (100.64.0.x)
 and does NOT traverse the box — always target `172.16.0.2` explicitly. And ssh to the
 raw IP does not pick up the `Host tiny` config block, so it needs `-i <key>
 -o BatchMode=yes` or it hangs on auth and looks like a network failure.
@@ -981,18 +981,18 @@ pkt/MB, seeing 0.2 means stock genuinely offloaded essentially everything.
 ### ✅ Fixed: the LAN client identity was compiled in
 
 `gw_prog` programmed the ASIC's LAN egress chain from **build-time constants** —
-`GW_MAC_HALLAN` (54:bf:64:18:b8:de, one bench machine's NIC) and the /32 route
+`GW_MAC_HALLAN` (aa:bb:cc:00:00:01, one bench machine's NIC) and the /32 route
 `0xC0A80002`. The WAN peer was already learned at runtime from the flow-offload dest
 path; the LAN side never was. On any other network the L2 entry and host route the
 reply direction egresses through name a MAC/IP that does not exist, so **no LAN
 client could ever be reached in hardware**. It had already rotted here too: after the
 rig was rewired from hal's `enp3s0` to a USB adapter, the ASIC kept pointing at the
-departed MAC while the live client was `00:e0:4c:12:59:90`.
+departed MAC while the live client was `aa:bb:cc:00:00:02`.
 
 Fix: `rtl865x_lan_set_nexthop(mac, ip)` mirroring `rtl865x_wan_set_nexthop` exactly
 (shadow-compared, returns 1 on change so the caller flushes rows programmed under the
 old identity), fed from `src->eth_dest` + the flow's internal IP in
-`hwnat_add_flow()`. Verified: `gw_prog` now reports `L2[hal] = 00:e0:4c:12:59:90`.
+`hwnat_add_flow()`. Verified: `gw_prog` now reports `L2[hal] = aa:bb:cc:00:00:02`.
 Commit `a420c7f`.
 
 ⚠ Single-client shadow (matching the single /32 slot). Several active LAN clients
@@ -1159,8 +1159,8 @@ The two tables missing from the first stock run, captured during a live offloade
 
 `/proc/rtl865x/l2`:
 
-    [119,0] 00:e0:4c:12:59:90 FID:0 mbr(2 ) FWD DYN     LAN client -> its jack
-    [134,0] e4:5f:01:04:98:af FID:1 mbr(4 ) FWD DYN     WAN peer   -> its jack
+    [119,0] aa:bb:cc:00:00:02 FID:0 mbr(2 ) FWD DYN     LAN client -> its jack
+    [134,0] aa:bb:cc:00:00:03 FID:1 mbr(4 ) FWD DYN     WAN peer   -> its jack
     [119,1] e0:1c:fc:51:c9:ef FID:0 mbr(8 ) FWD DYN     router's own MAC -> CPU port 8
     [  0,0] ff:ff:ff:ff:ff:ff FID:0 mbr(0 1 2 3 4 8) CPU STA NH
     [  5,0] 00:00:0a:00:00:0f FID:0 mbr()            CPU STA NH

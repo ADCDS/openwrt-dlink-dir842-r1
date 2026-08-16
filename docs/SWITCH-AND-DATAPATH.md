@@ -55,7 +55,7 @@ therefore skips the whole extif-init/reset path for an 8367S deliberately
 (`rtl8367b_is_8367s()`, `rtl8367b.c:769`).
 
 Stock's own boot banner is part of why this stuck: it prints `8197F(PA=0) 8812B(PA=0)
-8367R NOR RAM=64` (`docs/VENDOR-PARITY-INVENTORY.md:8`). The vendor's SDK filenames say
+8367R NOR RAM=64` (`docs/VENDOR-PARITY-INVENTORY.md` (stock boot banner)). The vendor's SDK filenames say
 `rtl8367r/` too. Only the ID registers are authoritative. the early, now-deleted `ASSESSMENT.md` (the early,
 now-retired assessment) and several in-tree comments still say 8367R — see §11.
 
@@ -459,7 +459,7 @@ The driver never programmed `CPUICR1` and silently inherited whatever the bootlo
 | NOR flash boot (loader never touches the NIC) | no | `0x80` | **dead** |
 
 With the bit clear, the NIC master bus writes every received frame into DRAM
-**32-bit-word byte-swapped**. Measured on the bench — a ping from `00:e0:4c:12:59:90` lands
+**32-bit-word byte-swapped**. Measured on the bench — a ping from `aa:bb:cc:00:00:02` lands
 in the mbuf as:
 
 ```

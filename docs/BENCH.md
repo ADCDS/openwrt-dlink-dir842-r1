@@ -45,7 +45,7 @@ Three cables and a switchable outlet. That is the whole rig. The two things that
 locally, and the Pi steps run as `ssh tiny 'sudo ip addr add ...'` (`bench-up.sh:28,48`).
 
 ★ **The build host is DUAL-HOMED and that matters more than anything else in this document.**
-Its onboard NIC (`enp3s0`, `r8169`) is on the house LAN; the USB NIC (`enx00e04c125990`,
+Its onboard NIC (`enp3s0`, `r8169`) is on the house LAN; the USB NIC (`$IFACE`,
 `r8152`) is the bench. NetworkManager keeps re-adding a default route via the house gateway,
 which silently steals `172.16.0.0/24`. This is the single most-documented failure mode of the
 whole bench — see the comment block at `bench-up.sh:41-46`, which records that it once cost a
@@ -151,8 +151,8 @@ catch, not of a fault.
 | Linux LAN `eth0.2` / `br-lan` | `e0:1c:fc:51:c9:ef` |
 | Linux WAN `eth0.1` | `e0:1c:fc:51:c9:ee` |
 | old Realtek shared defaults (pre-R3) | `00:e0:4c:81:96:c2` LAN / `:c3` WAN |
-| Pi | `e4:5f:01:04:98:af` |
-| build-host bench NIC | `00:e0:4c:12:59:90` |
+| Pi | `aa:bb:cc:00:00:03` |
+| build-host bench NIC | `aa:bb:cc:00:00:02` |
 
 ★ **A FAMOUS WARNING IN THE SCRIPTS IS NOW OBSOLETE — corrected here.**
 `bench-up.sh:18-20` and `flash-nor.sh:17-18` both warn:
@@ -269,7 +269,7 @@ A Docker image built `FROM debian:bullseye` (Debian 11).
 **Why Debian 11 is required:** the ggbruno fork this port builds on is a ~2019/2020 tree
 (kernel **4.14.187**, target gcc **8.4.0**). Bullseye still ships `python2` /
 `python-is-python2` and the older host tools the old buildroot expects; modern toolchains fail
-to build those host tools. (`README.md:105-107` and `build.sh:16-18` say the same thing in
+to build those host tools. (`README.md` ("Build environment") and `build.sh:16-18` say the same thing in
 one line each.)
 
 ```dockerfile
@@ -283,8 +283,28 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 RUN useradd -u 1000 -m -s /bin/bash builder     # OpenWrt refuses to build as root;
 USER builder                                    # uid 1000 owns the bind-mounted tree
 ENV HOME=/home/builder FORCE_UNSAFE_CONFIGURE=1
-WORKDIR /build/openwrt
+WORKDIR /build
 ```
+
+### Building from a clean clone (the exact invocation)
+
+```sh
+git clone https://github.com/ADCDS/openwrt-dlink-dir842-r1
+cd openwrt-dlink-dir842-r1
+docker build -t owrt-dir842 - < Dockerfile        # the Dockerfile above
+docker run --rm -v "$PWD":/build -w /build owrt-dir842 ./build.sh
+```
+
+★ Two traps worth knowing:
+
+- **Do not point `WORKDIR` (or `-w`) at `/build/openwrt`.** Docker will *create* that
+  directory root-owned before anything runs, and `build.sh` then aborts with
+  `ERROR: ./openwrt already exists`. Keep the workdir at `/build`; `build.sh` creates
+  `openwrt/` itself.
+- **The container's `builder` user is uid 1000.** If your host account is not uid 1000 the
+  bind mount will be unwritable — either run
+  `docker build --build-arg U=$(id -u) …` with a matching `useradd -u $U`, or `chown` the
+  clone to 1000 first.
 
 Toolchain coordinates: target `mipsel_24kc_musl`, gcc 8.4.0, kernel 4.14.187. Staging dir is
 `staging_dir/toolchain-mipsel_24kc_gcc-8.4.0_musl`. Images land in
@@ -464,7 +484,7 @@ It asserts the `cr6b` magic and can patch the big-endian entry address.
    magic  at 0x67d4e6..0x67d4e9        = 00c0ffee
    ```
 
-★ **A correction to `tools/sign-dlink.py:4` and `README.md:135`.** Both say the key is
+★ **A correction to `tools/sign-dlink.py:4` and `README.md` ("NOR flash").** Both say the key is
 *"embedded in the bootcode (`mtd0`) at `0x291bc`"*. That offset is **not** into the raw NOR
 image — absolute `0x291bc` in the 8 MB dump reads `0xFF` (erased), and the key appears nowhere
 in the raw dump in any encoding. `0x291bc` is an offset into the **decompressed** bootcode:
@@ -824,7 +844,7 @@ the published numbers.
 | `bench-up.sh:18-20` | loader answers on `e0:1c:fc:51:c9:ef`, Linux on `00:e0:4c:81:96:c2` — never pin a static ARP | **No longer true since `484e4db4bd`.** Both are `e0:1c:fc:51:c9:ef` (`02_network:59-64`). The conflict cannot occur. |
 | `flash-nor.sh:17-18` | same MAC-conflict warning | same correction |
 | `bench-wan-emu.sh:16` | cites `rtl819x-eth.c:1134` for the `ph_vlanId` constraint | current tree: **`rtl819x-eth.c:1269-1276`** (comment) / `:1277-1280` (code) |
-| `tools/sign-dlink.py:4`, `README.md:135` | key *"embedded in the bootcode (`mtd0`) at `0x291bc`"* | `0x291bc` is an offset into the **decompressed** bootcode (gzip stream at `mtd0+0x7d70`, 191,632 B inflated), **not** into the raw NOR image, where that offset reads `0xFF` (§8) |
+| `tools/sign-dlink.py:4`, `README.md` ("NOR flash") | key *"embedded in the bootcode (`mtd0`) at `0x291bc`"* | `0x291bc` is an offset into the **decompressed** bootcode (gzip stream at `mtd0+0x7d70`, 191,632 B inflated), **not** into the raw NOR image, where that offset reads `0xFF` (§8) |
 | `MANIFEST.txt` | — | **has no mention of the bench at all.** `grep -niE 'bench\|ramboot\|flash-nor\|serial\|38400'` returns nothing, even though `bench-up.sh`, `bench-wan-emu.sh`, `bootgate.sh`, `flash-nor.sh` and `ramboot.sh` are all committed in the repo root and absent from its "REPO ROOT" listing. |
 
 ---
@@ -842,7 +862,7 @@ Stated as gaps, deliberately not guessed:
 3. **The chip/driver of the USB WiFi dongle used for the M5 AP proof.** Not determined.
 4. **The source of the download-path TCP retransmits** (1200–2500 per run at ~900 Mbit). The
    router is measurably not the bottleneck — CPU 0.3 %, zero interface errors — but the loss
-   source was never identified (`README.md:66-68`). Take a range, not a single run.
+   source was never identified (`README.md` ("Known limitations")). Take a range, not a single run.
 
 ---
 

@@ -457,7 +457,7 @@ static void rtl865x_start(void)
 	 *
 	 * With the bit clear the DMA engine writes every received frame into
 	 * DRAM 32-bit-word byte-swapped. Measured on the bench: a ping from
-	 * 00:e0:4c:12:59:90 to this box lands in the mbuf as
+	 * aa:bb:cc:00:00:02 to this box lands in the mbuf as
 	 *     51 fc 1c e0  e0 00 ef c9  90 59 12 4c  02 00 00 81  00 45 00 08
 	 * i.e. each word of "e0 1c fc 51 | c9 ef 00 e0 | 4c 12 59 90 |
 	 * 81 00 00 02 | 08 00 45 00" reversed. eth_type_trans() then reads the

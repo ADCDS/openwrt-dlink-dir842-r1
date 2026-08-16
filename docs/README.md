@@ -29,9 +29,11 @@ in the vendor's **CPU-tag / port0-router** mode, with a real WAN/LAN split — `
 that Linux splits by VLAN (`files/target/linux/realtek/base-files/etc/board.d/02_network:10-17`).
 On top of that: fw3 + NAT + PPPoE, the software flowtable, and **hardware NAT offload at
 891 Mbit up / 896 Mbit down with 0.0 % of payload bytes crossing the CPU** (stock D-Link on
-the same bench: 913/923). Both radios run concurrently and are both bridged into `br-lan` —
-5 GHz **RTL8822BE via rtw88**, 2.4 GHz the **on-SoC WMAC via the vendor `rtl8192cd` driver**.
-This is a **bench project**; it has never been run as a household gateway.
+the same bench: 913/923). Both radios run concurrently on the hardware and bridge into `br-lan` — 5 GHz
+**RTL8822BE via rtw88**, 2.4 GHz the **on-SoC WMAC via the vendor `rtl8192cd` driver** —
+but ⚠ **images built from this repo ship 5 GHz only**, because that vendor driver is not
+redistributable here. All of the above is measured on an isolated bench; treat the port as
+**pre-production** and keep a flash backup.
 
 ## Reading order for the three kinds of reader
 
@@ -100,12 +102,15 @@ sequence of wrong models is the most reusable content in them.
   pointer backwards.
 - Measured numbers are always from hardware, with the bench and the method named. Ranges are
   given as ranges; a single run is labelled as a single run.
-- **Commit hashes refer to the branch `Realtek` of the private build tree**
-  (`/home/agiu/dir842-build/openwrt`) unless prefixed `mirror`, which means the public
-  mirror.
+- **Commit hashes refer to the branch `Realtek` of the engineering build tree**, which is
+  published at [`ADCDS/openwrt`](https://github.com/ADCDS/openwrt/tree/Realtek) (the
+  full OpenWrt tree this repo overlays onto). Hashes prefixed `mirror` are commits in
+  *this* repo. If you only have this repo, a bare hash will not resolve here — that is
+  expected; it lives in the build tree.
 - ⚠ **Hash aliasing.** That history was rebased. Commit *messages* and older doc text
-  cross-reference a pre-rebase hash set that is no longer reachable by those names. If a hash
-  will not resolve, this is why. Verified aliases:
+  cross-reference a pre-rebase hash set that is **no longer an ancestor of `Realtek` HEAD**
+  (the objects themselves still resolve in a full clone). If a hash looks unfamiliar, this
+  is why. Verified aliases:
 
   | current (on branch `Realtek`) | pre-rebase (as quoted in old commit messages) |
   |---|---|

@@ -52,8 +52,8 @@ in the pinned ggbruno base. See [`VENDOR-PARITY-INVENTORY.md`](VENDOR-PARITY-INV
 
 | | SSID | encryption |
 |---|---|---|
-| 5 GHz `radio0` | `DIR842-OpenWrt` | **`none`**, key deleted — deliberately no baked credential (`files/target/linux/realtek/base-files/etc/uci-defaults/99-dir842-m5:181-189`) |
-| 2.4 GHz `radio1` | `DIR842-2G` | `psk2`, placeholder key `ChangeMeNow123` (`files/…/uci-defaults/09_wireless-dualband-dir842:66-67`) |
+| 5 GHz `radio0` | `DIR842-OpenWrt` | **`none`**, key deleted — deliberately no baked credential (`files/target/linux/realtek/base-files/etc/uci-defaults/99-dir842-m5 (5 GHz wifi-iface block)`) |
+| 2.4 GHz `radio1` | `DIR842-2G` | `psk2`, placeholder key `ChangeMeNow123` (`files/…/uci-defaults/09_wireless-dualband-dir842 (radio1 PSK)`) |
 
 The root README's "placeholder WiFi PSK" warning describes the 2.4 GHz seed. The 5 GHz
 seed ships open on purpose: a PSK baked into a published image is a published credential.
@@ -533,8 +533,8 @@ Notes that save time:
 4. **`regdomain` is numeric.** The handler emits `${phy}_regdomain=$country`
    (`rtl8192cd.sh:233`) and that MIB takes a number, so a real code like `BR` would be
    rejected. It works today only because the seed sets `country='1'`
-   (`09_wireless-dualband-dir842:65`). The mac80211 side, independently, uses `country='BR'`
-   (`99-dir842-m5:167`) — correct there, and *not* interchangeable.
+   (`09_wireless-dualband-dir842 (radio1 country)`). The mac80211 side, independently, uses `country='BR'`
+   (`99-dir842-m5 (radio0 country)`) — correct there, and *not* interchangeable.
 5. ⚠→✅ **The `VENDOR_SDK=` build path was WITHDRAWN 2026-08-02 — verified broken by
    dry-run, then removed rather than shipped broken.** `build.sh` no longer accepts
    `VENDOR_SDK=`; the two port patches stay in the repo root as the record of the
@@ -571,7 +571,7 @@ Notes that save time:
 6. ✅ **RESOLVED 2026-08-02 — the `delete wireless` ordering hazard does not exist;
    measured on-box.** Whole-config `uci delete wireless` (no section name) is an
    **invalid statement**: it returns `uci: Invalid argument` (exit 1) and deletes
-   nothing — inside the `uci -q batch` at `99-dir842-m5:158` it is a silent no-op.
+   nothing — inside the `uci -q batch` at `99-dir842-m5 (radio0 block)` it is a silent no-op.
    Proven two ways: against a scratch config (`uci -c /tmp/ucitest` — all four wifi
    sections survived it), and on the running box, where `99-`'s overlay whiteout
    shows it ran yet `radio1` still carries `09_`'s exact seed. The earlier analysis
