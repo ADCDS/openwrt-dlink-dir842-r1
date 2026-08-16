@@ -1,0 +1,41 @@
+#!/bin/sh
+# DIR-842 R1 — re-derive the ASIC datapath when an interface's L3 identity changes.
+#
+# WHY THIS EXISTS
+# The boot service programs the ASIC datapath once, early. When an interface's L3
+# configuration changes afterwards — a DHCP lease landing, a PPPoE reconnect, a manual
+# change — re-establishing that scaffolding is the correct thing to do, and it is also
+# where offload gets armed if the WAN had no address at boot (the shipped default is
+# `wan.proto=dhcp`, so a late lease is the normal case).
+#
+# ⚠ SCOPE — do not oversell this. It is NOT a fix for the "A-2" latch (issue #1),
+# where sustained bulk TCP stalls on the routed egress path. That latch is induced by
+# the traffic itself, so reprogramming beforehand cannot pre-empt it; that was
+# measured across several variants of this handler. The published recovery for a
+# latched box is `/etc/init.d/dir842-asic restart`.
+#
+# Reprogramming is cheap (no fabric reset) and idempotent. It DOES wipe the ASIC L2
+# tables, so the service re-warms them and the whole sequence is serialized under a
+# lock — netifd fires several events per interface, and two overlapping runs could
+# otherwise leave the tables cold with offload armed against them.
+[ "$ACTION" = "ifup" ] || [ "$ACTION" = "ifupdate" ] || exit 0
+
+case "$INTERFACE" in
+	wan|wan6|lan) ;;
+	*) exit 0 ;;
+esac
+
+# Only once the datapath exists — at first boot the service itself does the work,
+# and racing it would just wipe the L2 tables it is warming.
+[ -e /proc/rtl865x_gw ] || exit 0
+[ -x /etc/init.d/dir842-asic ] || exit 0
+
+# Backgrounded, and deliberately DELAYED. Reprogramming the instant the interface
+# reports up does not stick: measured repeatedly, an ifup-time reprogram leaves the
+# offloaded datapath stalled, while the identical sequence run a minute later cures
+# it every time. Something in the post-ifup settling (netifd finishing, the firewall
+# reloading, neighbours resolving) still has to happen first. The reprogram is
+# serialized by a lock, so a burst of ifup/ifupdate events collapses safely.
+( sleep 30; /etc/init.d/dir842-asic reprogram ) >/dev/null 2>&1 &
+
+exit 0

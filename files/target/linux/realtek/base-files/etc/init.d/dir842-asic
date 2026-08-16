@@ -45,6 +45,8 @@
 # with an empty procd service (measured on-box 2026-08-16: no process, no log line,
 # hwnat never armed). Leaving it unset keeps the legacy path and our functions.
 START=97
+EXTRA_COMMANDS="reprogram"
+EXTRA_HELP="	reprogram	Re-derive the ASIC L3 identity after a WAN address change (no fabric reset)"
 
 # LAN/WAN peers to prime the L2 tables with. The defaults are the bench rig's peers; on
 # any other network they simply time out harmlessly and real traffic warms the tables on
@@ -94,11 +96,53 @@ asic_warm() {
 	done
 }
 
+# Re-run the ASIC datapath programming (gw_prog) without the heavy fabric reset.
+#
+# ⚠ WHAT THIS DOES AND DOES NOT FIX — read before trusting it.
+# gw_prog re-derives the ASIC L2/nexthop entries from the driver's shadows and
+# re-writes extIP[0] from `rtl865x_wan_extip`. It does NOT read any interface's IP
+# address (verified in rtl865x_asichal.c: the routes are compile-time constants and
+# extIP comes from a module global, not from the netdev), so do not describe this as
+# "picking up the new WAN address" — the per-flow path in rtl819x_hwnat.c is what
+# tracks a changed WAN IP. What gw_prog genuinely re-establishes is the L3/L2
+# scaffolding, and it is the documented recovery for the "A-2" latch (see
+# rtl819x-eth.c and GitHub issue #1), where sustained bulk TCP stalls on the routed
+# egress path.
+#
+# ★ Running this at ifup does NOT prevent the A-2 latch — measured, repeatedly. The
+# latch is induced by the traffic itself, so a reprogram that happens before the
+# traffic cannot pre-empt it. This action exists as a RECOVERY you can invoke, and
+# because re-establishing the scaffolding after an interface change is correct in its
+# own right. If you want the published recovery for an already-latched box, use
+# `restart` — it also does the level-3 fabric reset, which the large-frame-wedge work
+# found to be the only reset level that clears that class of latch.
+asic_reprogram() {
+	# Serialized: netifd emits several iface events for one interface coming up, and
+	# gw_prog WIPES the ASIC L2 tables. Two overlapping runs can interleave as
+	# "wipe, wipe, warm, <nothing>" and leave the tables cold — and arming offload
+	# against cold tables is measured to kill the datapath outright.
+	lock /var/lock/dir842-asic.lock 2>/dev/null
+
+	echo 0 > /sys/module/rtl819x/parameters/hwnat 2>/dev/null
+	asic_warm				# resolve neighbours first
+	cat /proc/rtl865x_gw >/dev/null 2>&1	# reprogram (WIPES the L2 tables)
+	asic_warm				# re-populate what gw_prog just wiped
+	wan_has_addr && echo 1 > /sys/module/rtl819x/parameters/hwnat 2>/dev/null
+
+	logger -t dir842-asic "ASIC datapath reprogrammed (wan=$(ip -4 addr show eth0.1 2>/dev/null | sed -n 's/.*inet \([0-9.]*\).*/\1/p'))"
+	lock -u /var/lock/dir842-asic.lock 2>/dev/null
+}
+
 asic_up() {
 	wait_netif_mac
 	asic_program
 	asic_warm
-	echo 1 > /sys/module/rtl819x/parameters/hwnat 2>/dev/null
+	if wan_has_addr; then
+		echo 1 > /sys/module/rtl819x/parameters/hwnat 2>/dev/null
+	else
+		echo 0 > /sys/module/rtl819x/parameters/hwnat 2>/dev/null
+		logger -t dir842-asic "WAN has no address yet — leaving hwnat OFF; the iface hotplug arms it once the WAN is up"
+	fi
 	logger -t dir842-asic "ASIC up: netif MAC $(cat /sys/class/net/eth0.2/address 2>/dev/null), L2 warmed, hwnat=$(cat /sys/module/rtl819x/parameters/hwnat 2>/dev/null)"
 }
 
@@ -110,6 +154,10 @@ start() {
 
 stop() {
 	echo 0 > /sys/module/rtl819x/parameters/hwnat 2>/dev/null
+}
+
+reprogram() {
+	asic_reprogram
 }
 
 restart() {
