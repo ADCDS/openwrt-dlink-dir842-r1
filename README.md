@@ -52,7 +52,8 @@ CPU ~99.7 % idle. As far as we know this is the first working mainline OpenWrt
   | offload off | 184 up / 187 down Mbit | ~100.6 % | ~52 % |
   | **offload on** | **891 up / 896 down Mbit** | **0.0 %** | **0.3 %** |
 
-  Runtime toggle: `echo 1 > /sys/module/rtl819x/parameters/hwnat`.
+  Armed automatically at boot (last step of the `dir842-asic` bring-up, after the ASIC
+  warm-up); runtime toggle: `echo 0/1 > /sys/module/rtl819x/parameters/hwnat`.
 - **5 GHz WiFi** — on-board **RTL8822BE** (PCIe) via **rtw88**, AP mode (⚠ the
   shipped config is **open** — see the warning above; WPA2 itself works). RTL8197F +
   PCIe WiFi had never worked in OpenWrt before (see *Engineering notes*).

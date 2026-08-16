@@ -798,15 +798,17 @@ hardware NAPT rows rewrite to.
 swconfig apply  ->  echo 3 > fabric_reset  ->  cat /proc/rtl865x_gw (gw_prog)  ->  L2 warm
 ```
 
-with a `sleep 5` first so netifd has finished creating `eth0.1` / `eth0.2` / `br-lan` and
-applied the per-unit MACs (`dir842-asic:62-73`).
+with a MAC **poll** first (R4; was a fixed `sleep 5`) so netifd has finished creating
+`eth0.1` / `eth0.2` / `br-lan` and applying the per-unit flash MACs.
 
-**`hwnat` is DELIBERATELY LEFT OFF at boot** and armed by hand. The script's own comment
-(`dir842-asic:23-27`) records why: enabling it before the tables are warm **killed the datapath
-outright** — 100% loss, recovering on `echo 0` plus a `fabric_reset`.
+**`hwnat` arming (R4 2026-08-16): boot arms it automatically**, as the service's last
+step, strictly after the L2 warm — enabling it before the tables are warm **killed the
+datapath outright** (100% loss, recovering on `echo 0` plus a `fabric_reset`), which is
+also why pre-R4 images left it off entirely (back then the reverse path still CPU-trapped
+and a sustained download wedged the box).
 
 ```sh
-echo 1 > /sys/module/rtl819x/parameters/hwnat   # arm offload, once the box is warm
+echo 0 > /sys/module/rtl819x/parameters/hwnat   # disarm to measure software forwarding
 ```
 
 ---

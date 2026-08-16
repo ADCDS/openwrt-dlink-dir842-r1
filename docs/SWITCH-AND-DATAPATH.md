@@ -686,17 +686,25 @@ reproduced here because each step is there for a measured reason:
 
 The whole sequence is backgrounded behind a `sleep 5` so boot never blocks, but it is
 strictly ordered inside, and it is idempotent — `/etc/init.d/dir842-asic restart` is a
-supported recovery. The 5-second wait is not arbitrary: it lets netifd finish creating
-`eth0.1`/`eth0.2`/`br-lan` and applying MACs, so `gw_prog` reads the real per-unit netif
-MACs through `gw_netif_mac()` rather than the fallback constants (§8).
+supported recovery. The initial wait is a **poll** for the per-unit flash MAC (R4; was a
+fixed 5-second sleep): `gw_prog` must read the real netif MACs through `gw_netif_mac()`
+rather than the fallback constants, or an ASIC-vs-Linux MAC mismatch blackholes the
+datapath (§8).
 
-★ **`hwnat` is deliberately not armed by this service.** Measured: enabling it before the
-tables are warm kills the datapath outright (100 % loss, recovers on `echo 0` +
-`fabric_reset`). Arm it by hand: `echo 1 > /sys/module/rtl819x/parameters/hwnat`.
+★ **`hwnat` is armed by this service as its LAST step** (R4 2026-08-16), strictly after
+the warm-up — measured: enabling it before the tables are warm kills the datapath
+outright (100 % loss, recovers on `echo 0` + `fabric_reset`). Pre-R4 images left it off
+at boot entirely (the reverse path still CPU-trapped back then); the runtime toggle
+remains `echo 0/1 > /sys/module/rtl819x/parameters/hwnat`.
 
-This service replaced an older `rc.local` `( sleep 5; … ) &` that fired at a fixed 5 s
-regardless of netifd, never warmed the L2 tables at all, and never re-ran after a netifd
-reload — so a boot could easily land with the gateway half-programmed.
+R4 also made this service the **single owner** of the bring-up. It used to be duplicated
+inline in `rc.local` because invoking the service from there "produced no effect" — root
+cause: the script shipped without the execute bit, so the baked `S97` symlink (and any
+exec of it) failed with a silent "Permission denied" every boot, while the *sourced*
+`rc.local` ran. The exec bit is fixed and `rc.local` is empty. Before all that, an even
+older `rc.local` `( sleep 5; … ) &` fired at a fixed 5 s regardless of netifd, never
+warmed the L2 tables, and never re-ran after a netifd reload — so a boot could easily
+land with the gateway half-programmed.
 
 ---
 

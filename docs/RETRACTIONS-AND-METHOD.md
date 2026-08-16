@@ -126,7 +126,8 @@ version = 1, and the vendor gates the entire header-table path on `p_dm[0x3E4] =
 **#12 — a whole session measured with the offload switched off (`38d335f93b`).**
 `hwnat` is a module parameter that defaults to **off** (`rtl819x_hwnat.c:69-71`,
 `bool rtl819x_hwnat_enabled;` — uninitialised) and the boot-time ASIC programming deliberately
-does not arm it (`base-files/etc/init.d/dir842-asic:23`, "hwnat is deliberately NOT armed here").
+does not arm it (`base-files/etc/init.d/dir842-asic:23`, "hwnat is deliberately NOT armed
+here" — historical: since R4 2026-08-16 the service DOES arm it, after the warm-up).
 Every R6 number in that session therefore measured **software forwarding**, and twelve
 hypotheses were "falsified" against it. Redone with a **positive control**:
 

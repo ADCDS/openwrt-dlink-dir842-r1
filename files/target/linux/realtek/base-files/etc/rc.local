@@ -1,72 +1,14 @@
 #!/bin/sh
-# DIR-842 R1 (RTL8197F) M6.6 — bring the ASIC hardware-routing gateway up at boot.
+# DIR-842 R1 (RTL8197F) — intentionally empty.
 #
-# Two boot-time steps the normal init sequence doesn't cover:
-#  1) The external RTL8367S retains a wedged trunk->jack L2/forwarding state across
-#     warm reloads (rtl8367b_reset_chip() deliberately skips the 8367S soft reset to
-#     preserve the power-on RGMII uplink). Symptom: routed WAN<->LAN frames reach the
-#     8367S over the trunk but are not forwarded out to the jacks (P4out flat, ~66-100%
-#     loss). A single `swconfig ... set apply` AFTER netifd re-programs the VLAN/
-#     forwarding tables and clears it -> reliable trunk->jack delivery.
-#  2) Program the SoC L3/L4 datapath (netifs + routes + L2 nexthops) into the ASIC via
-#     /proc/rtl865x_gw so LAN(VID2)<->WAN(VID1) is routed in hardware (CPU bypassed).
+# R4: the ASIC datapath bring-up that used to run inline here is owned by the ordered,
+# idempotent service /etc/init.d/dir842-asic (S97, baked into the image: MAC poll ->
+# swconfig apply -> fabric_reset 3 -> gw_prog -> L2 warm -> hwnat on). The inline copy
+# existed because invoking the service from here "produced no effect" — root cause
+# (2026-08-16): the script shipped 644, so exec'ing it always failed with a silent
+# "Permission denied", while this file, being SOURCED by /etc/init.d/done, ran
+# regardless. With the execute bit fixed the service runs from its own rc.d symlink
+# and the duplicate is gone.
 #
-# R3: the bring-up logic now lives in the ordered, idempotent service
-# /etc/init.d/dir842-asic (fabric_reset -> swconfig apply -> gw_prog -> L2 warm) instead of
-# the fixed `sleep 5` race that used to be inlined here. It is invoked from rc.local rather
-# than relying on its rc.d symlink because enabling a service from uci-defaults only takes
-# effect on the NEXT boot — and an initramfs/RAM boot never persists, so it would never run
-# at all during bench testing. rc.local runs on every boot, so this always fires; the
-# service is idempotent and can also be re-run by hand for recovery:
-#     /etc/init.d/dir842-asic restart
-# ⚠ Invoked INLINE in a backgrounded subshell rather than as `/etc/init.d/dir842-asic
-# start`. Measured: calling the init script from here produced no effect and no log lines
-# at all (its own backgrounded work does not survive), while this inline form demonstrably
-# runs at boot. The init script is still shipped and is the supported way to re-run the
-# sequence by hand: `/etc/init.d/dir842-asic restart`. Keep the two in step.
-#
-# Order is load-bearing (each step verified on hardware):
-#   swconfig apply -> clears the 8367S's wedged trunk->jack forwarding state
-#   fabric_reset 3 -> REQUIRED; without it a fresh boot forwards nothing at all (100% loss
-#                    on every path despite links up, correct VLANs and gw_prog PASS)
-#   gw_prog        -> programs netifs/routes/L2/ACL; WIPES the ASIC L2 tables, so it must
-#                    precede the warm-up
-#   warm           -> primes ASIC L2/ARP; cold unicast is not delivered until traffic flows
-# hwnat is deliberately NOT armed: enabling it before the tables are warm kills the
-# datapath, and with the reverse path still CPU-trapped a sustained download wedges the box.
-(
-	# ★ Wait for netifd to finish applying the per-unit MACs before programming the ASIC.
-	# This is not cosmetic: gw_prog copies eth0.2/eth0.1's CURRENT MAC into the ASIC netif
-	# (gw_netif_mac). If it runs while the interfaces still hold their pre-config MAC, the
-	# ASIC ends up on the fallback constants while Linux later moves to the flash MAC — and
-	# an ASIC-vs-Linux netif MAC mismatch blackholes the datapath completely. That is
-	# exactly why a hand-run sequence worked while the boot-time one left 100% loss.
-	# Poll for the expected flash MAC (WAN base + 1) instead of guessing a delay.
-	want=$(dd if=/dev/mtd1 bs=1 count=17 2>/dev/null)
-	case "$want" in
-	[0-9a-fA-F]*:*) want=$(. /lib/functions/system.sh; macaddr_add "$want" 1) ;;
-	*) want="" ;;
-	esac
-	i=0
-	while [ $i -lt 40 ]; do
-		[ -e /sys/class/net/eth0.2/address ] || { i=$((i+1)); sleep 1; continue; }
-		[ -z "$want" ] && break
-		[ "$(cat /sys/class/net/eth0.2/address)" = "$want" ] && break
-		i=$((i+1)); sleep 1
-	done
-	sleep 2
-
-	swconfig dev switch0 set apply 1 2>/dev/null
-	sleep 1
-	echo 3 > /sys/module/rtl819x/parameters/fabric_reset 2>/dev/null
-	sleep 3
-	cat /proc/rtl865x_gw >/dev/null 2>&1
-	for i in 1 2 3; do
-		ping -c2 -W1 192.168.0.2 >/dev/null 2>&1
-		ping -c2 -W1 172.16.0.2 >/dev/null 2>&1
-		sleep 1
-	done
-	logger -t dir842-asic "ASIC up: netif MAC $(cat /sys/class/net/eth0.2/address 2>/dev/null), L2 warmed, hwnat off"
-) &
-
+# Recovery for a wedged datapath: /etc/init.d/dir842-asic restart
 exit 0

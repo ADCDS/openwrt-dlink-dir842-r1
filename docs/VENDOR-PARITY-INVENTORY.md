@@ -1034,4 +1034,7 @@ RAM-boot panics ~50 s in: `/etc/rc.local` and `/etc/init.d/dir842-asic` both wri
 reset corrupts memory (simultaneous SIGSEGV across logd/ubusd/netifd/procd → "Attempted
 to kill init"). NOR boots survive it. Worked around at runtime only (no tree change) by
 killing those two scripts early and setting `fabric_autoreset=0`.
+(R4 2026-08-16: the bring-up now runs ONCE, from the service only — rc.local no longer
+writes `fabric_reset`. The initramfs fabric-reset hazard itself is unchanged: on a RAM
+boot, stop the service early or set `fabric_autoreset=0` before traffic.)
 Also: keep serial command lines under ~100 chars — a 210-char line lost bytes at 38400.

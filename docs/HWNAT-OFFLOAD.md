@@ -504,14 +504,17 @@ ping -c2 192.168.0.2; ping -c2 172.16.0.2              # 4. warm the ASIC L2/ARP
 before. ★ A level-3 `fabric_reset` clears the TLU tables, so it must **always** be paired
 with a following `gw_prog`.
 
-### Then arm offload by hand
+### Offload arming
 
 ```sh
 echo 1 > /sys/module/rtl819x/parameters/hwnat
 ```
 
-★ **`hwnat` is off after a cold boot by design.** State the `hwnat` setting of every number
-you report — at least two measurements in this project were confounded by omitting it.
+R4 (2026-08-16): **boot now arms `hwnat` automatically** — the `dir842-asic` service does
+it as its last step, strictly after the L2 warm-up (arming against cold tables kills the
+datapath, measured). The manual `echo 1` is only needed on pre-R4 images or after a
+manual disarm. ★ Still: state the `hwnat` setting of every number you report — at least
+two measurements in this project were confounded by omitting it.
 
 ### Measure with bytes-through-CPU, not throughput and not packet counts
 

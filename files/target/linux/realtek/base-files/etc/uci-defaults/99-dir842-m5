@@ -213,5 +213,6 @@ grep -qx 'dhcp-broadcast' /etc/dnsmasq.conf 2>/dev/null || echo 'dhcp-broadcast'
 
 exit 0
 
-# R3: enable the ordered ASIC bring-up service (replaces the old rc.local race)
-/etc/init.d/dir842-asic enable 2>/dev/null
+# (R4 note: no `enable` for dir842-asic here — it would be dead code below `exit 0`
+# anyway, and none is needed: the image build bakes /etc/rc.d/S97dir842-asic for any
+# init script with START= set. The R3-era line that sat here never ran once.)
