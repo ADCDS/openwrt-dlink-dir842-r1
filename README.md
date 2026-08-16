@@ -121,6 +121,19 @@ root with `python3` only and does not complete a build.
 
 ## Installing
 
+### Over the air, via the stock web UI (easiest — no serial cable)
+
+You can install this port on a stock unit **entirely over the network**: log into D-Link's
+own admin page, go to **System → Firmware Update → Local Update**, and upload
+`…-squashfs-factory.bin` — the same way you'd apply an official D-Link update. Stock writes
+it and reboots into OpenWrt at `192.168.0.1`. No UART, no soldering, no exploit; the
+factory image is already loader-signed, so there's no signing step. Reverting to stock is a
+single `mtd write` over SSH. This is verified end-to-end on the hardware.
+
+**Full step-by-step (both directions):** [docs/OTA-INSTALL.md](docs/OTA-INSTALL.md).
+
+The serial methods below still work and are the recovery route if a flash ever goes wrong.
+
 **Serial console is 38400 8N1** — the D-Link documentation's 115200 is wrong and gives
 you garbage.
 
@@ -162,7 +175,8 @@ again, as often as you like. The restore is verified on hardware in both directi
 a running OpenWrt it is a single `mtd write - firmware` (the same operation stock's own
 updater performs). Full instructions, including where to get official D-Link firmware
 (this repo does **not** redistribute it) and the serial-console recovery route:
-**[docs/RESTORE-STOCK.md](docs/RESTORE-STOCK.md)**.
+**[docs/RESTORE-STOCK.md](docs/RESTORE-STOCK.md)**. For the whole round trip in one place —
+install over the air *and* revert — see **[docs/OTA-INSTALL.md](docs/OTA-INSTALL.md)**.
 
 ## Engineering notes
 

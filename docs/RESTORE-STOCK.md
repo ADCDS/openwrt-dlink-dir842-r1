@@ -115,11 +115,10 @@ works here directly, wrapper or not.
 
 Symmetric to the above — pick whichever matches where you are:
 
-- **From stock, no serial:** flash this port's `…-squashfs-factory.bin` through the stock
-  web UI's firmware-update page. The factory image carries a valid D-Link trailer, so the
-  loader's signature check passes on the next boot. *(The loader-signature path is
-  verified; whether a given stock UI build also accepts it before writing can vary — if
-  the stock page rejects it, use the loader route.)*
+- **From stock, no serial (easiest):** upload this port's `…-squashfs-factory.bin` through
+  the stock web UI's **System → Firmware Update → Local Update** page. Verified
+  end-to-end on the hardware: stock accepts the unsigned image, writes it to the firmware
+  region, and OpenWrt boots. Step-by-step: **[OTA-INSTALL.md](OTA-INSTALL.md)**.
 - **From stock, serial:** loader AUTOBURN the `…-squashfs-factory.bin` (Route B, verified).
 - **From a running OpenWrt:** `sysupgrade -n …-squashfs-sysupgrade.bin` (verified, survives
   cold power-cycles).
