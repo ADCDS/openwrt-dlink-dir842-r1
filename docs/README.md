@@ -69,6 +69,7 @@ This is a **bench project**; it has never been run as a household gateway.
 | [`BENCH.md`](BENCH.md) | The physical bench, serial console, power control, build container, and the unattended RAM-boot / NOR-flash automation. |
 | [`WIFI-DUAL-BAND.md`](WIFI-DUAL-BAND.md) | The RTL8197F + PCIe wall, the blank efuse, the 25 MHz crystal, the vendor 2.4 GHz driver, and the two radios' interface-naming collision. |
 | [`RETRACTIONS-AND-METHOD.md`](RETRACTIONS-AND-METHOD.md) | Every falsified hypothesis and retracted claim, plus the measurement rules and bench confounds they produced. |
+| [`RESTORE-STOCK.md`](RESTORE-STOCK.md) | How to return to pristine D-Link firmware and back to OpenWrt at will — the flash partition map, why it's reversible, and both restore routes (verified on hardware). Product-facing. |
 | [`M7-LARGE-FRAME-RX-WEDGE.md`](M7-LARGE-FRAME-RX-WEDGE.md) | Root cause and fix for the RX-FIFO drain-lag race that corrupted box-terminating frames larger than ~128 B — the bug that broke DHCP and SSH. Part reference, part journal — it carries a banner. |
 
 ## The historical journals
