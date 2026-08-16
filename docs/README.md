@@ -39,8 +39,8 @@ redistributable here. All of the above is measured on an isolated bench; treat t
 
 **(a) You want to build and flash it.**
 
-1. [`../README.md`](../README.md) — the warnings first, then `build.sh` and
-   `tools/sign-dlink.py`.
+1. [`../README.md`](../README.md) — the warnings first, then `build.sh`. (You do not need
+   `tools/sign-dlink.py`: build.sh signs the images for you.)
 2. [`BENCH.md`](BENCH.md) — serial is **38400 8N1** (`ramboot.sh:20`), how to catch the
    loader, `ramboot.sh` / `flash-nor.sh`, and power control.
 3. [`WIFI-DUAL-BAND.md`](WIFI-DUAL-BAND.md) — only if you care about 2.4 GHz, for which
@@ -125,6 +125,14 @@ sequence of wrong models is the most reusable content in them.
   | `224f31964e` | `13d7a5b` |
   | `fd606f4428` | `3f8fc72` |
   | `59e2d2cd27` | `72d5d35` |
+
+## Cross-references you will not be able to follow
+
+A few docs cite working notes that were never published here — `HANDOFF-M6.md`,
+`RE-notes.md`, `ASIC-ENGINE.md`, `STOCK-TABLES.md`, `PARTITIONS.md`, and the deleted
+`ASSESSMENT.md`. They live in the private engineering tree. Where their content mattered
+it was folded into the current docs; the citations are left in place because they date the
+claim around them.
 
 ## What is deliberately not here
 

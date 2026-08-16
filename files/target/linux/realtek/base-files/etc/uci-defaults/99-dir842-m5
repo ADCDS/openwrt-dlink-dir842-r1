@@ -8,8 +8,9 @@
 # set; here we also pin a stable locally-administered MAC for a deterministic
 # BSSID. Real gateway config (WAN, real SSID/PSK, firewall zones) belongs in
 # the private profile overlay (dir842-profile), layered at build time via
-# PROFILE=. There is no managed WAN port yet (see docs/ASSESSMENT.md), so the
-# default wan interface is removed to avoid netifd errors.
+# PROFILE=. The WAN port IS managed (eth0.1 on VID1, DHCP client by default) —
+# an earlier revision of this comment said otherwise and cited a doc that has
+# since been deleted for being wrong about exactly that.
 
 # --- M6.6 HW-routing cascade (VID-based, no CPU-tag). The SoC ASIC classifies
 # LAN vs WAN purely by 802.1Q VID over the tagged trunk (port6); rtl865x_start +
@@ -39,8 +40,10 @@
 # The driver follows automatically — gw_netif_mac() programs the ASIC netif from the
 # interface's LIVE MAC, so the software and hardware datapaths cannot disagree.
 
-# NOTE: this heredoc is deliberately UNQUOTED (<<EOF, not <<'EOF') so the two MAC
-# variables above expand. Keep any literal '$' out of this block.
+# NOTE: this heredoc is UNQUOTED (<<EOF, not <<'EOF'). Nothing in it needs shell
+# expansion any more (the MAC pins that once did were removed — see above), but
+# it is left unquoted rather than churn a known-good block. ⚠ Consequence: keep
+# any literal '$' out of this block, or quote the heredoc when you add one.
 uci -q batch <<EOF
 add network switch
 set network.@switch[-1].name='switch0'

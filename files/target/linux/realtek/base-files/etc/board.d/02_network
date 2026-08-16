@@ -32,14 +32,6 @@ case $board in
     ;;
   gwr1200ac-v1)
     # DIR-842 R1: the mtd1 "MAC" partition carries TWO overlaid schemas.
-    #   0x00: D-Link per-unit base MAC as an 17-byte ASCII string ("e0:1c:fc:51:c9:ee")
-    #         = the WAN MAC; LAN = WAN + 1. This is what stock uses (libhwdata.so).
-    #   0x13: the Realtek vendor DEFAULT binary macAddr[] block (00:e0:4c:81:96:c1..c8),
-    #         identical on every unit.
-    # We used to read offset 19 (=0x13), i.e. the shared Realtek default, so every board
-    # came up with the same MAC. Read the ASCII field instead and fall back to the old
-    # behaviour if it is missing/garbage (some units may have an unprogrammed partition).
-    # DIR-842 R1: the mtd1 "MAC" partition carries TWO overlaid schemas.
     #   0x00: D-Link per-unit base MAC as a 17-byte ASCII string ("e0:1c:fc:51:c9:ee")
     #         = the WAN MAC; LAN = WAN + 1. This is what stock uses (libhwdata.so).
     #   0x13: the Realtek vendor DEFAULT binary macAddr[] block (00:e0:4c:81:96:c1..c8),

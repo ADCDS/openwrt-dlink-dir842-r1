@@ -32,6 +32,7 @@ REPO ROOT (not part of the overlay)
   g3-rtl8192cd-4.14-port.patch      our 4.14 port of the vendor WMAC driver
                                     (record; only applies to the 8devices-vintage
                                     tree it was developed on)
+  Dockerfile                        Debian 11 build container (docker build -t owrt-dir842 .)
   LICENSE                           GPL-2.0
   README.md / docs/                 reader docs + the engineering record
   images/                           sha256sums + provenance for the release
@@ -57,14 +58,13 @@ OVERLAY (files/)
    72552  target/linux/generic/files/drivers/net/phy/rtl8367b.c
    15122  target/linux/generic/hack-4.14/650-netfilter-add-xt_OFFLOAD-target.patch
     3437  target/linux/realtek/base-files/etc/board.d/01_leds
-    4060  target/linux/realtek/base-files/etc/board.d/02_network
-    5606  target/linux/realtek/base-files/etc/init.d/dir842-asic
+    3421  target/linux/realtek/base-files/etc/board.d/02_network
+    5654  target/linux/realtek/base-files/etc/init.d/dir842-asic
     755  target/linux/realtek/base-files/etc/rc.local
      359  target/linux/realtek/base-files/etc/sysctl.d/30-hwnat.conf
     3738  target/linux/realtek/base-files/etc/uci-defaults/09_wireless-dualband-dir842
-    1603  target/linux/realtek/base-files/etc/uci-defaults/10_flow-offload-dir842
     2861  target/linux/realtek/base-files/etc/uci-defaults/10_wireless-5g-ifname-dir842
-   12894  target/linux/realtek/base-files/etc/uci-defaults/99-dir842-m5
+   13952  target/linux/realtek/base-files/etc/uci-defaults/99-dir842-m5
     9686  target/linux/realtek/base-files/lib/netifd/wireless/rtl8192cd.sh
     1024  target/linux/realtek/base-files/lib/upgrade/platform.sh
     6750  target/linux/realtek/dts/GWR1200ACV1.dts

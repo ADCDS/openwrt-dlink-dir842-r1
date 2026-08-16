@@ -87,8 +87,15 @@ fi
 # and it is gitignored inside the OpenWrt tree, which is why it is shipped from here.
 cp "$SELF_DIR/feeds.conf" feeds.conf
 ./scripts/feeds update luci packages
-./scripts/feeds install luci-base luci-mod-admin-full luci-theme-bootstrap \
+# ★ `luci` (the meta-package) MUST be in this list. seed-m5.config selects
+# CONFIG_PACKAGE_luci=y, and if the symbol does not exist at `make defconfig`
+# time it is dropped SILENTLY — taking uhttpd, uhttpd-mod-ubus and the admin
+# pages with it, and you get an image with no web UI and no error anywhere.
+# (That shipped once. The seed now also selects uhttpd/luci-mod-admin-full by
+# name so a feed change cannot repeat it.)
+./scripts/feeds install luci luci-base luci-mod-admin-full luci-theme-bootstrap \
                         luci-app-firewall luci-app-upnp luci-app-opkg \
+                        luci-proto-ppp uhttpd uhttpd-mod-ubus \
                         cgi-io miniupnpd qos-scripts
 
 # Seed config: shipped from seed-m5.config so this script builds what the port
@@ -112,4 +119,5 @@ echo "  - *-GWR1200AC-V1-squashfs-factory.bin      (NOR flash via the loader's A
 echo "  - *-GWR1200AC-V1-squashfs-sysupgrade.bin   (NOR flash via sysupgrade)"
 echo
 echo "⚠ Both squashfs images REPLACE stock firmware. Back up all 8 MB of NOR first."
-echo "  A factory image must carry the D-Link trailer: tools/sign-dlink.py in.bin out.bin"
+echo "  These images are ALREADY signed for the loader (the build runs dlink-md5-sign)."
+echo "  Do NOT run tools/sign-dlink.py on them — a second trailer is appended, not replaced."

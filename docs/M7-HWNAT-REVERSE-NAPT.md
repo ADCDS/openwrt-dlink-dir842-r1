@@ -850,7 +850,9 @@ so the host is not the limiter — confirmed by the box hitting ~96% CPU.
 **confirms the 155-160 Mbit prediction** extrapolated earlier from the 94 Mbit
 data — the extrapolation method was sound.
 
-Flow offload is now shipped on by default (`uci-defaults/10_flow-offload-dir842`).
+Flow offload is now shipped on by default (`uci-defaults/99-dir842-m5`, which sets both
+`flow_offloading` and `flow_offloading_hw`; the separate `10_flow-offload-dir842` seed it
+originally used was redundant and has been removed).
 It is a genuine +23%, but note what it means: removing the entire conntrack and
 iptables traversal bought only 25% per byte, so **netfilter was never the dominant
 cost**. Gigabit needs ~8 ms CPU/MB; we are at 40.7. The remaining ~5x is in the
@@ -1090,8 +1092,8 @@ abandoned on a false negative.
 
 `/proc/rtl865x/arp`:
 
-    192.168.0.2  00-e0-4c-12-59-90  ARP:  2  L2:119     (LAN window 0 + host octet 2)
-    172.16.0.2   e4-5f-01-04-98-af  ARP:258  L2:134     (WAN window 256 + host octet 2)
+    192.168.0.2  aa-bb-cc-00-00-02  ARP:  2  L2:119     (LAN window 0 + host octet 2)
+    172.16.0.2   aa-bb-cc-00-00-03  ARP:258  L2:134     (WAN window 256 + host octet 2)
 
 `/proc/rtl865x/ip`:
 

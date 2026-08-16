@@ -46,9 +46,9 @@
 # hwnat never armed). Leaving it unset keeps the legacy path and our functions.
 START=97
 
-# LAN/WAN peers to prime the L2 tables with. Overridable in /etc/config/dir842 later;
-# the defaults are the bench rig's peers and simply time out harmlessly elsewhere —
-# real traffic warms further hosts on demand.
+# LAN/WAN peers to prime the L2 tables with. The defaults are the bench rig's peers; on
+# any other network they simply time out harmlessly and real traffic warms the tables on
+# demand. Override by exporting WARM_HOSTS before calling this script, or edit the line.
 WARM_HOSTS="${WARM_HOSTS:-192.168.0.2 172.16.0.2}"
 
 wait_netif_mac() {

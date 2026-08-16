@@ -3,3 +3,7 @@
 # built images ship as GitHub releases, not in-repo
 images/*.bin
 images/*.itb
+
+# python bytecode
+__pycache__/
+*.pyc

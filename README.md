@@ -32,9 +32,17 @@ CPU ~99.7 % idle. As far as we know this is the first working mainline OpenWrt
 > **The safest way to try this is the initramfs image**, which is loaded into RAM and
 > **never writes flash** — a power-cycle discards it entirely.
 >
-> Default images have **no root password** and the **5 GHz AP is OPEN**
-> (`encryption='none'`, `files/…/uci-defaults/99-dir842-m5`). A default image
-> broadcasts an unencrypted network. Fix both before this touches a real network.
+> **Fix these three things before this touches a real network:**
+>
+> - **The 5 GHz AP is OPEN** — SSID **`DIR842-OpenWrt`**, `encryption='none'`. A default
+>   image broadcasts an unencrypted network.
+> - **There is no root password.** Set one (`passwd`) — with an open AP, anyone in range
+>   can log in.
+> - **The regulatory domain is hard-coded to `BR`** (Brazil), because that is where the
+>   port was developed and it unlocks the UNII-1 channels used for the default channel 36.
+>   Set yours: `uci set wireless.radio0.country='<your ISO code>'; uci commit wireless; wifi`.
+>
+> Defaults live in `files/…/uci-defaults/99-dir842-m5`.
 
 ## Status
 
@@ -60,6 +68,7 @@ CPU ~99.7 % idle. As far as we know this is the first working mainline OpenWrt
 - **5 GHz WiFi** — on-board **RTL8822BE** (PCIe) via **rtw88**, AP mode (⚠ the
   shipped config is **open** — see the warning above; WPA2 itself works). RTL8197F +
   PCIe WiFi had never worked in OpenWrt before (see *Engineering notes*).
+- **Web UI** — LuCI over uhttpd on `http://192.168.0.1`, for WAN/PPPoE, Wi-Fi, firewall.
 
 **Ported, but not in the images this repo builds**
 
@@ -131,11 +140,18 @@ only the 2.4 GHz radio.
 **Debian 11 (bullseye)-era** host or container; very new toolchains fail the old host
 tools.
 
-The exact, working container recipe — a non-root `builder` user (OpenWrt refuses to
-build as root), `python2`, and the full host-tool list — is in
-[`docs/BENCH.md`](docs/BENCH.md) §7. Use that Dockerfile rather than a one-liner;
-earlier revisions of this README shipped a `debian:bullseye` one-liner that ran as
-root with `python3` only and does not complete a build.
+A working container is committed at [`Dockerfile`](Dockerfile) — a non-root `builder`
+user (OpenWrt refuses to build as root), `python2`, and the full host-tool list:
+
+```bash
+docker build -t owrt-dir842 .
+docker run --rm -v "$PWD":/build -w /build owrt-dir842 ./build.sh
+```
+
+Use it rather than a one-liner; earlier revisions of this README shipped a
+`debian:bullseye` one-liner that ran as root with `python3` only and does not complete a
+build. Details and the two traps (workdir, uid) are in
+[`docs/BENCH.md`](docs/BENCH.md) §7.
 
 ## Installing
 
@@ -161,8 +177,11 @@ you garbage.
    exactly **one ~1-second window per power-cycle**, and it opens immediately at
    power-on — start spamming *before* you apply power, not after.
 2. Load the initramfs image, either:
-   - **over the network (fast, ~seconds):** `AUTOBURN 0`, `LOADADDR 81000000`, `TFTP +`,
-     then from your PC (on `192.168.0.2/24`) `curl -T initramfs.bin tftp://192.168.0.1/img`
+   - **over the network (fast, ~seconds):** `IPCONFIG 192.168.0.1` (⚠ this sets the
+     *loader's* own address — its nvram default is `192.168.1.6`, so without this step the
+     upload below silently goes nowhere), then `AUTOBURN 0`, `LOADADDR 81000000`, `TFTP +`,
+     then from your PC (on `192.168.0.2/24`)
+     `curl -T initramfs.bin tftp://192.168.0.1/img`
    - **over serial (~18 min at 38400):** `XMOD 81000000` — bare hex, **no `0x` prefix**,
      which the loader rejects — then send the file with XMODEM (`sx -v img > /dev/ttyUSB0 < /dev/ttyUSB0`).
 3. `J 81000000` to jump. A power-cycle discards it and returns you to whatever is in flash.

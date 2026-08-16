@@ -23,7 +23,8 @@ repeatedly.
   kernel + squashfs rootfs, ending in the keyed-MD5 boot trailer the loader validates. The
   build bakes that trailer in (`dlink-md5-sign`), so **you do not sign anything** and you
   do not need `tools/sign-dlink.py`.
-- Result: the stock web UI accepts the unsigned OpenWrt image directly, writes it to the
+- Result: the stock web UI accepts our third-party (not D-Link-signed) OpenWrt image directly,
+  writes it to the
   firmware region, and the loader boots it on the next reboot.
 
 None of this touches your unit's MAC address or radio calibration — those live in separate
@@ -51,8 +52,18 @@ Download it from the repo's **[latest release](https://github.com/ADCDS/openwrt-
 verify it against the published `sha256sums.txt`:
 
 ```sh
-sha256sum -c sha256sums.txt
+sha256sum --ignore-missing -c sha256sums.txt
 ```
+
+(`--ignore-missing` matters: `sha256sums.txt` lists all three images, so without it a
+verification of the one file you downloaded exits non-zero and looks like a failure.)
+
+> ℹ **Why is the file called `GWR1200AC-V1`?** This port reuses OpenWrt's existing
+> Greatek GWR1200AC-V1 device profile (same RTL8197F platform) rather than adding a new
+> one, so every image carries that name. **These are the DIR-842 R1 images** — there is no
+> separate DIR-842-named file to look for, and you should not go looking for genuine
+> GWR1200AC firmware.
+
 
 ---
 
@@ -106,6 +117,21 @@ in the published build — see the README's *2.4 GHz* section for why.
 > not been through months of household duty. Keep your backup, and don't make it the only
 > thing between your family and the internet on day one.
 
+### If nothing forwards right after a boot
+
+The ASIC's L2 tables come up empty and cold unicast is not delivered until traffic has
+flowed, so the boot service primes them with a few pings. Its default targets are the
+development bench's peers, which simply time out on your network — normally real traffic
+warms the tables within seconds and you never notice. If a freshly booted box reads as
+100 % packet loss anyway, reprogram and re-warm the datapath by hand:
+
+```sh
+/etc/init.d/dir842-asic restart
+```
+
+That is idempotent and is the supported recovery. (It disarms hardware offload, reprograms
+the ASIC tables, re-warms them, and re-arms offload.)
+
 ### If the router's IP collides with something on your network
 
 If the DIR-842's LAN address is the same as another gateway your computer already talks to
@@ -126,11 +152,26 @@ route/ARP selection will silently send the router's traffic out the wrong interf
 
 Just as reversible, and also over the network — from an OpenWrt root shell (SSH):
 
+⚠ **Check the image first.** It must be a bare firmware region, starting with the RealTek
+`cr6b` magic:
+
+```sh
+head -c4 stock-firmware.bin        # must print: cr6b
+```
+
+If it prints anything else, the file has an outer wrapper (some official downloads do) —
+**stop** and use the loader route in [RESTORE-STOCK.md](RESTORE-STOCK.md#route-b--restore-stock-from-the-bootloader-serial-cable-always-works),
+which accepts D-Link's file as-is. Writing a wrapped file to the firmware partition leaves
+the box unbootable until you attach a serial cable.
+
 ```sh
 # stock-firmware.bin = your backup's firmware region, or official D-Link firmware
-ssh root@192.168.0.1 'mtd write - firmware' < stock-firmware.bin
-ssh root@192.168.0.1 reboot
+ssh root@192.168.0.1 'mtd -r write - firmware' < stock-firmware.bin
 ```
+
+`mtd -r` reboots the moment the write completes. Do that rather than a second `ssh …
+reboot`: once the write lands, the running system's filesystem no longer matches what is
+on flash, and a fresh login may not succeed.
 
 The box boots stock again, MAC and calibration intact. Full details — where to get a stock
 image, how to carve the firmware region from a full backup, and the serial-console
@@ -145,7 +186,7 @@ fallback — are in **[RESTORE-STOCK.md](RESTORE-STOCK.md)**.
 ## What was verified
 
 On this exact hardware, with no serial cable and no exploit: logged into stock 3.0.3's web
-UI, uploaded the unsigned `…-squashfs-factory.bin` through **Local Update**, watched the
+UI, uploaded the `…-squashfs-factory.bin` — signed for the *loader*, but not by D-Link — through **Local Update**, watched the
 serial console show stock's own updater write the image to the firmware region
 (`/dev/mtd5 … 0% → 100% → finish`), the box reboot, the loader validate the trailer
 (`Jump to image start=0x81000000`), and **OpenWrt (kernel 4.14.187) boot to userspace**.

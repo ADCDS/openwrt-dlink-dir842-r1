@@ -4,17 +4,22 @@ Built 2026-08-16 from the **v1.0** tree by the exact clean-room path the README
 documents: fresh clone → `./build.sh` inside the Debian 11 (bullseye) container
 from `docs/BENCH.md` §7. Nothing outside this repository went into them, which also
 means **no 2.4 GHz radio** — these are wired + 5 GHz + hardware-NAT images (see the
-README's "2.4 GHz" section for why that driver cannot be shipped).
+README's "2.4 GHz" section for why that driver cannot be shipped). A `radio1` /
+`DIR842-2G` stanza is still seeded in `/etc/config/wireless`; with no driver present it
+simply never comes up. Ignore or delete it.
 
 > **The `.bin` files are not committed to git** (they are build artifacts). Download them
 > from the repo's **[latest release](https://github.com/ADCDS/openwrt-dlink-dir842-r1/releases/latest)**,
 > drop them in this directory, then verify:
 >
 > ```sh
-> sha256sum -c sha256sums.txt
+> sha256sum --ignore-missing -c sha256sums.txt
 > ```
 >
 > The checksums here are the authoritative record of what that release contains.
+
+ℹ The images are named **`GWR1200AC-V1`** because this port reuses OpenWrt's Greatek
+GWR1200AC-V1 device profile (same RTL8197F platform). These *are* the DIR-842 R1 images.
 
 | file | use |
 |---|---|
@@ -24,5 +29,5 @@ README's "2.4 GHz" section for why that driver cannot be shipped).
 
 ⚠ Both squashfs images **replace stock firmware**. Back up all 8 MB of NOR first —
 after flashing, stock exists only in your backup. And read the README's security box:
-default images boot with an **open 5 GHz AP**, a placeholder 2.4 GHz PSK and no root
-password.
+default images boot with an **open 5 GHz AP** (`DIR842-OpenWrt`), no root password, and a
+`BR` regulatory domain.

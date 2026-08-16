@@ -2,7 +2,7 @@
 
 > ⚠️ **HISTORICAL JOURNAL.** Written during the M7 diagnostic; the root cause and
 > fix below still stand, but the surrounding platform description does not — the
-> port now boots from NOR, not only from RAM. Read [`README.md`](README.md) first.
+> port now boots from NOR, not only from RAM. Read [`README.md`](../README.md) first.
 
 **Platform:** D-Link DIR-842 **rev R1** — RTL8197F SoC (MIPS 24Kc), ported vendor
 two-ring pkthdr+mbuf CPU-port DMA engine (`drivers/net/ethernet/rtl819x/`),

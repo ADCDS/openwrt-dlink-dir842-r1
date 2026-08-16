@@ -55,9 +55,9 @@ therefore skips the whole extif-init/reset path for an 8367S deliberately
 (`rtl8367b_is_8367s()`, `rtl8367b.c:769`).
 
 Stock's own boot banner is part of why this stuck: it prints `8197F(PA=0) 8812B(PA=0)
-8367R NOR RAM=64` (`docs/VENDOR-PARITY-INVENTORY.md` (stock boot banner)). The vendor's SDK filenames say
-`rtl8367r/` too. Only the ID registers are authoritative. the early, now-deleted `ASSESSMENT.md` (the early,
-now-retired assessment) and several in-tree comments still say 8367R — see §11.
+8367R NOR RAM=64` (see the stock boot banner in `docs/VENDOR-PARITY-INVENTORY.md`). The
+vendor's SDK filenames say `rtl8367r/` too. Only the ID registers are authoritative —
+several in-tree comments still say 8367R; see §11.
 
 ### Where it is described
 

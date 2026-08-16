@@ -55,7 +55,9 @@ in the pinned ggbruno base. See [`VENDOR-PARITY-INVENTORY.md`](VENDOR-PARITY-INV
 | 5 GHz `radio0` | `DIR842-OpenWrt` | **`none`**, key deleted — deliberately no baked credential (`files/target/linux/realtek/base-files/etc/uci-defaults/99-dir842-m5 (5 GHz wifi-iface block)`) |
 | 2.4 GHz `radio1` | `DIR842-2G` | `psk2`, placeholder key `ChangeMeNow123` (`files/…/uci-defaults/09_wireless-dualband-dir842 (radio1 PSK)`) |
 
-The root README's "placeholder WiFi PSK" warning describes the 2.4 GHz seed. The 5 GHz
+The 2.4 GHz seed carries a placeholder PSK (`ChangeMeNow123`). Images built from this
+repo have no `rtl8192cd` driver, so that radio never comes up and the PSK is inert — the
+root README therefore warns only about the open 5 GHz AP. The 5 GHz
 seed ships open on purpose: a PSK baked into a published image is a published credential.
 Set both before this touches a real network.
 

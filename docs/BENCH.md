@@ -291,7 +291,7 @@ WORKDIR /build
 ```sh
 git clone https://github.com/ADCDS/openwrt-dlink-dir842-r1
 cd openwrt-dlink-dir842-r1
-docker build -t owrt-dir842 - < Dockerfile        # the Dockerfile above
+docker build -t owrt-dir842 .                     # uses the Dockerfile at the repo root
 docker run --rm -v "$PWD":/build -w /build owrt-dir842 ./build.sh
 ```
 
@@ -301,10 +301,10 @@ docker run --rm -v "$PWD":/build -w /build owrt-dir842 ./build.sh
   directory root-owned before anything runs, and `build.sh` then aborts with
   `ERROR: ./openwrt already exists`. Keep the workdir at `/build`; `build.sh` creates
   `openwrt/` itself.
-- **The container's `builder` user is uid 1000.** If your host account is not uid 1000 the
-  bind mount will be unwritable — either run
-  `docker build --build-arg U=$(id -u) …` with a matching `useradd -u $U`, or `chown` the
-  clone to 1000 first.
+- **The container's `builder` user defaults to uid 1000.** If your host account is not
+  uid 1000 the bind mount will be unwritable — build with
+  `docker build --build-arg U=$(id -u) --build-arg G=$(id -g) -t owrt-dir842 .`
+  (the shipped `Dockerfile` takes those args).
 
 Toolchain coordinates: target `mipsel_24kc_musl`, gcc 8.4.0, kernel 4.14.187. Staging dir is
 `staging_dir/toolchain-mipsel_24kc_gcc-8.4.0_musl`. Images land in
@@ -805,14 +805,27 @@ image**:
 
 | file | what it hardcodes |
 |---|---|
-| `files/target/linux/realtek/base-files/etc/rc.local:64-68` | boot-time ASIC L2 warm-up pings `192.168.0.2` (`:65`) and `172.16.0.2` (`:66`) |
-| `files/target/linux/realtek/base-files/etc/init.d/dir842-asic:33` | `WARM_HOSTS="${WARM_HOSTS:-192.168.0.2 172.16.0.2}"` — *"the defaults are the bench rig's peers and simply time out harmlessly elsewhere"* |
-| `files/.../uci-defaults/99-dir842-m5:61,67` | LAN `192.168.0.1`, WAN **static** `172.16.0.1` |
+| `files/.../init.d/dir842-asic` (`WARM_HOSTS=`) | `WARM_HOSTS="${WARM_HOSTS:-192.168.0.2 172.16.0.2}"` — *"the defaults are the bench rig's peers and simply time out harmlessly elsewhere"*. Overridable from the environment. |
+| `files/.../uci-defaults/99-dir842-m5` (`network.lan.ipaddr`) | LAN `192.168.0.1` — a normal, deliberate default, not a bench artefact |
 
-The WAN static is not cosmetic: `172.16.0.1` **is** the ASIC's `extIP[0]`, the address the
-hardware NAPT rows rewrite to.
+★ **This list used to be longer, and the two entries that mattered are gone:**
 
-### The boot ritual encoded in `dir842-asic` (`START=97`, `USE_PROCD=0`)
+- `rc.local` no longer warms anything — it is intentionally empty since R4, and the whole
+  bring-up (including the warm-up) moved into the `dir842-asic` service.
+- **The WAN is no longer a static `172.16.0.1`** — it ships as a **DHCP client**. That
+  address was the bench peer's subnet and it made a flashed box fail to route on a real
+  uplink. Nor was it ever load-bearing for offload: the ASIC's `extIP[0]` is rewritten
+  from the **live** WAN address on every flow offload
+  (`rtl819x_hwnat.c` → `rtl865x_set_wan_extip`), so a DHCP or PPPoE address works
+  identically. `bench-up.sh` pins the static address for *this bench* instead, because the
+  bench has no WAN-side DHCP server.
+
+### The boot ritual encoded in `dir842-asic` (`START=97`)
+
+⚠ `USE_PROCD` is deliberately **never set** in that script — not even to `0`. This fork's
+`rc.common` tests `[ -n "$USE_PROCD" ]`, so *any* value flips it into procd mode, which
+redefines `start()` after the script is sourced and silently replaces the bring-up with an
+empty procd service (measured: no process, no log line, `hwnat` never armed).
 
 ```
 swconfig apply  ->  echo 3 > fabric_reset  ->  cat /proc/rtl865x_gw (gw_prog)  ->  L2 warm
@@ -844,8 +857,8 @@ the published numbers.
 | `bench-up.sh:18-20` | loader answers on `e0:1c:fc:51:c9:ef`, Linux on `00:e0:4c:81:96:c2` — never pin a static ARP | **No longer true since `484e4db4bd`.** Both are `e0:1c:fc:51:c9:ef` (`02_network:59-64`). The conflict cannot occur. |
 | `flash-nor.sh:17-18` | same MAC-conflict warning | same correction |
 | `bench-wan-emu.sh:16` | cites `rtl819x-eth.c:1134` for the `ph_vlanId` constraint | current tree: **`rtl819x-eth.c:1269-1276`** (comment) / `:1277-1280` (code) |
-| `tools/sign-dlink.py:4`, `README.md` ("NOR flash") | key *"embedded in the bootcode (`mtd0`) at `0x291bc`"* | `0x291bc` is an offset into the **decompressed** bootcode (gzip stream at `mtd0+0x7d70`, 191,632 B inflated), **not** into the raw NOR image, where that offset reads `0xFF` (§8) |
-| `MANIFEST.txt` | — | **has no mention of the bench at all.** `grep -niE 'bench\|ramboot\|flash-nor\|serial\|38400'` returns nothing, even though `bench-up.sh`, `bench-wan-emu.sh`, `bootgate.sh`, `flash-nor.sh` and `ramboot.sh` are all committed in the repo root and absent from its "REPO ROOT" listing. |
+| `tools/sign-dlink.py:4`, `files/target/linux/realtek/image/Makefile` (the `dlink-md5-sign` comment) | key *"embedded in the bootcode (`mtd0`) at `0x291bc`"* | `0x291bc` is an offset into the **decompressed** bootcode (gzip stream at `mtd0+0x7d70`, 191,632 B inflated), **not** into the raw NOR image, where that offset reads `0xFF` (§8). *(The README said this too; corrected there.)* |
+| ~~`MANIFEST.txt` omits the bench scripts~~ | — | ✅ **Fixed.** `MANIFEST.txt`'s "REPO ROOT" section now lists all five bench scripts, `docs/` and `images/`. |
 
 ---
 
@@ -882,7 +895,7 @@ bash bench-up.sh
 bash hwnat-ab.sh          # not in this repo; see §10
 
 # --- flashing instead of RAM-booting ---
-tools/sign-dlink.py openwrt-...-squashfs-factory.bin signed.bin
-BOOT=1 bash flash-nor.sh signed.bin
+# (no signing step: build.sh already runs dlink-md5-sign on both squashfs images)
+BOOT=1 bash flash-nor.sh openwrt-...-squashfs-factory.bin
 N=10 bash bootgate.sh     # prove it boots, not that it booted once
 ```

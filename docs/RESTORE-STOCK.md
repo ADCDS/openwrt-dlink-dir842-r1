@@ -92,9 +92,12 @@ into `mtd write` over SSH instead of copying it to the device first:
 
 ```sh
 # from your PC, router at 192.168.0.1:
-ssh root@192.168.0.1 'mtd write - firmware' < stock-firmware.bin
-ssh root@192.168.0.1 reboot
+head -c4 stock-firmware.bin        # sanity: must print cr6b (see the note below)
+ssh root@192.168.0.1 'mtd -r write - firmware' < stock-firmware.bin
 ```
+
+`mtd -r` reboots as soon as the write finishes — safer than a separate `ssh … reboot`,
+which has to log in again against a filesystem that no longer matches flash.
 
 The box comes up on stock. (Stock's LAN default is `192.168.0.1` with its own DHCP
 server; give your PC a `192.168.0.x` address to reach the stock web UI.)
@@ -147,7 +150,8 @@ Symmetric to the above — pick whichever matches where you are:
 
 - **From stock, no serial (easiest):** upload this port's `…-squashfs-factory.bin` through
   the stock web UI's **System → Firmware Update → Local Update** page. Verified
-  end-to-end on the hardware: stock accepts the unsigned image, writes it to the firmware
+  end-to-end on the hardware: stock accepts the image (loader-signed, but not D-Link-signed),
+  writes it to the firmware
   region, and OpenWrt boots. Step-by-step: **[OTA-INSTALL.md](OTA-INSTALL.md)**.
 - **From stock, serial:** loader AUTOBURN the `…-squashfs-factory.bin` (Route B, verified).
 - **From a running OpenWrt:** `sysupgrade -n …-squashfs-sysupgrade.bin` (verified, survives

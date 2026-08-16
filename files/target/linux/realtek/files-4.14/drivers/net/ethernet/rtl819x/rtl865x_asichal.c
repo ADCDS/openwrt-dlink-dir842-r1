@@ -486,7 +486,7 @@ static u32 gw_write_l2_full(const u8 *m, u32 member, u32 extmember,
  * Learned at runtime from the flow-offload dest path (rtl819x_hwnat.c) and
  * replayed by gw_prog so /proc reprogram + the M7 fabric-reset rearm keep the
  * live identity. Boot defaults = the M6.6 bench rig (ethernet WAN via tiny). */
-static u8   gw_wan_gw_mac[6] = { 0xe4,0x5f,0x01,0x04,0x98,0xaf };	/* boot = GW_MAC_TINYWAN */
+static u8   gw_wan_gw_mac[6] = { 0xaa,0xbb,0xcc,0x00,0x00,0x03 };	/* boot = GW_MAC_TINYWAN */
 
 /* ---- LAN-client identity shadows (same lock, same replay contract as the WAN
  * ones above) ----
@@ -501,7 +501,7 @@ static u8   gw_wan_gw_mac[6] = { 0xe4,0x5f,0x01,0x04,0x98,0xaf };	/* boot = GW_M
  * Now learned per-flow from the flow-offload SRC path, exactly as the WAN peer
  * is learned from the dest path. Boot defaults kept only so a gw_prog before the
  * first offload offer still writes something coherent. */
-static u8   gw_lan_client_mac[6] = { 0x54,0xbf,0x64,0x18,0xb8,0xde };
+static u8   gw_lan_client_mac[6] = { 0xaa,0xbb,0xcc,0x00,0x00,0x01 };
 static u32  gw_lan_client_ip     = 0xC0A80002;
 
 /* STOCK PARITY (measured from a live stock box, docs/M7-HWNAT-REVERSE-NAPT.md):

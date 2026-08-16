@@ -17,8 +17,8 @@ The port's own engineering history is a chain of self-corrections. Several of th
 claims that had already been written into these docs as settled fact and had steered days of
 work. Two concrete examples:
 
-- `docs/M7-HWNAT-REVERSE-NAPT.md` (the "all hash inputs are NETWORK order" passages) still state, as a finding, that "**All hash
-  inputs are NETWORK order**". That is backwards, and it was the whole root cause. It stood
+- `docs/M7-HWNAT-REVERSE-NAPT.md` still states, as a finding, that "**All hash inputs are
+  NETWORK order**". That is backwards, and it was the whole root cause. It stood
   for eleven days and every experiment run under it read flat. (Index #17.)
 - `docs/VENDOR-PARITY-INVENTORY.md` (the "R6 correction" section) is headed "★ R6 correction: 'stock does 600–800 Mbit'
   is NOT evidenced" — a retraction of a number that had been circulating as an acceptance

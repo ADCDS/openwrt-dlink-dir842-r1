@@ -1,3 +1,3 @@
-5bd32f0d62d12461e4884892a9c413f2824c619c4d99870d34284c2e0c79bab9  openwrt-realtek-rtl8197f-GWR1200AC-V1-initramfs-kernel.bin
-9138c0269c228e8395801f6292505b69700a2b7ff1a675c69dc241c6e2d2552e  openwrt-realtek-rtl8197f-GWR1200AC-V1-squashfs-factory.bin
-2a2fd2b2ffc568b560d6797606ca4612672c9ed7ebce220d8e29c88df190d8cf  openwrt-realtek-rtl8197f-GWR1200AC-V1-squashfs-sysupgrade.bin
+718e3c0d3680881ec4282530288852abe0f07992bcead4de825368846e33102d  openwrt-realtek-rtl8197f-GWR1200AC-V1-initramfs-kernel.bin
+95300c4b7fd8dcbbd1d0459ea0f69bcf7289a8579407fe4eca69e02c6a351055  openwrt-realtek-rtl8197f-GWR1200AC-V1-squashfs-factory.bin
+ec15e8168b3a3c0d3969573b90b530f2a6a1545e0f411bc014d0aa858926b60a  openwrt-realtek-rtl8197f-GWR1200AC-V1-squashfs-sysupgrade.bin
