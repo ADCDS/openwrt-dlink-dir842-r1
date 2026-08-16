@@ -39,8 +39,12 @@
 #      fix (890/900 Mbit BOTH directions at ~0% CPU) that rationale is gone and boot
 #      arms it. Runtime toggle stays available:
 #          echo 0 > /sys/module/rtl819x/parameters/hwnat
+# ⚠ Do NOT set USE_PROCD here — not even USE_PROCD=0. This fork's rc.common tests
+# `[ -n "$USE_PROCD" ]`, so ANY value (including 0) flips it into procd mode, which
+# REDEFINES start() after this script is sourced and silently replaces the bring-up
+# with an empty procd service (measured on-box 2026-08-16: no process, no log line,
+# hwnat never armed). Leaving it unset keeps the legacy path and our functions.
 START=97
-USE_PROCD=0
 
 # LAN/WAN peers to prime the L2 tables with. Overridable in /etc/config/dir842 later;
 # the defaults are the bench rig's peers and simply time out harmlessly elsewhere —
