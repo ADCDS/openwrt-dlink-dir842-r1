@@ -307,3 +307,10 @@ hackpascal's `pci-realtek` driver.
 driver under `files/` is redistributed on the GPLv2 basis described in *Building*,
 with all Realtek copyright notices preserved. D-Link stock firmware is **not**
 redistributed here.
+
+## Bench QA
+
+<p align="center"><img src="docs/photos/bituca.jpg" alt="Bituca the cat sitting on the bench notebook, on top of the open DIR-842 board" width="480"></p>
+
+Bituca performing on-site thermal validation. Verdict: the notebook under gigabit NAT
+load makes an excellent heated cat bed — 891 Mbit/s up, 896 down, purring throughout.
