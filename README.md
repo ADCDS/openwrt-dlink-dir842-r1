@@ -73,6 +73,9 @@ CPU ~99.7 % idle. As far as we know this is the first working mainline OpenWrt
   shipped config is **open** — see the warning above; WPA2 itself works). RTL8197F +
   PCIe WiFi had never worked in OpenWrt before (see *Engineering notes*).
 - **Web UI** — LuCI over uhttpd on `http://192.168.0.1`, for WAN/PPPoE, Wi-Fi, firewall.
+  (ℹ LuCI's status panel for the **2.4 GHz** radio shows dashes/0 dBm — cosmetic: the
+  vendor driver has no nl80211, so iwinfo can't read it. The AP still works; client
+  list lives in `/proc/wlan0/sta_info`. See `docs/WIFI-DUAL-BAND.md` §8.)
 
 - **2.4 GHz WiFi** — the on-SoC WMAC via the vendor `rtl8192cd` driver (WEXT, in-kernel
   WPA2-PSK). Both radios run concurrently, bridged into `br-lan` (⚠ **both ship open** —

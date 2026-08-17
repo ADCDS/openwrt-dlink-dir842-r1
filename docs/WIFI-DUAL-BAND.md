@@ -501,13 +501,27 @@ survives the strip.
 `SIOCGIWNAME` handler is NULL. That is expected for this driver, **not** a fault, and it
 is the single most common way to conclude the radio is dead when it is fine.
 
+**★ Corollary: the LuCI wireless panel for `DIR842-2G` shows dashes and zeros —
+`Channel: 6 (0.000 GHz)`, `Signal: 0 dBm / Quality: 0%`, `BSSID: -`,
+`Associations: -` — and that is NORMAL.** LuCI renders that page from iwinfo, so every
+*runtime* field is empty; the fields that do show (SSID, channel, Master) are echoed
+from `/etc/config/wireless`, not read from the radio. A blank panel says nothing about
+whether the AP is up. Ground truth is the table below — clients in
+`/proc/wlan0/sta_info`, beacons in `/proc/wlan0/stats`. (The 5 GHz panel shows real
+numbers because rtw88 is mac80211/nl80211.)
+
+**★ `iwpriv`/`iwconfig` are NOT in the shipped images** (wireless-tools is not
+packaged), so stock's `iwpriv` diagnostic recipes do not run there. Nothing needs them:
+netifd configures the driver via `/etc/Wireless/RTL8192CD.dat`, and status lives under
+`/proc/wlan0/`. `opkg install wireless-tools` (19.07 feed) if you want them.
+
 | | 5 GHz (rtw88 / mac80211) | 2.4 GHz (vendor rtl8192cd) |
 |---|---|---|
 | is it there | `iw dev`, `/sys/class/ieee80211/phy*` | **`/proc/wlan0/mib_all`** (268 MIBs) |
 | link / clients | `iw dev wlan1 station dump`, `iwinfo` | **`/proc/wlan0/sta_info`** |
 | is it beaconing | `iw dev wlan1 info` | `/proc/wlan0/stats` — `beacon_ok` climbing at the TBTT rate (10/s at 100 TU) |
 | AP daemon | `hostapd_cli`, `logread \| grep hostapd` | none — the 4-way handshake is in-kernel |
-| config knobs | uci → hostapd conf | uci → `/etc/Wireless/RTL8192CD.dat`, or `iwpriv`/`iwconfig` |
+| config knobs | uci → hostapd conf | uci → `/etc/Wireless/RTL8192CD.dat` (`iwpriv`/`iwconfig` work too but are **not in the images** — `opkg install wireless-tools`) |
 | did netifd run setup | `/var/run/hostapd-phy*.conf` exists | **`/etc/Wireless/RTL8192CD.dat` exists** |
 | enumerated at all | `lspci` → `10ec:b822`; boot line `PCIe RC0 link check: … link_up=1` | boot line `RTL8197F on-SoC 2.4 GHz WMAC: chip id 8197f001, hw id 100a` |
 
