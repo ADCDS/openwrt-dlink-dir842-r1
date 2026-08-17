@@ -33,33 +33,33 @@ Stock drives *both* radios with `rtl8192cd` and never loads rtw88/mac80211 at al
 **wlan0 = 2.4 GHz (vendor), wlan1 = 5 GHz (rtw88)** — the opposite. Any stock log,
 `iwpriv` recipe or MIB name you copy across bands will land on the wrong radio.
 
-**This repo currently publishes no build path for 2.4 GHz.** `build.sh` gives you
-everything else — wired, switch, NAT, hardware offload, 5 GHz. The port of the vendor
-driver ships as `g3-rtl8192cd-4.14-port.patch` (+ `g4-rtl-headers-4.14-port.patch`
-for the headers) — a record of the work, not a wired-in build step: an earlier
-`VENDOR_SDK=` raw-SDK import was verified broken by dry-run 2026-08-02 and withdrawn
-(§9 item 5 records the evidence and what reintroducing it needs). The 2.4 GHz radio
-on the bench box was built from the live working tree, not through any import.
+**This repo ships the 2.4 GHz build path.** The vendor driver + `include/net/rtl`
+headers are in `files/`, `CONFIG_RTL8192CD=m` is in the subtarget kernel config, and
+the seed selects `kmod-rtl8192cd`, so `build.sh` produces dual-band images.
+(Historical note: until 2026-08-16 the driver was withheld and the port shipped only as
+`g3-rtl8192cd-4.14-port.patch` + `g4-rtl-headers-4.14-port.patch`; an earlier
+`VENDOR_SDK=` raw-SDK import was verified broken by dry-run 2026-08-02 and withdrawn —
+§9 item 5 records that evidence. The patches remain in the repo root as the record of
+the port; the shipped tree already contains everything they describe.)
 
-`rtl8192cd` is **100 % real GPL-style source, no blobs** — 279 `.c` + 363 `.h`,
-539 038 LoC of `.c`, `MODULE_LICENSE("GPL")`; the only binaries are chip firmware. It is
-nevertheless **not redistributed here**: every file carries *"Copyright Realtek
-Semiconductor Corporation. All rights reserved."* with no licence grant, and none of it is
-in the pinned ggbruno base. See [`VENDOR-PARITY-INVENTORY.md`](VENDOR-PARITY-INVENTORY.md)
-§1.
+`rtl8192cd` is **real source, no driver blobs** — 279 `.c` + 363 `.h`, 539 038 LoC of
+`.c`, `MODULE_LICENSE("GPL")`; the only binary is the WMAC chip firmware
+(`WlanHAL/Data/8197F/rtl8197Ffw.bin`, embedded by the Makefile's bin2c step). The
+earlier claim here that *every* file lacked a licence grant was **wrong** — a
+file-by-file audit (2026-08-16) found explicit GPLv2 grant headers on the core driver
+and `phydm` (336 of ~650 C/H files, including `8192cd.h`); the redistribution
+rationale is in the root README's *Building* section. See
+[`VENDOR-PARITY-INVENTORY.md`](VENDOR-PARITY-INVENTORY.md) §1.
 
-**Shipped defaults, as of the code in this tree — note they differ per band:**
+**Shipped defaults, as of the code in this tree:**
 
 | | SSID | encryption |
 |---|---|---|
 | 5 GHz `radio0` | `DIR842-OpenWrt` | **`none`**, key deleted — deliberately no baked credential (`files/target/linux/realtek/base-files/etc/uci-defaults/99-dir842-m5 (5 GHz wifi-iface block)`) |
-| 2.4 GHz `radio1` | `DIR842-2G` | `psk2`, placeholder key `ChangeMeNow123` (`files/…/uci-defaults/09_wireless-dualband-dir842 (radio1 PSK)`) |
+| 2.4 GHz `radio1` | `DIR842-2G` | **`none`** — same stance, since 2026-08-16 (`files/…/uci-defaults/09_wireless-dualband-dir842 (radio1 block)`; it previously seeded `psk2` with a placeholder key, which was inert while no driver shipped but would have been a published credential in a dual-band image) |
 
-The 2.4 GHz seed carries a placeholder PSK (`ChangeMeNow123`). Images built from this
-repo have no `rtl8192cd` driver, so that radio never comes up and the PSK is inert — the
-root README therefore warns only about the open 5 GHz AP. The 5 GHz
-seed ships open on purpose: a PSK baked into a published image is a published credential.
-Set both before this touches a real network.
+Both seeds ship open on purpose: a PSK baked into a published image is a published
+credential. Set keys on both before this touches a real network.
 
 ---
 

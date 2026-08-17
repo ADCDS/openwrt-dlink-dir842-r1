@@ -1,0 +1,5 @@
+# files/ is a byte-exact mirror of the live build tree — git must never normalize
+# line endings in it. 807 of the vendor rtl8192cd sources are CRLF on purpose
+# (Realtek SDK vintage), and hal's global core.autocrlf=input would strip the CRs
+# on commit, silently breaking the mirror for every fresh clone.
+files/** -text

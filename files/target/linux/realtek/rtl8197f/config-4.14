@@ -290,5 +290,6 @@ CONFIG_LEDS_GPIO=y
 # SR+0x64 enable gate and verifies the register window responds. Does NOT
 # register with mac80211 and cannot beacon yet — see the driver header.
 CONFIG_RTL8197F_WMAC=y
-# R4/G3: vendor rtl8192cd — staged, NOT enabled. See the driver's Kconfig.
+# R4/G3: vendor rtl8192cd — 2.4 GHz WMAC driver, shipped and built as a module
+# (kmod-rtl8192cd in the seed installs + autoloads it).
 CONFIG_RTL8192CD=m

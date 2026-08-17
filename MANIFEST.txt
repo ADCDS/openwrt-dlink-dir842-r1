@@ -9,15 +9,17 @@ Usage:  ./build.sh   (clones ggbruno, checks out 8a0ccb9, overlays files/, build
 Every path below is relative to files/ and lands at the same path inside the
 OpenWrt tree. Sizes in bytes.
 
-NOT REDISTRIBUTED HERE (and no build-time import path is published — the 2.4 GHz
-radio does not build from this repo; see README "Building"):
-  target/linux/realtek/files-4.14/include/net/rtl/*                ~37 headers
-  target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/* ~120 files
-  Both carry "Copyright Realtek Semiconductor Corporation. All rights reserved."
-  with no license grant, and neither is present in the pinned ggbruno base.
-  Our work against them ships as the two port patches in the repo root — a record
-  of the port, not a wired-in build step (an earlier VENDOR_SDK= import was
-  verified broken and withdrawn 2026-08-02; docs/WIFI-DUAL-BAND.md §9 item 5).
+VENDOR SOURCE, REDISTRIBUTED SINCE 2026-08-16 (the 2.4 GHz radio builds from
+this repo; the licensing rationale is in README "Building"):
+  target/linux/realtek/files-4.14/include/net/rtl/*                37 headers
+  target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/* 1117 files
+  Realtek copyright notices preserved intact. The core driver + phydm carry
+  explicit GPLv2 grant headers; MODULE_LICENSE("GPL"); one chip-firmware blob
+  (WlanHAL/Data/8197F/rtl8197Ffw.bin). The two port patches in the repo root
+  remain as the historical record of the 4.14 port (an earlier VENDOR_SDK=
+  import was verified broken and withdrawn 2026-08-02;
+  docs/WIFI-DUAL-BAND.md §9 item 5).
+  Not itemized file-by-file below — the directory trees ship whole.
 
 REPO ROOT (not part of the overlay)
 -----------------------------------

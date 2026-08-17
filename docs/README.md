@@ -29,11 +29,11 @@ in the vendor's **CPU-tag / port0-router** mode, with a real WAN/LAN split — `
 that Linux splits by VLAN (`files/target/linux/realtek/base-files/etc/board.d/02_network:10-17`).
 On top of that: fw3 + NAT + PPPoE, the software flowtable, and **hardware NAT offload at
 891 Mbit up / 896 Mbit down with 0.0 % of payload bytes crossing the CPU** (stock D-Link on
-the same bench: 913/923). Both radios run concurrently on the hardware and bridge into `br-lan` — 5 GHz
-**RTL8822BE via rtw88**, 2.4 GHz the **on-SoC WMAC via the vendor `rtl8192cd` driver** —
-but ⚠ **images built from this repo ship 5 GHz only**, because that vendor driver is not
-redistributable here. All of the above is measured on an isolated bench; treat the port as
-**pre-production** and keep a flash backup.
+the same bench: 913/923). Both radios run concurrently and bridge into `br-lan` — 5 GHz
+**RTL8822BE via rtw88**, 2.4 GHz the **on-SoC WMAC via the vendor `rtl8192cd` driver**,
+which ships in `files/` (licensing rationale: root README, *Building*). All of the
+above is measured on an isolated bench; treat the port as **pre-production** and keep a
+flash backup.
 
 ## Reading order for the three kinds of reader
 
@@ -43,8 +43,8 @@ redistributable here. All of the above is measured on an isolated bench; treat t
    `tools/sign-dlink.py`: build.sh signs the images for you.)
 2. [`BENCH.md`](BENCH.md) — serial is **38400 8N1** (`ramboot.sh:20`), how to catch the
    loader, `ramboot.sh` / `flash-nor.sh`, and power control.
-3. [`WIFI-DUAL-BAND.md`](WIFI-DUAL-BAND.md) — only if you care about 2.4 GHz, for which
-   this repo publishes no build path yet (the port ships as a patch-record; §9 item 5).
+3. [`WIFI-DUAL-BAND.md`](WIFI-DUAL-BAND.md) — how each radio is driven, the naming
+   collision between them, and the 2.4 GHz calibration caveats.
 
 **(b) You want to understand how the hardware offload was achieved.**
 

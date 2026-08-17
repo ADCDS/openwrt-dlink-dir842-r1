@@ -99,8 +99,15 @@ ssh root@192.168.0.1 'mtd -r write - firmware' < stock-firmware.bin
 `mtd -r` reboots as soon as the write finishes — safer than a separate `ssh … reboot`,
 which has to log in again against a filesystem that no longer matches flash.
 
-The box comes up on stock. (Stock's LAN default is `192.168.0.1` with its own DHCP
-server; give your PC a `192.168.0.x` address to reach the stock web UI.)
+The box comes up on stock — but ⚠ **not necessarily at `192.168.0.1`**. The stock
+`config` partition (`mtd2`) is never touched by any install or restore here, so stock
+boots with whatever settings it last saved — LAN IP, admin password, WiFi PSK and all.
+On the development unit that meant `192.168.1.1` with the previous owner's
+ISP-provisioned config, not D-Link defaults. If you don't find the box, check both
+addresses (or watch the serial console / your DHCP lease); a factory reset
+(hold the reset button) returns it to D-Link's defaults at `192.168.0.1`.
+Conversely, if you *want* the old settings gone, that reset is on you — reflashing
+alone does not clear them.
 
 > Sanity-check the image first: `head -c4 stock-firmware.bin` should read `cr6b`. If it
 > does not, the file has an extra outer wrapper (some web downloads do) — use Route B,

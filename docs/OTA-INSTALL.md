@@ -197,6 +197,6 @@ UI, uploaded the `…-squashfs-factory.bin` — signed for the *loader*, but not
 serial console show stock's own updater write the image to the firmware region
 (`/dev/mtd5 … 0% → 100% → finish`), the box reboot, the loader validate the trailer
 (`Jump to image start=0x81000000`), and **OpenWrt (kernel 4.14.187) boot to userspace**.
-(The image used in that run was a local dual-band build; the *published* images are
-wired + 5 GHz, and install identically.) The reverse direction (`mtd write` back to stock, then forward again) was
+(The image used in that run was a local dual-band build; the published images are now
+dual-band too, and install identically.) The reverse direction (`mtd write` back to stock, then forward again) was
 exercised repeatedly in the same session.

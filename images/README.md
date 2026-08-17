@@ -2,11 +2,9 @@
 
 Built 2026-08-16 from the **v1.0** tree by the exact clean-room path the README
 documents: fresh clone → `./build.sh` inside the Debian 11 (bullseye) container
-from `docs/BENCH.md` §7. Nothing outside this repository went into them, which also
-means **no 2.4 GHz radio** — these are wired + 5 GHz + hardware-NAT images (see the
-README's "2.4 GHz" section for why that driver cannot be shipped). A `radio1` /
-`DIR842-2G` stanza is still seeded in `/etc/config/wireless`; with no driver present it
-simply never comes up. Ignore or delete it.
+from `docs/BENCH.md` §7. Nothing outside this repository went into them — **dual-band**
+(2.4 GHz `DIR842-2G` via the vendor `rtl8192cd` driver + 5 GHz `DIR842-OpenWrt` via
+rtw88, ⚠ both open by default) + wired + hardware-NAT images.
 
 > **The `.bin` files are not committed to git** (they are build artifacts). Download them
 > from the repo's **[latest release](https://github.com/ADCDS/openwrt-dlink-dir842-r1/releases/latest)**,

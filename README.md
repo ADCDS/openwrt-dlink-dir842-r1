@@ -34,15 +34,19 @@ CPU ~99.7 % idle. As far as we know this is the first working mainline OpenWrt
 >
 > **Fix these three things before this touches a real network:**
 >
-> - **The 5 GHz AP is OPEN** — SSID **`DIR842-OpenWrt`**, `encryption='none'`. A default
->   image broadcasts an unencrypted network.
-> - **There is no root password.** Set one (`passwd`) — with an open AP, anyone in range
+> - **BOTH APs are OPEN** — 5 GHz **`DIR842-OpenWrt`** and 2.4 GHz **`DIR842-2G`**, each
+>   `encryption='none'`. A default image broadcasts two unencrypted networks. (Open on
+>   purpose: a PSK baked into a published image would be a published credential.)
+> - **There is no root password.** Set one (`passwd`) — with open APs, anyone in range
 >   can log in.
 > - **The regulatory domain is hard-coded to `BR`** (Brazil), because that is where the
 >   port was developed and it unlocks the UNII-1 channels used for the default channel 36.
 >   Set yours: `uci set wireless.radio0.country='<your ISO code>'; uci commit wireless; wifi`.
+>   (The 2.4 GHz radio's `country` is a separate, *numeric* vendor MIB — see
+>   `docs/WIFI-DUAL-BAND.md` §9 before touching it.)
 >
-> Defaults live in `files/…/uci-defaults/99-dir842-m5`.
+> Defaults live in `files/…/uci-defaults/99-dir842-m5` (5 GHz) and
+> `files/…/uci-defaults/09_wireless-dualband-dir842` (2.4 GHz).
 
 ## Status
 
@@ -70,13 +74,10 @@ CPU ~99.7 % idle. As far as we know this is the first working mainline OpenWrt
   PCIe WiFi had never worked in OpenWrt before (see *Engineering notes*).
 - **Web UI** — LuCI over uhttpd on `http://192.168.0.1`, for WAN/PPPoE, Wi-Fi, firewall.
 
-**Ported, but not in the images this repo builds**
-
 - **2.4 GHz WiFi** — the on-SoC WMAC via the vendor `rtl8192cd` driver (WEXT, in-kernel
-  WPA2-PSK) works on the hardware, and both radios run concurrently bridged into
-  `br-lan`. ⚠ **Images built from this repo have 5 GHz only**: the driver is not
-  redistributable here, so the port ships as a patch-record rather than a build path.
-  See *Building*.
+  WPA2-PSK). Both radios run concurrently, bridged into `br-lan` (⚠ **both ship open** —
+  set keys before this touches a real network). The driver source ships in `files/` —
+  see *Building* for the licensing story.
 
 **Known limitations**
 
@@ -130,22 +131,22 @@ Output in `openwrt/bin/targets/realtek/rtl8197f/`:
 | `*-squashfs-factory.bin` | NOR flash via the loader's `AUTOBURN`. **Replaces stock.** |
 | `*-squashfs-sysupgrade.bin` | NOR flash via `sysupgrade`. **Replaces stock.** |
 
-**2.4 GHz: the radio works on the hardware, but this repo publishes no build path
-for it yet.** The on-SoC WMAC needs two pieces of Realtek SDK source that this repo
-deliberately does **not** redistribute — ~37 `include/net/rtl/*` headers and the
-~120-file `rtl8192cd` driver, all carrying *"Copyright Realtek Semiconductor
-Corporation. All rights reserved."* with no license grant, and none of them present
-in the pinned ggbruno base. Our port of them ships as a readable record —
-`g3-rtl8192cd-4.14-port.patch` (driver) and `g4-rtl-headers-4.14-port.patch`
-(headers) — but is **not wired into `build.sh`**: the driver patch only applies to
-the exact vintage of the tree it was developed on, and wiring it to a raw SDK
-import instead was verified broken by dry-run. An earlier revision of this repo
-advertised a `VENDOR_SDK=` flag for exactly that; it was withdrawn rather than
-shipped broken. What reintroducing it would need is recorded in
-[`docs/WIFI-DUAL-BAND.md`](docs/WIFI-DUAL-BAND.md) §9 item 5.
-
-The build gives you wired, the switch, NAT, hardware offload and 5 GHz; you lose
-only the 2.4 GHz radio.
+**2.4 GHz: the vendor `rtl8192cd` driver source ships in this repo** (~1,100 files
+under `files/…/drivers/net/wireless/rtl8192cd/` plus ~37 `include/net/rtl/*`
+headers), so the images build with both radios. On the licensing: an earlier
+revision withheld these files on the belief that they carried no license grant.
+A file-by-file audit corrected that — the core driver and the `phydm` RF code
+(336 of the ~650 C/H files, including `8192cd.h` itself) carry **explicit GPLv2
+grant headers**, the module declares `MODULE_LICENSE("GPL")`, the Realtek SDK
+that vendors distribute it in is published under a top-level GPLv2 `LICENSE`,
+and the driver links into the GPL kernel — the same basis on which this code has
+shipped in router GPL source releases for a decade. The remainder (`WlanHAL/`,
+the headers) carries Realtek copyright notices without an explicit grant; those
+notices are preserved intact, and `WlanHAL/Data/8197F/rtl8197Ffw.bin` is the
+WMAC's chip firmware. If Realtek objects, the deletion is one directory.
+`g3-rtl8192cd-4.14-port.patch` / `g4-rtl-headers-4.14-port.patch` in the repo
+root remain as the historical record of the 4.14 port (the shipped tree already
+contains everything they describe).
 
 **Build environment:** the ggbruno fork is from 2020 (kernel 4.14 / gcc 8.4). Build on a
 **Debian 11 (bullseye)-era** host or container; very new toolchains fail the old host
@@ -289,5 +290,7 @@ Built on [ggbruno/openwrt](https://github.com/ggbruno/openwrt) (RTL8197F target)
 hackpascal's `pci-realtek` driver.
 
 **GPL-2.0** ([`LICENSE`](LICENSE)), following OpenWrt. The `net80211` headers under
-`files/` are BSD-licensed and carry their original notices. Realtek SDK sources are
-**not** redistributed here — see *Building*.
+`files/` are BSD-licensed and carry their original notices. The vendor `rtl8192cd`
+driver under `files/` is redistributed on the GPLv2 basis described in *Building*,
+with all Realtek copyright notices preserved. D-Link stock firmware is **not**
+redistributed here.

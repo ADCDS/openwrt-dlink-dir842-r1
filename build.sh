@@ -40,19 +40,15 @@ git checkout 8a0ccb93f3431bcf8f5c5d03d4acc2c8e442de67
 # Overlay DIR-842 device support + fixes (path-preserving)
 cp -a ../files/. .
 
-# ---- 2.4 GHz radio: no import path here (deliberate) ---------------------------
-# The 2.4 GHz WMAC needs Realtek's rtl8192cd driver (~120 files) plus ~37
-# include/net/rtl headers, all carrying "Copyright Realtek Semiconductor
-# Corporation. All rights reserved." with NO license grant and absent from the
-# pinned ggbruno base — so they are not redistributed in this repo. Our port of
-# them is recorded in g3-rtl8192cd-4.14-port.patch and
-# g4-rtl-headers-4.14-port.patch (repo root) but is NOT wired into this build:
-# the driver patch needs the 8devices-vintage tree it was developed on, and an
-# earlier raw-SDK import (VENDOR_SDK=) was verified broken by dry-run 2026-08-02
-# and withdrawn — docs/WIFI-DUAL-BAND.md §9 item 5 records the details and what a
-# working reintroduction needs. Everything else — wired ethernet, the RTL8367S
-# switch, WAN/LAN, NAT, hardware NAT offload, 5 GHz rtw88 — builds unaffected.
-echo ">>> NOTE: the 2.4 GHz radio is not built (no published build path yet — see README)."
+# ---- 2.4 GHz radio: builds from files/ ------------------------------------------
+# The vendor rtl8192cd driver + include/net/rtl headers ship in files/ (see the
+# README's licensing note), so the overlay above just placed them and the kernel
+# builds the 2.4 GHz WMAC driver (CONFIG_RTL8192CD=m in the subtarget config,
+# kmod-rtl8192cd selected by the seed). The Kernel/Prepare stub in
+# target/linux/realtek/Makefile only fires when the driver dir is absent — inert
+# here. g3-/g4-*.patch in the repo root are the historical record of the 4.14
+# port; the shipped tree already contains everything they describe.
+echo ">>> 2.4 GHz vendor driver present: $(find target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd -name '*.c' | wc -l) C files"
 
 # ---- optional: private profile overlay (PROFILE=/path/to/profile) ----
 # Bakes a private, secret-bearing profile into the image as custom rootfs files

@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-2.0
+config RTL8192CD
+	tristate "Realtek rtl8192cd (vendor) — RTL8197F on-SoC 2.4 GHz + RTL8822BE"
+	depends on SOC_RTL8197F
+	depends on m
+	help
+	  Vendor Realtek rtl8192cd driver, taken from the 8devices GPL release
+	  (SDK v3.4.11e, openwrt-18.06-rtkmipsel-3.18).  This is R4/G3: the
+	  fallback path to a working 2.4 GHz radio when hand-writing a mac80211
+	  driver (G2) is impractical, and the only published route to CONCURRENT
+	  dual-band on this SoC — the upstream config drives the on-SoC 2.4 GHz
+	  WMAC and a PCIe RTL8822BE together (CONFIG_SOC_WIFI + SOC_RFE_TYPE_0 +
+	  SLOT_0_8822BE).
+
+	  ⚠ WORK IN PROGRESS — not expected to build or function yet.  It is a
+	  WEXT-era driver with no cfg80211/mac80211 integration, so it does not
+	  interoperate with the rtw88 stack this port already uses for 5 GHz;
+	  making the two coexist is the open G4 question.
+
+	  Say N unless you are actively working on that port.

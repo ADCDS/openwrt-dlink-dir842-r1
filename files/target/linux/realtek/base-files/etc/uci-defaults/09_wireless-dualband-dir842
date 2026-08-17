@@ -67,8 +67,10 @@ set wireless.default_radio1.device='radio1'
 set wireless.default_radio1.network='lan'
 set wireless.default_radio1.mode='ap'
 set wireless.default_radio1.ssid='DIR842-2G'
-set wireless.default_radio1.encryption='psk2'
-set wireless.default_radio1.key='ChangeMeNow123'
+# Open on purpose, same stance as the 5 GHz seed in 99-dir842-m5: a PSK baked into
+# a published image is a published credential. Set encryption='psk2' + key before
+# this touches a real network. (In-kernel WPA2 is validated: 8192cd_psk.c, R4 gate.)
+set wireless.default_radio1.encryption='none'
 commit wireless
 EOF
 
