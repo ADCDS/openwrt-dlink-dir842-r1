@@ -1,5 +1,7 @@
 # openwrt-dlink-dir842-r1
 
+<p align="center"><img src="docs/photos/front.jpg" alt="D-Link DIR-842 R1 running OpenWrt" width="640"></p>
+
 Mainline-style OpenWrt for the **D-Link DIR-842 rev R1** (RealTek **RTL8197F** SoC).
 This repo is a **build recipe**: `build.sh` overlays `./files/` onto a pinned
 [ggbruno/openwrt](https://github.com/ggbruno/openwrt) checkout and produces both a
@@ -47,6 +49,14 @@ CPU ~99.7 % idle. As far as we know this is the first working mainline OpenWrt
 >
 > Defaults live in `files/…/uci-defaults/99-dir842-m5` (5 GHz) and
 > `files/…/uci-defaults/09_wireless-dualband-dir842` (2.4 GHz).
+
+## The hardware
+
+| | |
+|---|---|
+| <img src="docs/photos/label.jpg" alt="Bottom label — check H/W Ver.: R1" width="420"> | **Is yours an R1? Check the bottom label** — this port needs **`H/W Ver.: R1`** (P/N `YIR842ZBR…R1E`, an Anatel-certified Brazilian unit; the stock build identifies as D-Link Russia). Other DIR-842 revisions are entirely different SoCs. *(Unit identifiers redacted in this photo.)* |
+| <img src="docs/photos/rear.jpg" alt="Rear: 4 LAN + WAN" width="420"> | **Rear**: 4 gigabit LAN jacks + the yellow gigabit WAN jack — all five behind the external **RTL8367S** switch on a single RGMII trunk, which is what makes the [hardware NAT offload](docs/HWNAT-OFFLOAD.md) story interesting. Four external antennas: 2×2 per band. |
+| <img src="docs/photos/board.jpg" alt="Board, AZ707I" width="420"> | **Inside** (board `AZ707I`): the **RTL8197F** SoC sits under the metal shield plate; 64 MB DRAM, 8 MB SPI-NOR (W25Q64), the **RTL8822BE** for 5 GHz, and the four antenna pigtails. Serial recovery is **38400 8N1** on the board's UART — ⚠ the header's exact location/pinout was never formally mapped in this project ([`docs/BENCH.md`](docs/BENCH.md) §"unknowns"), so identify VCC/GND/TX/RX with a multimeter before wiring. |
 
 ## Status
 
