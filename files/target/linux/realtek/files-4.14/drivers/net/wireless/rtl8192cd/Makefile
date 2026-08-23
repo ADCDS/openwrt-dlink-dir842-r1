@@ -264,9 +264,39 @@ CONFIG_WLAN_HAL_88XX=y
 # CONFIG_WLAN_MACHAL_API=y
 CONFIG_RTL_819X_SWCORE=y
 CONFIG_RTL_NO_BR_SHORTCUT=y
+# 802.11r needs this as a MAKE VARIABLE as well as a -D (see the ccflags block
+# below). This is the half that adds sha256.o to rtl8192cd-objs (Makefile:653),
+# and FT's whole key hierarchy is sha256: PMK-R0/R1 come out of sha256_prf() and
+# the *_Name values out of sha256_vector(). With only the -D, the FT code
+# compiles and then fails to link. Verified the shipped module has zero sha256
+# symbols today, and that none of the other three gates that would pull it in
+# (11W / 11R / WAPI) is set.
+CONFIG_RTL_11R_SUPPORT=y
 
 ccflags-y += -DCONFIG_RTL_COMAPI_CFGFILE
 ccflags-y += -DCONFIG_RTL_COMAPI_WLTOOLS
+# ── 802.11r (fast transition) on the on-SoC 2.4 GHz WMAC ─────────────────────
+# EXPERIMENT 2026-08-23. The vendor FT implementation is fully present in this
+# tree (r0/r1 key holders, MDIE/FTIE, FT auth algorithm, and PMK-R0 derived
+# LOCALLY from the PSK in 8192cd_psk.c:5386 — the equivalent of hostapd's
+# ft_psk_generate_local, so NO userspace FT daemon is required). It was simply
+# never compiled: 8192cd_cfg.h:3090 gates `#define CONFIG_IEEE80211R` behind
+# CONFIG_RTL_11R_SUPPORT, and this Makefile enabled 14 other CONFIG_RTL_*
+# features but not that one.
+#
+# MEASURED without it, on the live box: the module contains no FT strings at
+# all and the MIB keys do not exist, so the .dat lines are rejected outright —
+#   CFGFILE set_mib "ft_enable=1" failed
+#   CFGFILE set_mib "ft_mdid=b1a0" failed
+# and the advertised RSN IE stays AKM-count-1 (PSK only, 00-0F-AC:02), which is
+# why clients never attempt fast transition on 2.4 GHz.
+#
+# This also pulls in SUPPORT_FAST_CONFIG=2 (R1KH_PSUH_CALC_MIX) from the same
+# #ifdef: local R1 calculation PLUS an optional key push to a userspace daemon.
+# The push is guarded by `wlanft_pid > 0`, which stays unset with no daemon
+# registered, so mode 2 degrades to pure local calculation. If FT ever
+# misbehaves, force SUPPORT_FAST_CONFIG=1 (R1KH_CALC_ONLY) before blaming keys.
+ccflags-y += -DCONFIG_RTL_11R_SUPPORT
 # (G4) ccflags-y += -DCONFIG_BAND_5G_ON_WLAN0
 ccflags-y += -DCONFIG_BAND_2G_ON_WLAN0
 ccflags-y += -DCONFIG_FREE_WBB_PIN

@@ -65,6 +65,14 @@ drv_rtl8192cd_init_iface_config() {
 	config_add_string ifname
 	config_add_boolean hidden isolate
 	config_add_int maxassoc
+	# 802.11r. Same UCI option names OpenWrt's own mac80211/hostapd 802.11r
+	# support uses, so a wifi-iface in a roaming domain reads identically
+	# whether this radio or a mac80211 one is the other end. They map onto the
+	# vendor MIB keys in rtl8192cd_emit_vif (ft_enable/ft_mdid/...), which the
+	# driver exposes via its set_mib table (8192cd_ioctl.c:1851-1861).
+	config_add_boolean ieee80211r ft_over_ds
+	config_add_string mobility_domain nasid
+	config_add_int reassociation_deadline
 }
 
 drv_rtl8192cd_cleanup() {
@@ -136,12 +144,14 @@ rtl_emit_encryption() {
 rtl8192cd_emit_vif() {
 	local name="$1"
 	local mode ssid encryption key hidden maxassoc ifname
+	local ieee80211r mobility_domain ft_over_ds reassociation_deadline nasid
 
 	# for_each_interface() has already json_select'ed this interface object.
 	# On first setup there is no "data" section yet, so ifname comes from
 	# "config" (it is a plain UCI option on the wifi-iface).
 	json_select config
 	json_get_vars mode ssid encryption key hidden maxassoc ifname
+	json_get_vars ieee80211r mobility_domain ft_over_ds reassociation_deadline nasid
 	json_select ..
 
 	[ -n "$ifname" ] || ifname="$phy_ifname"
@@ -156,6 +166,27 @@ rtl8192cd_emit_vif() {
 		echo "${ifname}_ssid=\"$ssid\""
 		[ -n "$hidden" ]   && echo "${ifname}_hiddenAP=$hidden"
 		[ -n "$maxassoc" ] && echo "${ifname}_stanum=$maxassoc"
+		# ── 802.11r ──────────────────────────────────────────────────────────
+		# EMITTED BEFORE rtl_emit_encryption ON PURPOSE. The driver builds its
+		# advertised RSN IE when the encryption MIBs are applied; if ft_enable
+		# arrives after that, the IE can already be finalised without the
+		# FT-PSK AKM (00-0F-AC:4) and clients never attempt fast transition.
+		# Read the result back with:  cat /proc/wlan0/mib_auth  -> "rsnie:".
+		#
+		# ft_mdid is BYTE_ARRAY_T: the MIB parser reads it as a HEX STRING,
+		# 2 chars per byte (8192cd_ioctl.c:3641 get_array_val), so a
+		# mobility_domain like 'b1a0' passes through verbatim and means the
+		# same two bytes hostapd puts in the MDIE. Do not "helpfully"
+		# 0x-prefix it.
+		if [ "$ieee80211r" = "1" ]; then
+			echo "${ifname}_ft_enable=1"
+			[ -n "$mobility_domain" ] && echo "${ifname}_ft_mdid=$mobility_domain"
+			echo "${ifname}_ft_over_ds=${ft_over_ds:-0}"
+			[ -n "$reassociation_deadline" ] && \
+				echo "${ifname}_ft_reasoc_timeout=$reassociation_deadline"
+			# R0 key holder id. Unique per radio, like nas_identifier upstream.
+			[ -n "$nasid" ] && echo "${ifname}_ft_r0kh_id=$nasid"
+		fi
 		rtl_emit_encryption "$ifname" "$encryption" "$key"
 	} >> "$CFGFILE" || {
 		wireless_setup_vif_failed UNSUPPORTED_ENCRYPTION

@@ -537,6 +537,130 @@ Notes that save time:
 
 ---
 
+## 10. 802.11r (fast transition) on both radios
+
+Added in **v1.1**. The 5 GHz side is unremarkable — hostapd, `ieee80211r`, done. The
+2.4 GHz side is the story: **the vendor driver has always implemented 802.11r, and this
+port had simply never compiled it.**
+
+### ★ The code was there; the flag was not
+
+`8192cd_cfg.h` gates the whole feature:
+
+```c
+#ifdef CONFIG_RTL_11R_SUPPORT
+#define CONFIG_IEEE80211R
+#define SUPPORT_FAST_CONFIG 2
+#endif
+```
+
+The driver `Makefile` enabled **14** other `CONFIG_RTL_*` features and not that one, so
+`CONFIG_IEEE80211R` never got defined. What that looked like on a running box: the
+module contained no FT symbols at all, so the MIB keys did not exist and the `.dat`
+lines were rejected outright —
+
+```
+CFGFILE set_mib "ft_enable=1" failed
+CFGFILE set_mib "ft_mdid=b1a0" failed
+```
+
+— and the advertised RSN IE carried a single AKM (`00-0F-AC:02`, plain PSK), which is
+why clients never attempted fast transition on 2.4 GHz.
+
+### ★ It is TWO changes, not one — the ccflag alone does not link
+
+```make
+CONFIG_RTL_11R_SUPPORT=y                  # make var: adds sha256.o (Makefile:653)
+ccflags-y += -DCONFIG_RTL_11R_SUPPORT     # ccflag:   compiles the FT code
+```
+
+The make variable is the half that pulls in `sha256.o`, and FT's entire key hierarchy is
+sha256: `sha256_prf()` derives PMK-R0/PMK-R1, `sha256_vector()` derives the `*_Name`
+values. With only the `-D` the FT code compiles and then fails to link. Confirmed the
+shipped v1.0 module has **zero** sha256 symbols and that none of the other three gates
+that would pull it in (`CONFIG_RTL_11W_SUPPORT`, `CONFIG_RTL_11R_SUPPORT`,
+`CONFIG_RTL_WAPI_SUPPORT`) is set.
+
+### ★ No userspace FT daemon is needed
+
+The driver has hooks for one — `wlanft_pid`, and the `SIOCSIWRTLSETFTPID` /
+`SIOCGIFTGETEVENT` / `SIOCSIFTSETKEY` private ioctls — and it does not exist anywhere.
+Not in this port, and not in D-Link's stock firmware either: stock's `/bin/auth` is a
+Realtek 802.1x daemon v1.8f with not one FT string in it.
+
+It is not needed for FT-PSK. `8192cd_psk.c` derives PMK-R0 **locally from the PSK**:
+
+```
+PMK-R0 = sha256_prf(PMK, "FT-R0", SSIDlen ‖ SSID ‖ MDID ‖ R0KHlen ‖ R0KH-ID ‖ S0KH-ID)
+```
+
+which is exactly what hostapd's `ft_psk_generate_local=1` does. The daemon would only be
+required for FT-over-DS and for pushing R1 keys between APs; with `ft_over_ds 0` neither
+applies. (`SUPPORT_FAST_CONFIG 2` also enables an R1 key *push*, but the push is guarded
+by `wlanft_pid > 0`, which stays unset, so it degrades to pure local calculation.)
+
+### Configuring it — vendor MIB, not hostapd options
+
+hostapd never sees this radio, so `ieee80211r`/`mobility_domain` mean nothing to it. The
+netifd handler translates the familiar UCI options into the vendor's MIB keys:
+
+| UCI option | vendor MIB key |
+|---|---|
+| `ieee80211r 1` | `ft_enable=1` |
+| `mobility_domain <4 hex>` | `ft_mdid=` (`BYTE_ARRAY_T`: a hex string, 2 chars/byte) |
+| `ft_over_ds 0` | `ft_over_ds=0` |
+| `reassociation_deadline 1000` | `ft_reasoc_timeout=1000` |
+| `nasid <string>` | `ft_r0kh_id=` (the R0 key holder id) |
+
+⚠ **The handler emits these BEFORE the encryption block, deliberately.** The driver
+builds its advertised RSN IE when the cipher MIBs are applied; if `ft_enable` arrives
+afterwards the IE has already been finalised without the FT-PSK AKM and clients will
+never try fast transition.
+
+FT is **opt-in per BSS** — the shipped config is open, and FT requires WPA2, so nothing
+is enabled by default. Add the options above to a WPA2 `wifi-iface` to turn it on. Every
+AP in a mobility domain needs the **same** `mobility_domain` and a **unique** `nasid`.
+
+### Verifying
+
+```sh
+logread | grep -c 'set_mib .* failed'    # must be 0
+grep rsnie /proc/wlan0/mib_auth
+#  without FT: 3014 ... 0100 000fac02 0000            <- 1 AKM  (PSK)
+#  with FT:    3018 ... 0200 000fac02 000fac04 0000   <- 2 AKMs (PSK + FT-PSK)
+cat /proc/wlan0/ft_info                  # R0KHs / R1KHs populate as clients associate
+```
+
+### ★ Measured on air, both directions
+
+Two independent clients. A phone's scan reports the BSS as
+`[WPA2-PSK+FT/PSK-CCMP]`. A USB adapter associates with `key_mgmt=FT-PSK`, and the AP's
+`ft_info` fills in with R0KH **and** R1KH entries carrying the configured `r0kh_id` and
+derived PMK-R0/PMK-R1. Forced roams with `wpa_cli roam`, between this radio and a
+separate hostapd AP on another channel:
+
+```
+rtl8192cd -> hostapd   ch6  -> ch11   FT: Completed successfully
+hostapd -> rtl8192cd   ch11 -> ch6    FT: Completed successfully
+```
+
+Note the second direction in particular: the client presents the **other AP's** R0KH-ID,
+and each side derives the keys for a key holder that is not itself. Realtek↔hostapd
+interop works.
+
+### Known limits
+
+- **802.11k and 802.11v are still off** on this radio. Same story as 11r — the code is
+  in the tree behind `DOT11K` / `CONFIG_RTL_11V_SUPPORT` and the Makefile does not set
+  them. Not enabled here because they are untested; the flags are the obvious next step.
+- **This radio is 802.11n (HT20).** Modern clients weight estimated throughput once RSSI
+  saturates, so an 802.11ax AP will usually win the selection even when it is much
+  weaker — measured: a phone preferred an ax AP at **-56 dBm** over this one at
+  **-29 dBm**. FT here is correct, but do not expect clients to use it often when an ax
+  AP is audible.
+
+---
+
 ## 9. Open items
 
 1. **5 GHz TX power is uncalibrated** (blank efuse). Believed still true; **not

@@ -1,0 +1,9 @@
+#!/bin/sh
+# Enable the AP-mode ASIC settle shim (see /etc/init.d/asic-wifi-settle).
+#
+# A script dropped into base-files/etc/init.d/ is NOT enabled automatically —
+# nothing creates its /etc/rc.d/ symlink — so it must be enabled once, here.
+# Without it the box boots with a dead WIRELESS datapath (both radios beacon,
+# nobody can associate) while the wired path looks perfectly healthy.
+/etc/init.d/asic-wifi-settle enable
+exit 0

@@ -91,6 +91,18 @@ CPU ~99.7 % idle. As far as we know this is the first working mainline OpenWrt
   WPA2-PSK). Both radios run concurrently, bridged into `br-lan` (⚠ **both ship open** —
   set keys before this touches a real network). The driver source ships in `files/` —
   see *Building* for the licensing story.
+- **802.11r (fast BSS transition) on BOTH radios** — new in v1.1. The 5 GHz side gets it
+  from hostapd as usual; the 2.4 GHz side is the interesting one, because the vendor
+  driver implements FT itself and it had simply never been compiled in. Verified on air
+  with two independent clients and real roams in both directions, including against a
+  hostapd AP (`FT: Completed successfully`). Opt-in per BSS — see
+  [`docs/WIFI-DUAL-BAND.md`](docs/WIFI-DUAL-BAND.md#10-80211r-fast-transition-on-both-radios).
+- **A boot-time WiFi datapath fix** — `asic-wifi-settle` (new in v1.1). On a cold boot
+  the S97 ASIC pass completes before the wireless side has settled and leaves the
+  *wireless* datapath dead: both radios beacon at full strength, `wlan0` sits in the
+  bridge "forwarding", and **no client can associate or DHCP**, while the wired path
+  looks perfectly healthy from SSH. The shim re-runs the (idempotent) bring-up once the
+  radios are up. Cost: WiFi does not pass traffic for roughly the first minute after boot.
 
 **Known limitations**
 

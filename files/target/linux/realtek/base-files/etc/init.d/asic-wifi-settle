@@ -1,0 +1,50 @@
+#!/bin/sh /etc/rc.common
+# AP-mode addendum to /etc/init.d/dir842-asic. Do not merge into that file —
+# keeping it separate leaves the hard-won vendor bring-up untouched and makes
+# this trivially removable if the box ever goes back to being a gateway.
+#
+# WHY THIS EXISTS (measured 2026-08-23, twice each way):
+# On a cold boot the S97 dir842-asic pass runs AFTER the wlan netifs are up and
+# bridged (boot log: wlan1 AP-ENABLED 15:43:18 -> "ASIC up" 15:43:26) and still
+# leaves the WIRELESS datapath dead: the 2.4 GHz BSS beacons at full signal,
+# wlan0 sits in br-lan "forwarding", and clients cannot associate or DHCP at
+# all. Running `/etc/init.d/dir842-asic restart` by hand a few minutes later
+# fixes it every time — association, DHCP from the gateway and forwarding all
+# come good instantly. The wired path is never affected, which is exactly what
+# makes this dangerous: the box looks perfectly healthy from SSH.
+#
+# gw_prog WIPES the ASIC L2 tables and the boot pass evidently programs them
+# before the wireless side has finished settling, so we simply run the
+# (explicitly idempotent) sequence once more after wireless is genuinely up.
+#
+# Cost: WiFi clients cannot pass traffic for roughly the first minute after a
+# reboot. That is the trade for it working at all unattended.
+#
+# ⚠ Do NOT set USE_PROCD here, not even to 0 — this fork's rc.common tests
+# `[ -n "$USE_PROCD" ]`, so ANY value flips it into procd mode and silently
+# replaces start() with an empty service. Same trap as dir842-asic.
+START=99
+
+start() {
+	# Backgrounded: boot must never block on this.
+	(
+		i=0
+		while [ $i -lt 120 ]; do
+			if [ -d /sys/class/net/br-lan/brif/wlan0 ] &&
+			   [ -d /sys/class/net/br-lan/brif/wlan1 ] &&
+			   [ "$(cat /sys/class/net/wlan1/operstate 2>/dev/null)" = "up" ]; then
+				break
+			fi
+			i=$((i+1))
+			sleep 1
+		done
+		# Let hostapd finish its own bridge add/remove churn before reprogramming.
+		sleep 20
+		/etc/init.d/dir842-asic restart
+		logger -t asic-wifi-settle "ASIC re-programmed after wireless settled (waited ${i}s + 20s)"
+	) &
+}
+
+stop() {
+	:
+}
