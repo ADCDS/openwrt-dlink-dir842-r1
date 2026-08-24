@@ -1,5 +1,5 @@
 #!/bin/sh /etc/rc.common
-# Invalidate a station's stale ASIC L2 row the moment it associates locally.
+# Invalidate every currently-associated station's ASIC L2 row every poll cycle.
 #
 # THE BUG (measured 2026-08-23): while a station is associated to ANOTHER AP on
 # the same LAN, its frames reach this box over the wire and the switch
@@ -18,6 +18,25 @@
 # role self-heals in ~5 min. Gating it to bridge shipped the mitigation only to
 # the role that needed it least. /proc/rtl865x_l2flush refuses to touch STA/NH
 # rows, so running it in router role cannot disturb the routed nexthops.
+#
+# ⚠ UNCONDITIONAL RE-FLUSH, not "flush once on new arrival" (measured
+# 2026-08-24: a real gap in that design). A station that leaves this AP and
+# roams back is only a genuinely NEW arrival from the radio's point of view;
+# /proc/*/sta_info and iwinfo assoclist do not reliably drop an entry the
+# instant a station leaves, so a fast roam-away-then-back can look, to a
+# poller that tracks "already saw this MAC", exactly like a station that was
+# here the whole time — and the flush that the roam-BACK needed never fires.
+# Live-reproduced with the OLD (flush-once) poller running the whole time: a
+# client roamed gateway -> here -> gateway -> here again a few seconds later;
+# the stale member=0x01 row from the roam-back sat unflushed for 4+ minutes
+# (blackholed) — a manual flush confirmed the mechanism and cleared it
+# instantly, but the poller itself never fired for the second arrival.
+# Flushing is cheap and idempotent — /proc/rtl865x_l2flush no-ops when
+# nothing is stale and never touches STA/NH rows — so there is no reason to
+# track "new" at all. With THIS poller (every associated station flushed
+# every cycle, no "new" tracking) the identical gateway -> here -> gateway ->
+# here sequence self-healed automatically within one poll cycle (~2-4 s), no
+# manual intervention.
 #
 # Polling, not events: the two radios share no tooling — 5 GHz is
 # rtw88/mac80211 + hostapd, 2.4 GHz is the vendor rtl8192cd driver with no
@@ -63,43 +82,22 @@ l2f_mac80211_stations() {
 }
 
 l2f_loop() {
-	seen=" "
 	while true; do
 		if [ ! -e "$FLUSH" ]; then sleep 10; continue; fi
-		# ★ SPACE-separated on purpose. These lists arrive newline-separated,
-		# and `case " $cur " in *" $mac "*` needs spaces as delimiters: with
-		# newlines it matches for exactly one station and fails for two or
-		# more, which silently re-flushed every client every cycle (measured
-		# as a review finding, not hypothetical).
-		# ★ BRACES MATTER. `a; b | tr` binds the pipe to b ONLY, so the vendor
-		# list would stay NEWLINE-separated while the prune below matches on
-		# spaces — which silently prunes every station every cycle and
-		# re-flushes them all every 2 s (round-1 bug, reintroduced in round 2
-		# by exactly this precedence slip, caught by simulation).
-		cur=" $( { l2f_vendor_stations; l2f_mac80211_stations; } | sort -u | tr '\n' ' ' ) "
-		for mac in $cur; do
-			case "$seen" in
-			*" $mac "*) ;;
-			*)
-				if echo "$mac" > "$FLUSH" 2>/dev/null; then
-					# NOTE: a successful write does NOT mean a row was
-					# actually invalidated — it may legitimately have
-					# matched nothing. The kernel logs the real count at
-					# pr_info. Word it so forensics are not misleading.
-					logger -t dir842-l2flush "requested ASIC L2 invalidate for $mac on association"
-					seen="$seen$mac "
-				else
-					logger -t dir842-l2flush "FAILED to write $mac to $FLUSH"
-				fi
-				;;
-			esac
+		{ l2f_vendor_stations; l2f_mac80211_stations; } | sort -u |
+		while read -r mac; do
+			[ -n "$mac" ] || continue
+			if ! echo "$mac" > "$FLUSH" 2>/dev/null; then
+				logger -t dir842-l2flush "FAILED to write $mac to $FLUSH"
+			fi
+			# NOTE: a successful write does NOT mean a row was actually
+			# invalidated — the kernel logs the real count at pr_info,
+			# and most cycles legitimately match nothing. No per-write
+			# log line here on purpose: at a 2 s cadence per associated
+			# station that would flood the log with noise, unlike the
+			# old one-shot-per-arrival design where every line meant
+			# something happened.
 		done
-		# Forget departed stations so a re-association flushes again.
-		newseen=" "
-		for mac in $seen; do
-			case "$cur" in *" $mac "*) newseen="$newseen$mac " ;; esac
-		done
-		seen="$newseen"
 		sleep 2
 	done
 }
