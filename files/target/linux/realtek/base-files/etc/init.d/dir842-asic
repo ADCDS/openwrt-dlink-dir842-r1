@@ -46,10 +46,27 @@
 # hwnat never armed). Leaving it unset keeps the legacy path and our functions.
 START=97
 
-# LAN/WAN peers to prime the L2 tables with. The defaults are the bench rig's peers; on
-# any other network they simply time out harmlessly and real traffic warms the tables on
-# demand. Override by exporting WARM_HOSTS before calling this script, or edit the line.
-WARM_HOSTS="${WARM_HOSTS:-192.168.0.2 172.16.0.2}"
+# LAN/WAN peers to prime the L2 tables with, in order of precedence:
+#   1. $WARM_HOSTS in the environment (bench/manual runs)
+#   2. UCI: dir842.asic.warm_hosts   <-- the supported way to configure this
+#   3. the bench rig's peers, as a last resort
+#
+# ⚠ Do NOT just edit the fallback below on a deployed box. This file lives in
+# /etc/init.d, which sysupgrade does NOT preserve, so the edit is silently lost
+# on every flash and the box comes back pinging addresses that do not exist on
+# your network. /etc/config IS preserved, hence the UCI option:
+#
+#     uci set dir842.asic.warm_hosts='192.168.1.1 192.168.1.2'; uci commit dir842
+#
+# On a network where none of these answer they simply time out harmlessly and
+# real traffic warms the tables on demand.
+asic_warm_hosts() {
+	local h
+	[ -n "$WARM_HOSTS" ] && { echo "$WARM_HOSTS"; return; }
+	h="$(uci -q get dir842.asic.warm_hosts)"
+	[ -n "$h" ] && { echo "$h"; return; }
+	echo "192.168.0.2 172.16.0.2"
+}
 
 wait_netif_mac() {
 	# Poll for netifd to have applied the flash MAC (WAN base + 1) to eth0.2.
@@ -70,6 +87,52 @@ wait_netif_mac() {
 	sleep 2
 }
 
+# ── ROLE DETECTION ────────────────────────────────────────────────────────────
+# "router" if this box actually routes (a wan interface exists), else "bridge".
+# Everything gw_prog programs — L3 routes, NAPT, masquerade extIP, hwnat — is
+# meaningless on a bridged AP, and one side effect is actively harmful there:
+# gw_prog sets TEACR bit0, which FREEZES L2/ARP aging (rtl865x_asichal.c:1077).
+# That protects the static ARP nexthop chain in the ROUTER datapath; a bridge
+# has no L3 nexthops to protect, and the freeze turns a transient wrong L2 row
+# into a PERMANENT one.
+#
+# Why that matters (measured 2026-08-23): while a station is associated to a
+# DIFFERENT AP on the same LAN, its frames reach this box over the wire and the
+# switch hardware-learns that MAC on the uplink jack (member=0x01 — no software
+# writer here produces that; l2_mask_lan=0x04, l2_mask_wan=0x10). When the
+# station later associates HERE it lives behind the CPU, but the stale row still
+# points at the jack, so downstream unicast is sent to the jack and then
+# source-port-filtered out (rtl819x_swnic.c:622-633) — silently dropped. The
+# client associates and can transmit, broadcast still works (so it even does
+# IPv6 SLAAC), but it gets no DHCP OFFER/ACK and no ARP replies, while the wired
+# path stays perfect — which is why this reads as a WiFi or DHCP fault.
+#
+# With aging frozen it never recovers. In an 802.11r roaming domain every client
+# that roams in poisons itself on arrival. See also /etc/init.d/dir842-l2flush,
+# which closes the residual window by invalidating the row on association.
+# Precedence: explicit UCI setting > heuristic. The heuristic alone is fragile:
+# a dumb AP that still carries a leftover `wan` stanza (very common — the stock
+# config ships one and people just unplug the port) would be misread as a router,
+# which re-freezes L2 aging and reinstates the PERMANENT blackhole. Conversely a
+# real router whose section is not literally named `wan` would be misread as a
+# bridge and skip fabric_reset/gw_prog entirely. Set it explicitly when in doubt:
+#
+#     uci set dir842.asic.role='bridge'; uci commit dir842
+#
+# ⚠ ONE-WAY at runtime. bridge->router via uci + `restart` is fine. The reverse
+# is NOT: nothing in bridge role clears TEACR bit0, and no userspace knob exists
+# to unfreeze L2 aging, so a router->bridge flip by `restart` leaves aging FROZEN
+# and the router L3 tables programmed while the log below claims "L2 aging left
+# ENABLED". REBOOT after switching router->bridge.
+asic_role() {
+	local r
+	r="$(uci -q get dir842.asic.role)"
+	case "$r" in
+	router|bridge) echo "$r"; return ;;
+	esac
+	if uci -q get network.wan >/dev/null 2>&1; then echo router; else echo bridge; fi
+}
+
 asic_program() {
 	swconfig dev switch0 set apply 1 2>/dev/null
 	sleep 1
@@ -77,17 +140,33 @@ asic_program() {
 	# full fabric reset (SIRR FULL_RST -> swcore clock cycle -> MEMCR SRAM re-init ->
 	# 153-reg restore), and it re-arms the ASIC gw tables in-kernel, which is why
 	# gw_prog must follow it.
-	echo 3 > /sys/module/rtl819x/parameters/fabric_reset 2>/dev/null
-	sleep 3
+	# ⚠ ROUTER ONLY. Level 3 is "+full fabric reset" and, per this file's header,
+	# "re-arms the ASIC gw tables in-kernel" — it restores the L3 datapath AND
+	# the TEACR aging freeze even when gw_prog is skipped (verified 2026-08-23:
+	# routes and MSCR/SWTCR0/TEATCR came back with gw_prog gated off). Running it
+	# in bridge role recreates the exact condition the bridge path avoids.
+	# The header's "without it a fresh boot forwards NOTHING" was measured in
+	# ROUTER mode; in bridge role the ASIC is left in its loader L2 state and
+	# plain switching works (measured: association, broadcast/multicast and
+	# client ARP all traverse).
+	if [ "$ROLE" = "router" ]; then
+		echo 3 > /sys/module/rtl819x/parameters/fabric_reset 2>/dev/null
+		sleep 3
+	fi
 	# read side-effect: gw_prog() programs the whole L3/L4 datapath. NOTE this WIPES
 	# the ASIC L2 tables, so the warm-up must come after.
-	cat /proc/rtl865x_gw >/dev/null 2>&1
+	# gw_prog: L3/L4 datapath + TEACR aging freeze. ROUTER ONLY (see asic_role).
+	if [ "$ROLE" = "router" ]; then
+		cat /proc/rtl865x_gw >/dev/null 2>&1
+	else
+		logger -t dir842-asic "bridge role: skipping gw_prog (no L3 datapath, L2 aging left ENABLED)"
+	fi
 }
 
 asic_warm() {
 	local h i
 	for i in 1 2 3; do
-		for h in $WARM_HOSTS; do
+		for h in $(asic_warm_hosts); do
 			ping -c2 -W1 "$h" >/dev/null 2>&1
 		done
 		sleep 1
@@ -95,9 +174,39 @@ asic_warm() {
 }
 
 asic_up() {
+	# Resolve ONCE: re-evaluating mid-bring-up could yield a half-state
+	# (fabric_reset run but gw_prog skipped), and fabric_reset 3 re-arms gw
+	# in-kernel, so that half-state is frozen-aging with no mitigation.
+	ROLE="$(asic_role)"
+
+	# ⚠ The kernel has its OWN recovery path that undoes the bridge gating:
+	# the FCS-wedge detector (rtl819x-eth.c, fabric_autoreset, DEFAULT 3) calls
+	# rtl865x_gw_rearm() -> gw_prog() whenever mode >= 3, which reprograms the
+	# router scaffolding and re-freezes L2 aging (TEACR bit0). One wedge event
+	# on a bridged AP would silently restore the permanent-blackhole condition,
+	# with nothing in this script's log to show for it.
+	# Levels 1 and 2 do NOT call gw_rearm (that call is inside `if (mode >= 3)`),
+	# so drop to 2 in bridge role: wedge auto-recovery is kept, the gw re-arm is
+	# not. Router role keeps the shipped default.
+	# ★ The else branch is NOT optional: flipping role bridge->router via uci
+	# + `restart` (no reboot) would otherwise leave autoreset at 2, so a later
+	# router-role wedge would recover WITHOUT the gw re-arm — which is this
+	# driver's own documented dead-box state (MSCR=EN_L2-only, 100% loss).
+	if [ "$ROLE" = "bridge" ]; then
+		echo 2 > /sys/module/rtl819x/parameters/fabric_autoreset 2>/dev/null
+	else
+		echo 3 > /sys/module/rtl819x/parameters/fabric_autoreset 2>/dev/null
+	fi
+
 	wait_netif_mac
 	asic_program
-	asic_warm
+	# The warm-up exists to re-prime the L2 tables after gw_prog WIPES them
+	# (see step 3/4 in the header). In bridge role we run neither gw_prog nor
+	# fabric_reset, so nothing wipes them — the warm would just be ~9s of
+	# pinging peers that may not even exist on this network. Skip it.
+	if [ "$ROLE" = "router" ]; then
+		asic_warm
+	fi
 	# Arm offload. Safe to arm before the WAN has an address: the offload path
 	# declines any flow whose external IP does not match the live WAN IP, and the
 	# first real flow after the WAN comes up relearns the peer identity (extIP,
@@ -105,8 +214,11 @@ asic_up() {
 	# rtl865x_asichal.c). Arming here, unconditionally, is the original R4 behaviour;
 	# the WAN-address gate + ifup reprogram that briefly lived here were a workaround
 	# for the A-2 stall and became dead weight once that was root-caused and fixed.
-	echo 1 > /sys/module/rtl819x/parameters/hwnat 2>/dev/null
-	logger -t dir842-asic "ASIC up: netif MAC $(cat /sys/class/net/eth0.2/address 2>/dev/null), L2 warmed, hwnat=$(cat /sys/module/rtl819x/parameters/hwnat 2>/dev/null)"
+	# hwnat is a NAT/routing offload; a bridge never routes. Leave it disarmed.
+	if [ "$ROLE" = "router" ]; then
+		echo 1 > /sys/module/rtl819x/parameters/hwnat 2>/dev/null
+	fi
+	logger -t dir842-asic "ASIC up ($ROLE): netif MAC $(cat /sys/class/net/eth0.2/address 2>/dev/null), hwnat=$(cat /sys/module/rtl819x/parameters/hwnat 2>/dev/null)"
 }
 
 start() {

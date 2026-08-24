@@ -1,0 +1,123 @@
+#!/bin/sh /etc/rc.common
+# Invalidate a station's stale ASIC L2 row the moment it associates locally.
+#
+# THE BUG (measured 2026-08-23): while a station is associated to ANOTHER AP on
+# the same LAN, its frames reach this box over the wire and the switch
+# HARDWARE-LEARNS that MAC on the uplink jack. When it later associates HERE it
+# lives behind the CPU, but the stale row still points at the jack: downstream
+# unicast is sent to the jack and then source-port-filtered out
+# (rtl819x_swnic.c:622-635) and silently dropped. The client associates, can
+# transmit, and receives broadcast (it even completes IPv6 SLAAC), but gets no
+# DHCP OFFER/ACK and no ARP replies — while the wired path stays perfect, which
+# is why this reads as a WiFi or DHCP fault.
+#
+# ⚠ RUNS IN BOTH ROLES, on purpose. An earlier version gated this to bridge role
+# with the rationale "in router role stations are not behind the CPU" — that is
+# false: the radios hang off the SoC in either role. Worse, ROUTER role is where
+# gw_prog freezes L2 aging (TEACR bit0) and the stale row is PERMANENT; bridge
+# role self-heals in ~5 min. Gating it to bridge shipped the mitigation only to
+# the role that needed it least. /proc/rtl865x_l2flush refuses to touch STA/NH
+# rows, so running it in router role cannot disturb the routed nexthops.
+#
+# Polling, not events: the two radios share no tooling — 5 GHz is
+# rtw88/mac80211 + hostapd, 2.4 GHz is the vendor rtl8192cd driver with no
+# hostapd and no nl80211, its clients visible only in /proc/wlan0/sta_info.
+# One loop covers both. This NARROWS the window to ~2 s; it does not close it,
+# and 2 s is still far above 802.11r's sub-second target. An event-driven
+# source (hostapd_cli -a for mac80211, iwevent for WEXT) would be strictly
+# better and is the obvious next step.
+#
+# ⚠ Do NOT set USE_PROCD (this fork's rc.common treats ANY value as procd mode
+# and silently replaces start() — same trap as dir842-asic).
+START=98
+
+FLUSH=/proc/rtl865x_l2flush
+PIDFILE=/var/run/dir842-l2flush.pid
+
+# 2.4 GHz vendor driver: "    hwaddr: aabbccddeeff" (12 hex chars, no separators)
+#
+# ★ Resolved by IDENTITY, not by name. This repo learned that lesson the hard
+# way: 09_wireless-dualband-dir842 records that the vendor ifname depends on
+# module load order and ALREADY FLIPPED once (rtl8192cd gained AUTOLOAD and took
+# wlan0 from rtw88). Hardcoding /proc/wlan0/sta_info would silently drop the
+# 2.4 GHz radio out of this mitigation if it ever flips again, with everything
+# still looking healthy. Only rtl8192cd creates a <ifname>/sta_info proc node,
+# so globbing for it identifies the radio regardless of its name.
+l2f_vendor_stations() {
+	sed -n 's/^[[:space:]]*hwaddr:[[:space:]]*\([0-9a-fA-F]\{12\}\).*/\1/p' \
+		/proc/*/sta_info 2>/dev/null |
+	while read -r h; do
+		echo "$h" | sed 's/\(..\)/\1:/g; s/:$//' | tr 'A-F' 'a-f'
+	done
+}
+
+# mac80211 radios: iwinfo assoclist lines begin with the MAC
+l2f_mac80211_stations() {
+	# Glob the netdev entries directly: `ls dir/` over several phys emits
+	# "path:" header lines that would become loop tokens.
+	for d in /sys/class/ieee80211/*/device/net/*; do
+		[ -e "$d" ] || continue
+		iwinfo "$(basename "$d")" assoclist 2>/dev/null |
+			sed -n 's/^\([0-9A-Fa-f:]\{17\}\).*/\1/p' | tr 'A-F' 'a-f'
+	done
+}
+
+l2f_loop() {
+	seen=" "
+	while true; do
+		if [ ! -e "$FLUSH" ]; then sleep 10; continue; fi
+		# ★ SPACE-separated on purpose. These lists arrive newline-separated,
+		# and `case " $cur " in *" $mac "*` needs spaces as delimiters: with
+		# newlines it matches for exactly one station and fails for two or
+		# more, which silently re-flushed every client every cycle (measured
+		# as a review finding, not hypothetical).
+		# ★ BRACES MATTER. `a; b | tr` binds the pipe to b ONLY, so the vendor
+		# list would stay NEWLINE-separated while the prune below matches on
+		# spaces — which silently prunes every station every cycle and
+		# re-flushes them all every 2 s (round-1 bug, reintroduced in round 2
+		# by exactly this precedence slip, caught by simulation).
+		cur=" $( { l2f_vendor_stations; l2f_mac80211_stations; } | sort -u | tr '\n' ' ' ) "
+		for mac in $cur; do
+			case "$seen" in
+			*" $mac "*) ;;
+			*)
+				if echo "$mac" > "$FLUSH" 2>/dev/null; then
+					# NOTE: a successful write does NOT mean a row was
+					# actually invalidated — it may legitimately have
+					# matched nothing. The kernel logs the real count at
+					# pr_info. Word it so forensics are not misleading.
+					logger -t dir842-l2flush "requested ASIC L2 invalidate for $mac on association"
+					seen="$seen$mac "
+				else
+					logger -t dir842-l2flush "FAILED to write $mac to $FLUSH"
+				fi
+				;;
+			esac
+		done
+		# Forget departed stations so a re-association flushes again.
+		newseen=" "
+		for mac in $seen; do
+			case "$cur" in *" $mac "*) newseen="$newseen$mac " ;; esac
+		done
+		seen="$newseen"
+		sleep 2
+	done
+}
+
+start() {
+	# Verify the pid is actually OUR loop: /var/run is tmpfs so the file cannot
+	# survive a reboot, but within one boot a recycled pid could match.
+	oldpid="$(cat "$PIDFILE" 2>/dev/null)"
+	if [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null &&
+	   grep -qs l2flush "/proc/$oldpid/cmdline" 2>/dev/null; then
+		return 0				# already running; do not stack pollers
+	fi
+	l2f_loop &
+	echo $! > "$PIDFILE"
+}
+
+stop() {
+	[ -f "$PIDFILE" ] || return 0
+	kill "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null
+	rm -f "$PIDFILE"
+}

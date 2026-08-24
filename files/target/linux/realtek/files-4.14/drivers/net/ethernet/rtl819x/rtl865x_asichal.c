@@ -18,6 +18,9 @@
 #include <linux/netdevice.h>	/* R3: read the live netif MACs (see gw_netif_mac) */
 #include <linux/etherdevice.h>
 #include <linux/moduleparam.h>	/* R6: wan_route_mode knob */
+#include <linux/uaccess.h>	/* copy_from_user (l2flush write handler) */
+#include <linux/capability.h>
+#include <linux/sched.h>	/* cond_resched */
 
 #include "rtl819x_regs.h"
 #include "rtl865x_asichal.h"
@@ -1750,12 +1753,181 @@ static const struct file_operations fabric_fops = {
 	.read = seq_read, .llseek = seq_lseek, .release = single_release,
 };
 
+/* ---- AP/bridge role: invalidate a stale L2 row for a station -----------------
+ * WHY (measured 2026-08-23 on a DIR-842 R1 used as a dumb AP):
+ * While a station is associated to a DIFFERENT AP on the same LAN, its frames
+ * reach this box over the wire and the switch HARDWARE-LEARNS that MAC on the
+ * uplink jack (member=0x01 — no software writer here produces that value;
+ * l2_mask_lan is 0x04, l2_mask_wan 0x10). When the station later associates
+ * HERE it lives behind the CPU, but the stale row still points at the jack, so
+ * downstream unicast is sent to the jack and then source-port-filtered out
+ * (rtl819x_swnic.c:622-635) — silently dropped. Upstream and broadcast keep
+ * working, so the client associates and even completes IPv6 SLAAC, but gets no
+ * DHCP OFFER/ACK and no ARP replies, while the wired path stays perfect.
+ *
+ * In router role gw_prog freezes L2 aging (TEACR bit0) and the row NEVER
+ * expires. In bridge role aging runs and it self-heals — measured ~5 MINUTES,
+ * useless in an 802.11r roaming domain. Hence an explicit invalidate:
+ *
+ *   echo aa:bb:cc:dd:ee:ff > /proc/rtl865x_l2flush   (that station, all fids)
+ *   echo all               > /proc/rtl865x_l2flush   (every LEARNED row)
+ *
+ * ★ TABLE GEOMETRY (this bit an earlier version of this code): the L2 table is
+ * 256 ROWS x 4 WAYS = 1024 entries, addressed idx = (row<<2)|way. gw_l2_row()
+ * masks the hash & 0xFF, and gw_dump_show dumps ASIC_TYPE_L2_SWITCH 0..1023.
+ * Iterating "rows" 0..1023 would emit idx up to 4092 and, since each type
+ * window holds 2048 entries, would run off the end of the L2 window straight
+ * into ASIC_TYPE_ARP — zeroing ARP rows including the WAN nexthop. Bound every
+ * loop by L2_ENTRIES.
+ *
+ * ★ WAYS: hardware learning may place a MAC in ANY of the 4 ways, so we must
+ * scan all four and match, not assume way 0.
+ *
+ * ★ NEVER touch driver-written rows: gw_write_l2()/gw_write_l2_full() set
+ * STA(1<<18) and NH(1<<22) on the nexthop/broadcast/CPU-trap entries that the
+ * routed datapath and CPU delivery depend on. Hardware-learned rows have both
+ * clear (verified against live dumps). Skipping them makes this safe to run in
+ * router role too, which matters because router role is where the stale row is
+ * PERMANENT.
+ */
+#define L2_ROWS		256
+#define L2_WAYS		4
+#define L2_ENTRIES	(L2_ROWS * L2_WAYS)
+#define L2_STA_BIT	(1u << 18)
+#define L2_NH_BIT	(1u << 22)
+
+/* Caller holds rtl865x_hal_lock. */
+static void l2_invalidate_idx(u32 idx)
+{
+	u32 e[8] = { 0 };
+
+	rtl865x_asic_write_entry(ASIC_TYPE_L2_SWITCH, idx, e, true);
+}
+
+/* An all-zero entry is a free slot: age (bits 19-20) == 0 and STA == 0, and the
+ * MAC is 00:00:00:00:00:00 so it cannot match a lookup either way. */
+static bool l2_entry_is_learned(const u32 *e)
+{
+	if (!e[0] && !e[1])
+		return false;			/* already free */
+	return !(e[1] & (L2_STA_BIT | L2_NH_BIT));
+}
+
+static bool l2_entry_matches(const u32 *e, const u8 *m, u32 fid)
+{
+	u32 w0 = (m[1] << 24) | (m[2] << 16) | (m[3] << 8) | m[4];
+
+	return e[0] == w0 &&
+	       (e[1] & 0xff) == m[0] &&
+	       ((e[1] >> 23) & 3) == fid;
+}
+
+static int l2_flush_mac(const u8 *m)
+{
+	u32 e[8], fid, way, row, idx;
+	int n = 0;
+
+	/* All four fids: bridge role leaves the loader's VLAN->FID mapping in
+	 * place and we have not characterised it, so do not assume fid 0/1. */
+	for (fid = 0; fid < 4; fid++) {
+		row = gw_l2_row(m, fid);
+		for (way = 0; way < L2_WAYS; way++) {
+			idx = (row << 2) | way;	/* row<=255, way<=3 => idx<=1023 */
+			if (rtl865x_asic_read_entry(ASIC_TYPE_L2_SWITCH, idx, e))
+				continue;
+			if (!l2_entry_is_learned(e))
+				continue;
+			if (!l2_entry_matches(e, m, fid))
+				continue;
+			l2_invalidate_idx(idx);
+			n++;
+		}
+	}
+	return n;
+}
+
+static int l2_flush_all_learned(void)
+{
+	u32 e[8], idx;
+	int n = 0;
+
+	for (idx = 0; idx < L2_ENTRIES; idx++) {
+		if (rtl865x_asic_read_entry(ASIC_TYPE_L2_SWITCH, idx, e))
+			continue;
+		if (!l2_entry_is_learned(e))
+			continue;		/* keep STA/NH: broadcast, CPU trap, nexthops */
+		l2_invalidate_idx(idx);
+		n++;
+		if (!(idx & 0x3f))
+			cond_resched();
+	}
+	return n;
+}
+
+static ssize_t l2flush_write(struct file *file, const char __user *ubuf,
+			     size_t len, loff_t *off)
+{
+	char kbuf[32];
+	char *arg;
+	u8 m[6];
+	int n;
+
+	if (!capable(CAP_NET_ADMIN))
+		return -EPERM;
+	if (len == 0 || len >= sizeof(kbuf))
+		return -EINVAL;
+	if (copy_from_user(kbuf, ubuf, len))
+		return -EFAULT;
+	kbuf[len] = '\0';
+	arg = strim(kbuf);			/* strip BOTH ends; echo adds a newline */
+
+	mutex_lock(&rtl865x_hal_lock);
+	if (!strcasecmp(arg, "all")) {		/* exact: "allow" must not nuke */
+		n = l2_flush_all_learned();
+		pr_info("rtl865x l2flush: invalidated %d learned L2 rows\n", n);
+	} else if (sscanf(arg, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+			  &m[0], &m[1], &m[2], &m[3], &m[4], &m[5]) == 6) {
+		n = l2_flush_mac(m);
+		pr_info("rtl865x l2flush: invalidated %d row(s) for %pM\n", n, m);
+	} else {
+		mutex_unlock(&rtl865x_hal_lock);
+		return -EINVAL;
+	}
+	mutex_unlock(&rtl865x_hal_lock);
+	return len;
+}
+
+static int l2flush_show(struct seq_file *m, void *v)
+{
+	seq_printf(m, "usage: echo <xx:xx:xx:xx:xx:xx>|all > /proc/rtl865x_l2flush\n");
+	seq_printf(m, "invalidates HARDWARE-LEARNED L2 rows only; STA/NH rows are preserved\n");
+	return 0;
+}
+
+static int l2flush_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, l2flush_show, NULL);
+}
+
+static const struct file_operations l2flush_fops = {
+	.owner = THIS_MODULE, .open = l2flush_open, .write = l2flush_write,
+	.read = seq_read, .llseek = seq_lseek, .release = single_release,
+};
+
 static int __init rtl865x_asichal_init(void)
 {
 	proc_create("rtl865x_gw", 0444, NULL, &gw_proc_fops);
 	proc_create("rtl865x_dump", 0444, NULL, &gw_dump_fops);
 	proc_create("rtl865x_napt", 0444, NULL, &napt_scan_fops);
 	proc_create("rtl865x_fabric", 0444, NULL, &fabric_fops);
+	proc_create("rtl865x_l2flush", 0644, NULL, &l2flush_fops);
+	/* ⚠ NOTE for bridge/AP deployments: /proc/rtl865x_gw above is 0444 but is
+	 * NOT a passive read — opening it runs gw_prog(), which programs the full
+	 * router datapath and sets TEACR bit0 (freezing L2 aging). On a bridged box
+	 * that silently reinstates the permanent stale-row blackhole. Any monitoring
+	 * agent or idle `grep -r /proc` will do it. Use /proc/rtl865x_dump, which is
+	 * genuinely read-only, for inspection. Gating gw_prog on role belongs here
+	 * eventually; documenting it is the interim. */
 	pr_info("rtl865x asic-hal: /proc/rtl865x_{gw,napt,fabric} ready (M6.6)\n");
 	return 0;
 }

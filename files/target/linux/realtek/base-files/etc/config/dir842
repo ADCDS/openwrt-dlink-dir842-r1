@@ -1,0 +1,21 @@
+# DIR-842 R1 ASIC options.
+#
+# This file lives in /etc/config, which sysupgrade PRESERVES — unlike
+# /etc/init.d. Configure here rather than editing the init scripts, or your
+# changes vanish on the next flash.
+config asic 'asic'
+	# Peers pinged at boot to prime the ASIC L2 tables after gw_prog wipes
+	# them. ROUTER ROLE ONLY — in bridge role nothing wipes the tables, so the
+	# warm-up is skipped entirely and this option is unused.
+	# Set these to hosts that actually answer on YOUR network; unreachable
+	# ones just time out harmlessly.
+	option warm_hosts '192.168.0.2 172.16.0.2'
+
+	# Datapath role. Leave unset to auto-detect (router if a 'wan' interface
+	# exists, else bridge). Set explicitly if the heuristic is wrong for you —
+	# notably a dumb AP that still has a leftover 'wan' stanza, which would
+	# otherwise be treated as a router and re-freeze the ASIC L2 aging.
+	# option role 'bridge'
+
+	# ⚠ Changing role router->bridge requires a REBOOT, not just a restart:
+	# nothing in bridge role can clear the ASIC's frozen L2 aging (TEACR bit0).

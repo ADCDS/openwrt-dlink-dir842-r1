@@ -25,7 +25,24 @@
 # replaces start() with an empty service. Same trap as dir842-asic.
 START=99
 
+# ROLE GATE (added after measurement, 2026-08-23): this shim exists because the
+# S97 boot pass left the WIRELESS datapath dead — root cause was gw_prog wiping
+# the ASIC L2 tables (and fabric_reset re-arming them) after the radios came up.
+# Bridge role now runs NEITHER, so nothing wipes the tables and the shim has
+# nothing to repair. MEASURED: cold boot in bridge role with this service
+# disabled — client associated and passed traffic at 0% loss, settle_ran=0.
+# Router role still runs gw_prog, so it still needs the second pass.
+settle_role() {
+	local r
+	r="$(uci -q get dir842.asic.role)"
+	case "$r" in
+	router|bridge) echo "$r"; return ;;
+	esac
+	if uci -q get network.wan >/dev/null 2>&1; then echo router; else echo bridge; fi
+}
+
 start() {
+	[ "$(settle_role)" = "router" ] || return 0
 	# Backgrounded: boot must never block on this.
 	(
 		i=0
