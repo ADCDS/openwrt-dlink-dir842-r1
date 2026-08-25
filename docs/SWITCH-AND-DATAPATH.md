@@ -57,7 +57,7 @@ therefore skips the whole extif-init/reset path for an 8367S deliberately
 Stock's own boot banner is part of why this stuck: it prints `8197F(PA=0) 8812B(PA=0)
 8367R NOR RAM=64` (see the stock boot banner in `docs/VENDOR-PARITY-INVENTORY.md`). The
 vendor's SDK filenames say `rtl8367r/` too. Only the ID registers are authoritative —
-several in-tree comments still say 8367R; see §11.
+several in-tree comments still say 8367R; see §12.
 
 ### Where it is described
 
@@ -139,7 +139,7 @@ and that per-jack masks kill connectivity. Both were true only of Fork A; the sh
 defaults are per-jack (LAN `0x04` = jack 2, WAN `0x10` = jack 4) and that is precisely
 what makes hardware forwarding work. `/proc` was still printing `(Fork A: VID-based, NO
 CPU-tag)` to userspace. **Stale comments outlived the model they described and would have
-actively misled the next reader.** §11 lists the ones that are still there.
+actively misled the next reader.** §12 lists the ones that are still there.
 
 ### ⚠ One Fork-A claim that was retracted, and one that survived
 
@@ -312,7 +312,7 @@ on this board, but it is not the general form the comment describes.
 pass in either direction.** SoC `eth0 rx_packets = 0` and `CPUIISR = 0` (the hardware RX
 interrupt status, not merely a stat); 8367S `port6 ifIn = 0`.
 
-**The split that located it** — 8367S per-port `etherStats`, read live over debugfs (§10):
+**The split that located it** — 8367S per-port `etherStats`, read live over debugfs (§11):
 
 | port | ifInOctets | etherStatsOctets | meaning |
 |---|---|---|---|
@@ -592,7 +592,7 @@ loader's value.
 says. The numbering must therefore be **WAN = 1 / LAN = 2** to match the SoC. Backwards, a
 routed frame egressing SoC VID 1 (WAN) hits the 8367S's VID 1 = LAN jacks and never reaches
 the WAN peer. Documented at `99-dir842-m5:16-22`; it was found with the debugfs `vlan_mc`
-dump (§10) and it cost a long debug.
+dump (§11) and it cost a long debug.
 
 **There is no `eth1`.** The SoC has a single CPU-port netdev, split into `eth0.2` / `eth0.1`.
 The phantom `eth1` had a real consequence: `config_generate` emitted a `wan_eth1_dev`
@@ -666,23 +666,44 @@ a warm-up a freshly booted box reads as "100 % packet loss" and looks broken.
 
 `files/target/linux/realtek/base-files/etc/init.d/dir842-asic` (`START=97`) exists to do
 that, in a strict order. **The ordering comment in that file is the authority** and is
-reproduced here because each step is there for a measured reason:
+reproduced here because each step is there for a measured reason.
+
+### ★ Role-gated as of v1.1 — everything below except step 1 is ROUTER ONLY
+
+Steps 2–4 (`fabric_reset`, `gw_prog`, the warm-up), plus arming `hwnat`, are all part of
+the **router** hardware-acceleration datapath — L3 routes, NAPT, masquerade extIP — which
+is meaningless on a **bridge/dumb-AP** box and one side effect of which is actively
+harmful there: `gw_prog` freezes L2/ARP aging (`rtl865x_asichal.c:1088`), which on a
+bridge turns a transient wrong L2 row into a permanent one. This unconditional sequence
+is exactly what caused two real house-wide outages when this box was deployed as a dumb
+AP — see §10 for the full story. Since v1.1
+the role (router vs. bridge, auto-detected from whether `network.wan` exists, overridable
+via `uci set dir842.asic.role=...`) gates steps 2–4 and `hwnat` to router role only; a
+bridge/dumb-AP boot runs only step 1 and is done. Only step 1 (`swconfig apply`) still
+runs unconditionally in both roles.
 
 1. **`swconfig apply`** — the external 8367S keeps a wedged trunk→jack forwarding state
    across warm reloads, precisely *because* `rtl8367b_reset_chip()` deliberately skips the
    8367S soft reset to preserve the loader's power-on RGMII uplink (§4). Re-applying the
    VLAN/forwarding tables after netifd clears it; without it, routed frames cross the trunk
-   but never egress the jacks.
-2. **`fabric_reset = 3`** — ★ **measured-required.** Without it a fresh boot comes up with
-   the switch core in a state where **nothing forwards**: every path reads 100 % loss even
-   though links are up, VLANs are right, `br-lan` has its IP, and `gw_prog` reports
-   `netif readback PASS`. With it, the very same boot goes to 0 % loss. Level 3 = engine
-   reinit + `CPUICR` soft-reset + full fabric reset (`SIRR FULL_RST` → swcore clock cycle →
-   `MEMCR` SRAM re-init → register restore), and it re-arms the ASIC gw tables in-kernel.
-3. **`gw_prog`** (via `cat /proc/rtl865x_gw`) — programs netifs, routes, L2 nexthops and the
-   ACL ranges. ★ **This WIPES the ASIC L2 tables, so it MUST come before the warm-up, never
-   after.**
-4. **warm** — a few box-originated pings to the configured peers prime the L2/ARP entries.
+   but never egress the jacks. Runs in **both roles**.
+2. **`fabric_reset = 3`** — ★ **measured-required, router role.** Without it a fresh
+   router-role boot comes up with the switch core in a state where **nothing forwards**:
+   every path reads 100 % loss even though links are up, VLANs are right, `br-lan` has its
+   IP, and `gw_prog` reports `netif readback PASS`. With it, the very same boot goes to
+   0 % loss. Level 3 = engine reinit + `CPUICR` soft-reset + full fabric reset
+   (`SIRR FULL_RST` → swcore clock cycle → `MEMCR` SRAM re-init → register restore), and it
+   re-arms the ASIC gw tables in-kernel. **Skipped entirely in bridge role** — measured: a
+   bridge-role cold boot with this step skipped still forwards fine (plain switching,
+   association, ARP all traverse; nothing wedges without it there).
+3. **`gw_prog`** (via `cat /proc/rtl865x_gw`) — **router role only.** Programs netifs,
+   routes, L2 nexthops and the ACL ranges. ★ **This WIPES the ASIC L2 tables, so it MUST
+   come before the warm-up, never after.** In bridge role this is skipped and logged
+   (`"bridge role: skipping gw_prog (no L3 datapath, L2 aging left ENABLED)"`).
+4. **warm** — **router role only.** A few box-originated pings to the configured peers
+   prime the L2/ARP entries. Skipped in bridge role: nothing wipes the tables there
+   (step 3 didn't run), so there's nothing to re-prime — running it anyway would just be
+   ~9s of pinging peers that may not even exist on that network.
 
 The whole sequence is backgrounded behind a `sleep 5` so boot never blocks, but it is
 strictly ordered inside, and it is idempotent — `/etc/init.d/dir842-asic restart` is a
@@ -692,10 +713,25 @@ rather than the fallback constants, or an ASIC-vs-Linux MAC mismatch blackholes 
 datapath (§8).
 
 ★ **`hwnat` is armed by this service as its LAST step** (R4 2026-08-16), strictly after
-the warm-up — measured: enabling it before the tables are warm kills the datapath
-outright (100 % loss, recovers on `echo 0` + `fabric_reset`). Pre-R4 images left it off
-at boot entirely (the reverse path still CPU-trapped back then); the runtime toggle
-remains `echo 0/1 > /sys/module/rtl819x/parameters/hwnat`.
+the warm-up, **and only in router role** — measured: enabling it before the tables are
+warm kills the datapath outright (100 % loss, recovers on `echo 0` + `fabric_reset`).
+Pre-R4 images left it off at boot entirely (the reverse path still CPU-trapped back
+then); the runtime toggle remains `echo 0/1 > /sys/module/rtl819x/parameters/hwnat`. A
+bridge never routes, so a bridge/dumb-AP boot leaves it disarmed permanently.
+
+⚠ **The kernel's own FCS-wedge auto-recovery can silently undo the bridge gating.** The
+wedge detector (`fabric_autoreset`, kernel default 3) calls `rtl865x_gw_rearm()` ->
+`gw_prog()` whenever its recovery level is ≥3, re-freezing L2 aging regardless of role.
+`dir842-asic` drops `fabric_autoreset` to 2 in bridge role specifically to avoid this
+(level 2 keeps wedge auto-recovery but does not call `gw_rearm`); switching role
+bridge→router at runtime (`restart`, no reboot) correctly restores it to 3. See
+`dir842-asic`'s own header comment for the full reasoning.
+
+⚠ **Switching router→bridge at runtime does NOT clear the aging freeze.** Nothing in
+bridge role can unset `TEACR` bit0 once `gw_prog` has set it — a router→bridge role
+change via `uci` + `restart` leaves L2 aging frozen and the router L3 tables still
+programmed, even though the log will say the role is now bridge. **Reboot** after
+switching router→bridge; bridge→router is fine at runtime.
 
 R4 also made this service the **single owner** of the bring-up. It used to be duplicated
 inline in `rc.local` because invoking the service from there "produced no effect" — root
@@ -708,7 +744,123 @@ land with the gateway half-programmed.
 
 ---
 
-## 10. The debugfs SMI window (the key diagnostic lever)
+## 10. The dumb-AP roaming blackhole — two real outages, root-caused and fixed
+
+Added in **v1.1**. This is why role gating (§9) exists at all, told as its own story
+because it caused real damage during development and the fix took two attempts.
+
+### The deployment, and the symptom
+
+This box was deployed as a **dumb AP** — bridge role, no WAN, no DHCP, no routing —
+serving the same SSID as other APs on a home LAN, in an 802.11r roaming domain. Before
+role gating, `dir842-asic` ran the full **router** hardware-acceleration sequence
+unconditionally (§9): `fabric_reset 3`, `gw_prog`, the L2 warm-up, `hwnat`. On a box with
+no WAN and no L3 role to play, this is simply the wrong datapath — and one specific side
+effect of it is actively dangerous on a bridge.
+
+The symptom: a wireless client that had been associated to a **different** AP on the same
+LAN, then roamed onto this box, would associate here successfully — it would even
+complete IPv6 SLAAC — and then go silently dark. No DHCP OFFER/ACK, no ARP replies. The
+wired path stayed perfect the entire time, which is exactly what made this read as a
+WiFi or DHCP fault rather than a switch/ASIC one: SSH into the box and everything looked
+completely healthy.
+
+### Root cause
+
+While the client was still on the *other* AP, its frames reached this box over the wire
+(the LAN backhaul connects every AP), and the external switch hardware-learned that
+client's MAC on the **uplink jack** (`member=0x01`) — ordinary switch behaviour, nothing
+wrong yet. When the client later roamed here, it started living **behind the CPU**
+(associated locally), but the switch's L2 table still had the old row pointing at the
+jack. Downstream unicast for that client kept being sent to the jack — and then dropped
+by the source-port filter (`rtl819x_swnic.c:622-633`: egress mask minus ingress port),
+silently, since the frame's ingress port and the (wrong) egress port were the same one.
+
+In a healthy L2 table this self-heals: normal MAC-table aging eventually expires the
+stale row and traffic resumes (measured ~5 minutes in bridge role — too slow for an
+802.11r roaming domain, but at least bounded). The reason it did **not** self-heal here:
+`gw_prog` sets `TEACR` bit0 (`rtl865x_asichal.c:1088`), which **freezes L2/ARP aging**
+device-wide. That freeze exists to protect the router datapath's static ARP nexthop
+chain from expiring mid-flow — a real requirement in router role. On a bridge, which has
+no L3 nexthops to protect, the same freeze turns a transient wrong row into a
+**permanent** one. Every client that roamed onto this box while it ran the unconditional
+router sequence blackholed itself on arrival, forever, until the box was rebooted.
+
+### What this actually caused
+
+Twice during development, this manifested as the **entire house losing internet**, not
+just one client. Both incidents were investigated at length — kernel/driver source
+review, the stock D-Link firmware binary, wide web research, and finally direct log
+archaeology cross-referencing timestamps across multiple machines on the LAN. Neither
+incident turned out to be a flood or a protocol-level bug: the source-port filter above
+means a hit on a stale row *drops* a frame, it cannot *re-emit* one, so frame
+amplification was never mechanically possible here. Both outages instead traced to
+**disruptive live operations** — a kernel module reload; a live wireless
+reconfiguration — hitting the ASIC while it was armed for the unconditional router
+datapath. The fix below was re-verified live against the actual trigger that caused the
+first outage (see "Verified on hardware" below).
+
+### The fix: role gating + active invalidation
+
+Two parts, both in `dir842-asic` and the new `dir842-l2flush`:
+
+1. **Role gating (§9).** `fabric_reset`, `gw_prog`, the warm-up and `hwnat` all become
+   router-role-only. A bridge/dumb-AP boot never sets `TEACR` bit0 in the first place, so
+   there is no freeze to cause a permanent blackhole — a stale row self-heals via
+   ordinary aging in bridge role, same as any switch.
+2. **`/proc/rtl865x_l2flush` + `dir842-l2flush`**, because even a self-healing ~5-minute
+   window is too slow for 802.11r. The kernel interface invalidates L2 rows by MAC (or
+   `all` learned rows), explicitly refusing to touch **STA/NH** rows so it can never
+   disturb the routed nexthops a router-role box still depends on. The poller runs in
+   **both** roles (router role still needs it — its rows just don't self-heal at all
+   without a reboot) and flushes every currently-associated station's row every ~2s poll
+   cycle. See `dir842-l2flush`'s own header for the full detection mechanism (it
+   resolves both radios by identity, not by interface name, since the 2.4/5 GHz naming
+   has flipped before — §6 of `docs/WIFI-DUAL-BAND.md`).
+
+### ★ The first version of the poller had a real gap — found and fixed same day
+
+The poller's first design flushed a station's row only on what it believed was a **new**
+association (a `seen` set, to avoid redundant writes). That design had a genuine hole:
+`/proc/*/sta_info` and `iwinfo assoclist` do not reliably drop a station's entry the
+instant it leaves, so a client that roams away and back within that lag looks, to a
+poller tracking "already saw this MAC", identical to a client that was here the whole
+time — and the flush the roam-**back** actually needed never fired. Live-reproduced the
+same day, on the real production SSID: a client roamed away and back, and the stale row
+sat unflushed for **4+ minutes**, blackholed, with the poller running the entire time. A
+manual flush confirmed the underlying mechanism and cleared it instantly, but the poller
+itself needed fixing.
+
+The fix: drop the `seen`/new-arrival tracking entirely. `/proc/rtl865x_l2flush` is cheap
+and idempotent — it no-ops when a row isn't actually stale, and it never touches STA/NH
+rows regardless — so there was never a real reason to distinguish "new" from "already
+here". Every currently-associated station gets an invalidate request every poll cycle,
+full stop.
+
+### Verified on hardware
+
+- **The blackhole mechanism itself**: hand-computed the ASIC's `gw_l2_row` hash for a
+  test client's MAC, predicted the exact stale row index, and observed the stale row at
+  that exact index. A single-MAC flush removed only that row; `echo all` removed every
+  learned row while leaving all STA/NH rows provably intact.
+- **The original poller's gap**: reproduced the roam-away-then-back blackhole against the
+  first (seen-tracking) poller design — 4+ minutes dark, poller running, no automatic
+  recovery.
+- **The fixed poller**: the identical roam-away-then-back sequence, against the current
+  (unconditional-flush) poller — self-heals automatically within one poll cycle (~2-4s),
+  confirmed via the kernel's own `"invalidated N row(s)"` log line firing without any
+  manual intervention.
+- **The actual outage trigger, replayed clean**: the specific live operation that caused
+  the first house-wide outage (a wireless reload — `wifi down; wifi up` on both radios)
+  was reproduced against the fixed, role-gated firmware, monitored for 610 seconds with a
+  hardware kill-switch armed as a safety net: **0% packet loss**, no anomaly on any
+  device on the LAN, throughout.
+- **Real production traffic**: this box has since run the actual production SSID, both
+  radios, real 802.11r roams from real clients, without a recurrence.
+
+---
+
+## 11. The debugfs SMI window (the key diagnostic lever)
 
 **Keep this.** There is no `/dev/mem` and no busybox `devmem` on this box, so without it
 every register experiment costs a full rebuild-and-reflash cycle.
@@ -750,7 +902,7 @@ a switch-core register-window dump to close that gap.
 
 ---
 
-## 11. Stale constants and comments to be aware of
+## 12. Stale constants and comments to be aware of
 
 Everything below is *known* stale and left in place; none of it changes behaviour, but all
 of it will mislead a reader who trusts comments over code. Recorded here rather than
@@ -776,4 +928,5 @@ silently fixed, because §2 is the standing evidence that stale comments do real
 | The L3/L4 NAPT offload itself — byte order, `DACLRCR`, `SWTCR1`, the 890/896 Mbit result | `docs/HWNAT-OFFLOAD.md`, `docs/M7-HWNAT-REVERSE-NAPT.md` |
 | The CPU-RX large-frame fabric wedge and its self-heal | `docs/M7-LARGE-FRAME-RX-WEDGE.md` |
 | Stock firmware inventory and parity checklist | `docs/VENDOR-PARITY-INVENTORY.md` |
+| 802.11r / roaming from the WiFi side (this doc covers the switch/ASIC side, §10) | `docs/WIFI-DUAL-BAND.md` §9-10 |
 | Superseded by this file | `docs/M7-TRUNK-FORWARDING-FIX.md` |

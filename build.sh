@@ -17,14 +17,17 @@
 # a Debian 11 (bullseye)-era build host or container; very new toolchains can
 # fail to build the old host tools. Use the Dockerfile in docs/BENCH.md section 7.
 #
-#   ./build.sh                                  # wired + 5 GHz WiFi + HW NAT offload
+#   ./build.sh                                  # wired + both WiFi radios (5 GHz + 2.4 GHz) + HW NAT offload + 802.11r
 #   PROFILE=~/dir842-profile ./build.sh         # ...plus a private pre-configured profile
 #
-# ⚠ 2.4 GHz is NOT built — this repo currently publishes no build path for that
-#   radio. The on-SoC WMAC needs the vendor rtl8192cd driver (not redistributable
-#   here) plus our port of it; the port is recorded in g3-rtl8192cd-4.14-port.patch
-#   but is deliberately not wired into this script. See README "Building" and
-#   docs/WIFI-DUAL-BAND.md §9 item 5 for why, and for what wiring it up would need.
+# Both radios build. The on-SoC 2.4 GHz WMAC needs the vendor rtl8192cd driver;
+# it ships in files/ (see the "2.4 GHz radio" step below and the licensing
+# rationale in README "Building"), so the overlay places it and the kernel
+# builds it like any other in-tree driver — no separate flag or opt-in. This
+# used to require a since-withdrawn VENDOR_SDK= flag that never actually
+# worked; see docs/WIFI-DUAL-BAND.md §9 item 5 for that history. g3-/g4-*.patch
+# in the repo root are the historical record of the port, not a build input —
+# the shipped tree already contains everything they describe.
 set -e
 cd "$(dirname "$0")"
 SELF_DIR="$(pwd)"

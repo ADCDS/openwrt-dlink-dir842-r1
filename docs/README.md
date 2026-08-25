@@ -31,9 +31,14 @@ On top of that: fw3 + NAT + PPPoE, the software flowtable, and **hardware NAT of
 891 Mbit up / 896 Mbit down with 0.0 % of payload bytes crossing the CPU** (stock D-Link on
 the same bench: 913/923). Both radios run concurrently and bridge into `br-lan` — 5 GHz
 **RTL8822BE via rtw88**, 2.4 GHz the **on-SoC WMAC via the vendor `rtl8192cd` driver**,
-which ships in `files/` (licensing rationale: root README, *Building*). All of the
-above is measured on an isolated bench; treat the port as **pre-production** and keep a
-flash backup.
+which ships in `files/` (licensing rationale: root README, *Building*). **v1.1** adds
+**802.11r (Fast Transition) on both radios**, and closes a real roaming bug: run as a
+bridge/dumb-AP on a home LAN, the ASIC bring-up sequence now auto-detects router vs.
+bridge role and skips the router-only steps that were freezing L2 aging and silently
+blackholing roamed-in wireless clients — the fix that closed two real house-wide
+outages during development (`docs/SWITCH-AND-DATAPATH.md` §10). Bench numbers above are
+still bench-only, but this port has since run as a real home dumb-AP under live client
+traffic and roaming; treat it as **pre-production** regardless and keep a flash backup.
 
 ## Reading order for the three kinds of reader
 
@@ -67,9 +72,9 @@ flash backup.
 | file | covers |
 |---|---|
 | [`HWNAT-OFFLOAD.md`](HWNAT-OFFLOAD.md) | The solved account of ASIC L3/L4 offload, and the numeric-byte-order root cause. |
-| [`SWITCH-AND-DATAPATH.md`](SWITCH-AND-DATAPATH.md) | The RTL8367S + SoC switch model, CPU-tag / port0-router mode, the RGMII trunk fix, VLANs, MACs, and the `CPUICR1` boot-medium endianness bug. |
+| [`SWITCH-AND-DATAPATH.md`](SWITCH-AND-DATAPATH.md) | The RTL8367S + SoC switch model, CPU-tag / port0-router mode, the RGMII trunk fix, VLANs, MACs, the `CPUICR1` boot-medium endianness bug, and (§10, v1.1) the dumb-AP roaming blackhole — two real house-wide outages, root-caused and fixed. |
 | [`BENCH.md`](BENCH.md) | The physical bench, serial console, power control, build container, and the unattended RAM-boot / NOR-flash automation. |
-| [`WIFI-DUAL-BAND.md`](WIFI-DUAL-BAND.md) | The RTL8197F + PCIe wall, the blank efuse, the 25 MHz crystal, the vendor 2.4 GHz driver, and the two radios' interface-naming collision. |
+| [`WIFI-DUAL-BAND.md`](WIFI-DUAL-BAND.md) | The RTL8197F + PCIe wall, the blank efuse, the 25 MHz crystal, the vendor 2.4 GHz driver, the two radios' interface-naming collision, and (v1.1) 802.11r on both radios plus the cold-boot wireless-datapath fix. |
 | [`RETRACTIONS-AND-METHOD.md`](RETRACTIONS-AND-METHOD.md) | Every falsified hypothesis and retracted claim, plus the measurement rules and bench confounds they produced. |
 | [`OTA-INSTALL.md`](OTA-INSTALL.md) | Install OpenWrt over the air with **no serial cable** — upload the factory image through the stock D-Link web UI — and revert just as easily. Verified end-to-end on hardware. Product-facing. |
 | [`RESTORE-STOCK.md`](RESTORE-STOCK.md) | How to return to pristine D-Link firmware and back to OpenWrt at will — the flash partition map, why it's reversible, and both restore routes (verified on hardware). Product-facing. |
@@ -136,15 +141,16 @@ claim around them.
 
 ## What is deliberately not here
 
-- **The Realtek vendor SDK.** Not redistributable: its sources carry a Realtek copyright and
-  *"All rights reserved."* with no licence grant (e.g.
+- **The Realtek vendor SDK proper.** Not redistributable: its sources carry a Realtek
+  copyright and *"All rights reserved."* with no licence grant (e.g.
   `include/net/rtl/rtl865x_netif.h`: `Copyright c Realtek Semiconductor Corporation, 2008` /
-  `All rights reserved.`).
-- **The ~37 `include/net/rtl/*` headers and the ~120-file `rtl8192cd` driver.** No import
-  path for them is published either — the earlier `VENDOR_SDK=` build flag was verified
-  broken and withdrawn 2026-08-02 ([`WIFI-DUAL-BAND.md`](WIFI-DUAL-BAND.md) §9 item 5) —
-  so the 2.4 GHz radio does not build from this repo. What ships is our own work against
-  them, as the two port patches in the repo root.
+  `All rights reserved.`). What ships in `files/` — the ~37 `include/net/rtl/*` headers and
+  the ~120-file `rtl8192cd` driver — is our own reverse-engineered work against that SDK,
+  not the SDK itself. An earlier `VENDOR_SDK=` build flag that tried to pull the real SDK
+  in directly was verified broken and withdrawn 2026-08-02
+  ([`WIFI-DUAL-BAND.md`](WIFI-DUAL-BAND.md) §9 item 5). As of **v1.1** the 2.4 GHz radio
+  (including 802.11r) **does** build from this repo — `build.sh` overlays `files/` and the
+  kernel builds it like any other in-tree driver, no separate flag needed.
 - **The 8 MB stock NOR backup.** It is the only remaining copy of stock for a flashed unit;
   take your own before you flash.
 - **The raw serial boot log.**

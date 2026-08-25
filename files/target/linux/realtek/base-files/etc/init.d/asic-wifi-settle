@@ -46,10 +46,12 @@ start() {
 	# Backgrounded: boot must never block on this.
 	(
 		i=0
+		settled=0
 		while [ $i -lt 120 ]; do
 			if [ -d /sys/class/net/br-lan/brif/wlan0 ] &&
 			   [ -d /sys/class/net/br-lan/brif/wlan1 ] &&
 			   [ "$(cat /sys/class/net/wlan1/operstate 2>/dev/null)" = "up" ]; then
+				settled=1
 				break
 			fi
 			i=$((i+1))
@@ -58,7 +60,16 @@ start() {
 		# Let hostapd finish its own bridge add/remove churn before reprogramming.
 		sleep 20
 		/etc/init.d/dir842-asic restart
-		logger -t asic-wifi-settle "ASIC re-programmed after wireless settled (waited ${i}s + 20s)"
+		if [ "$settled" = 1 ]; then
+			logger -t asic-wifi-settle "ASIC re-programmed after wireless settled (waited ${i}s + 20s)"
+		else
+			# Only both radios up AND bridged counts as "settled" above, so a box
+			# running with one radio disabled (or one that just never comes up)
+			# always lands here: it waits the full 120s, then re-programs anyway
+			# on the assumption that whatever IS up has probably settled by now.
+			# Untested — nobody has run this port with a radio deliberately off.
+			logger -t asic-wifi-settle "gave up waiting for both radios after ${i}s, re-programmed anyway (20s more)"
+		fi
 	) &
 }
 

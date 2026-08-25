@@ -537,7 +537,7 @@ Notes that save time:
 
 ---
 
-## 10. 802.11r (fast transition) on both radios
+## 9. 802.11r (fast transition) on both radios
 
 Added in **v1.1**. The 5 GHz side is unremarkable — hostapd, `ieee80211r`, done. The
 2.4 GHz side is the story: **the vendor driver has always implemented 802.11r, and this
@@ -554,7 +554,7 @@ port had simply never compiled it.**
 #endif
 ```
 
-The driver `Makefile` enabled **14** other `CONFIG_RTL_*` features and not that one, so
+The driver `Makefile` enabled **12** other `CONFIG_RTL_*` features and not that one, so
 `CONFIG_IEEE80211R` never got defined. What that looked like on a running box: the
 module contained no FT symbols at all, so the MIB keys did not exist and the `.dat`
 lines were rejected outright —
@@ -570,7 +570,7 @@ why clients never attempted fast transition on 2.4 GHz.
 ### ★ It is TWO changes, not one — the ccflag alone does not link
 
 ```make
-CONFIG_RTL_11R_SUPPORT=y                  # make var: adds sha256.o (Makefile:653)
+CONFIG_RTL_11R_SUPPORT=y                  # make var: adds sha256.o (Makefile:661-662)
 ccflags-y += -DCONFIG_RTL_11R_SUPPORT     # ccflag:   compiles the FT code
 ```
 
@@ -661,7 +661,55 @@ interop works.
 
 ---
 
-## 9. Open items
+## 10. Cold-boot wireless datapath dead: `asic-wifi-settle`
+
+Added in **v1.1**, alongside 802.11r. A different bug, found while testing it.
+
+### The symptom
+
+On a cold boot in **router role**, the S97 `dir842-asic` bring-up pass runs *after* the
+wlan netifs are already up and bridged (boot log: `wlan1 AP-ENABLED 15:43:18` ->
+`"ASIC up" 15:43:26`), and it still leaves the **wireless** datapath dead: the 2.4 GHz
+BSS beacons at full signal, `wlan0` sits in `br-lan` "forwarding", and clients cannot
+associate or get DHCP at all. Running `/etc/init.d/dir842-asic restart` by hand a few
+minutes later fixes it every time — association, DHCP and forwarding all come good
+instantly.
+
+The wired path is never affected, which is exactly what makes this dangerous: the box
+looks perfectly healthy from SSH while every wireless client is silently locked out.
+Root cause: `gw_prog` wipes the ASIC L2 tables, and the boot pass evidently programs
+them before the wireless side has genuinely finished settling.
+
+### The fix, and its cost
+
+`asic-wifi-settle` waits (up to 120s) for both radios to be up and bridged, sleeps a
+further 20s to let hostapd finish its own churn, then re-runs `dir842-asic restart` —
+a sequence that's already idempotent by design. **Cost: WiFi clients cannot pass
+traffic for roughly the first minute after a cold boot in router role.**
+
+### ★ Router role only
+
+This shim exists specifically because `gw_prog` (router-role-only since the role-aware
+ASIC bring-up fix landed in the same v1.1 — the full story, including the two real
+house-wide outages it fixes, is `docs/SWITCH-AND-DATAPATH.md` §10) wipes the L2
+tables the wireless side needs. In **bridge/dumb-AP role, nothing wipes those tables in
+the first place, so this service returns immediately and does nothing** — measured: a
+cold boot in bridge role with the service disabled still associated and passed traffic
+at 0% loss, `settle_ran=0`. If you're running this box as a dumb AP, the ~1 minute
+cold-boot cost above does not apply to you.
+
+### Known limits
+
+- **Only measured against a dual-radio, both-bridged router-role configuration.** A box
+  running router role with only one radio enabled (or one that never comes up) will wait
+  the full 120s before giving up and re-programming anyway — untested, since nobody has
+  run this port with a radio deliberately disabled. The log line distinguishes the two
+  outcomes (`"wireless settled"` vs. `"gave up waiting... re-programmed anyway"`), so a
+  140s-total wait with the latter message is the signal that this path was hit.
+
+---
+
+## 11. Open items
 
 1. **5 GHz TX power is uncalibrated** (blank efuse). Believed still true; **not
    re-verified** recently.

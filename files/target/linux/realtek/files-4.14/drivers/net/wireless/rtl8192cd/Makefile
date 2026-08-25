@@ -265,7 +265,7 @@ CONFIG_WLAN_HAL_88XX=y
 CONFIG_RTL_819X_SWCORE=y
 CONFIG_RTL_NO_BR_SHORTCUT=y
 # 802.11r needs this as a MAKE VARIABLE as well as a -D (see the ccflags block
-# below). This is the half that adds sha256.o to rtl8192cd-objs (Makefile:653),
+# below). This is the half that adds sha256.o to rtl8192cd-objs (Makefile:661-662),
 # and FT's whole key hierarchy is sha256: PMK-R0/R1 come out of sha256_prf() and
 # the *_Name values out of sha256_vector(). With only the -D, the FT code
 # compiles and then fails to link. Verified the shipped module has zero sha256
@@ -281,7 +281,7 @@ ccflags-y += -DCONFIG_RTL_COMAPI_WLTOOLS
 # LOCALLY from the PSK in 8192cd_psk.c:5386 — the equivalent of hostapd's
 # ft_psk_generate_local, so NO userspace FT daemon is required). It was simply
 # never compiled: 8192cd_cfg.h:3090 gates `#define CONFIG_IEEE80211R` behind
-# CONFIG_RTL_11R_SUPPORT, and this Makefile enabled 14 other CONFIG_RTL_*
+# CONFIG_RTL_11R_SUPPORT, and this Makefile enabled 12 other CONFIG_RTL_*
 # features but not that one.
 #
 # MEASURED without it, on the live box: the module contains no FT strings at

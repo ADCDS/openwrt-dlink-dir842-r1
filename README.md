@@ -103,6 +103,19 @@ CPU ~99.7 % idle. As far as we know this is the first working mainline OpenWrt
   bridge "forwarding", and **no client can associate or DHCP**, while the wired path
   looks perfectly healthy from SSH. The shim re-runs the (idempotent) bring-up once the
   radios are up. Cost: WiFi does not pass traffic for roughly the first minute after boot.
+- **Role-aware ASIC bring-up, and a dumb-AP/bridge deployment that actually works** (new
+  in v1.1). Router vs. bridge role now auto-detects (`network.wan` present or not;
+  overridable via `uci set dir842.asic.role=...`), and the router-only hardware
+  acceleration steps — `fabric_reset`, `gw_prog`, `hwnat` — are skipped entirely on a
+  bridge. This closes a real bug: on the unconditional pre-v1.1 sequence, `gw_prog`
+  freezes L2/ARP aging, which on a bridge silently and *permanently* blackholed any
+  wireless client that roamed in from another AP on the same LAN — no DHCP, no ARP, wired
+  path unaffected. That mechanism caused two real house-wide outages while this port ran
+  as a home dumb-AP during development. Root-caused, fixed (role gating + a new
+  `/proc/rtl865x_l2flush` interface + poller that actively invalidates a roaming
+  station's stale row), and re-verified live against the actual trigger that caused the
+  first outage: 0% packet loss over a 610-second monitored trial with a hardware
+  kill-switch armed. Full story: [`docs/SWITCH-AND-DATAPATH.md`](docs/SWITCH-AND-DATAPATH.md) §10.
 
 **Known limitations**
 
