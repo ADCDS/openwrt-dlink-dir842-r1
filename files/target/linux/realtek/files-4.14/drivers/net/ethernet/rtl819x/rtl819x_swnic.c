@@ -113,6 +113,8 @@ struct ring_info {
 	dma_addr_t	dma;	/* streaming-DMA handle for skb->data */
 };
 
+static bool rx_cluster_shinfo_sane(struct sk_buff *skb, uint32 j);
+
 /*
  * A coherent allocation: the driver-visible (uncached) virtual base, the
  * physical/bus base the ASIC uses, the original cookie for dma_free_coherent
@@ -295,10 +297,14 @@ int32 New_swNic_init(uint32 userNeedRxPkthdrRingCnt[NEW_NIC_MAX_RX_DESC_RING],
 
 		/* free any stale cluster from a prior init without free */
 		if (rx_ri[j].skb) {
+			struct sk_buff *stale =
+				(struct sk_buff *)(uintptr_t)rx_ri[j].skb;
+
 			if (rx_ri[j].dma)
 				dma_unmap_single(swnic_dmadev, rx_ri[j].dma,
 						 size_of_cluster, DMA_FROM_DEVICE);
-			dev_kfree_skb_any((struct sk_buff *)(uintptr_t)rx_ri[j].skb);
+			rx_cluster_shinfo_sane(stale, j);
+			dev_kfree_skb_any(stale);
 			rx_ri[j].skb = 0;
 			rx_ri[j].dma = 0;
 		}
@@ -709,6 +715,37 @@ int32 New_swNic_txDone(int idx)
 	return 0;
 }
 
+/*
+ * A cluster still sitting in the Rx ring was never handed to the stack, so
+ * its skb_shared_info MUST still be the pristine one __build_skb() wrote:
+ * nr_frags == 0, frag_list == NULL. Forensics on a ramoops-only boot crash
+ * (four captured occurrences, decoded byte-for-byte against this exact
+ * build's own vmlinux) showed it can instead hold ASCII kernel-log text —
+ * e.g. "P: f" from the "rtl819x DP: first RX frame" pr_err_once() above,
+ * "nic " from the "swnic rx#%d ..." trace line — meaning something copies
+ * log text over the tail of a live cluster's page-frag. Freeing such an skb
+ * walks frags[] and put_page()s a text word as a struct page, crashing deep
+ * in skb_release_data() on what looks like unrelated heap corruption. Until
+ * the actual writer is found, refuse to free a clobbered shinfo as if it
+ * were real — clear it and log the region so the writer can be identified
+ * from the surrounding boot log next time this fires.
+ */
+static bool rx_cluster_shinfo_sane(struct sk_buff *skb, uint32 j)
+{
+	struct skb_shared_info *si = skb_shinfo(skb);
+
+	if (likely(!si->nr_frags && !si->frag_list))
+		return true;
+
+	pr_err("swnic: rx_ri[%u] cluster shinfo clobbered: skb=%p head=%p end=%p nr_frags=%u frag_list=%p\n",
+	       j, skb, skb->head, skb_end_pointer(skb), si->nr_frags, si->frag_list);
+	print_hex_dump(KERN_ERR, "swnic clobber: ", DUMP_PREFIX_OFFSET,
+		       16, 1, si, 128, true);
+	si->nr_frags = 0;
+	si->frag_list = NULL;
+	return false;
+}
+
 /* Free the Rx cluster sk_buffs (leave the coherent pools/rings intact). */
 void New_swNic_freeRxBuf(void)
 {
@@ -725,6 +762,7 @@ void New_swNic_freeRxBuf(void)
 					dma_unmap_single(swnic_dmadev, rx_ri[j].dma,
 							 size_of_cluster,
 							 DMA_FROM_DEVICE);
+				rx_cluster_shinfo_sane(skb, j);
 				dev_kfree_skb_any(skb);
 				rx_ri[j].skb = 0;
 				rx_ri[j].dma = 0;

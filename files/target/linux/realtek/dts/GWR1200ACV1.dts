@@ -15,6 +15,30 @@
 		reg = <0x0 0x4000000>;
 	};
 
+	/* R6: persistent crash log. Backed by pstore/ramoops so an oops/panic
+	 * survives the reboot that panic_on_oops+panic=3 already trigger, and
+	 * is readable afterwards from /sys/fs/pstore/. The last 128K of the
+	 * 64MB DRAM are carved out here; the kernel excludes this range from
+	 * the normal allocator, it is not "lost" RAM in any other sense.
+	 * console-size >> record-size deliberately: pstore's own oops/panic
+	 * dump path takes a semaphore that is not safe to block on from
+	 * interrupt context (see the pstore_cannot_wait() fix in this repo's
+	 * kernel patches) — the console mirror, written through printk's
+	 * always-irq-safe console callback, is what actually survives a crash
+	 * that lands mid-interrupt, so it gets the larger share. */
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		ramoops@3fe0000 {
+			compatible = "ramoops";
+			reg = <0x3fe0000 0x20000>;
+			record-size = <0x8000>;
+			console-size = <0x18000>;
+		};
+	};
+
 	chosen {
 		/* R3: hwnat is deliberately NOT enabled here. Measured on hardware: setting
 		 * rtl819x.hwnat=1 on the cmdline turns hardware NAT on before the ASIC's L2/L3

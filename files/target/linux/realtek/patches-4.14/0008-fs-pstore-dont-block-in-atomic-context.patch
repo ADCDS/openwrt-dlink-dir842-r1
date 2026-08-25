@@ -1,0 +1,23 @@
+--- a/fs/pstore/platform.c
++++ b/fs/pstore/platform.c
+@@ -140,6 +140,20 @@
+ 	if (in_nmi())
+ 		return true;
+
++	/*
++	 * A dump reaching here with reason == KMSG_DUMP_OOPS can still be
++	 * running in interrupt or otherwise atomic context: die() only
++	 * escalates to panic() for the fault that is actually unwinding, so
++	 * a second, re-entrant dump racing the first one's held buf_lock
++	 * keeps the OOPS reason even though we are not in a safe context to
++	 * block. down_interruptible() below calls schedule(), which is
++	 * fatal on its own ("bad: scheduling from the idle thread!") when
++	 * called from there, turning what would have been a clean
++	 * panic_on_oops reboot into a permanent hang.
++	 */
++	if (in_interrupt() || in_atomic())
++		return true;
++
+ 	switch (reason) {
+ 	/* In panic case, other cpus are stopped by smp_send_stop(). */
+ 	case KMSG_DUMP_PANIC:
