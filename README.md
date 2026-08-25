@@ -116,6 +116,19 @@ CPU ~99.7 % idle. As far as we know this is the first working mainline OpenWrt
   station's stale row), and re-verified live against the actual trigger that caused the
   first outage: 0% packet loss over a 610-second monitored trial with a hardware
   kill-switch armed. Full story: [`docs/SWITCH-AND-DATAPATH.md`](docs/SWITCH-AND-DATAPATH.md) §10.
+- **Persistent crash log** — pstore/ramoops (new in v1.1). An oops/panic now survives
+  the reboot `panic_on_oops`+`panic=3` already trigger, readable afterwards from
+  `/sys/fs/pstore/`. Getting it there safely meant fixing two bugs it exposed on real
+  hardware: `pstore_dump()` could call a blocking primitive from interrupt context,
+  turning a clean panic-reboot into a permanent hang (fixed); and, separately, a
+  boot-timing shift from ramoops made a pre-existing bug in the wired RX path 100%
+  reproducible on every fresh-flash boot — a still-hardware-owned RX cluster's
+  `skb_shared_info` was found clobbered with stray kernel console text at free time.
+  The driver now detects and safely clears a clobbered `skb_shared_info` instead of
+  freeing it as real, logging the region so the actual writer can eventually be
+  identified — a verified-safe mitigation, not yet a root-cause fix. Verified on
+  hardware: 100% reproducible crash-loop before the fix, clean boot to a working
+  shell after it, with the guard firing exactly once on the known clobbered cluster.
 
 **Known limitations**
 
