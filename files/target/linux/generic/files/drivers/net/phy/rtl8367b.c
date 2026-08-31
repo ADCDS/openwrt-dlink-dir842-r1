@@ -97,6 +97,14 @@
 
 #define RTL8367B_PORT_ISOLATION_REG(_p)		(0x08a2 + (_p)) /*GOOD*/
 
+/*
+ * Per-port LED force-mode. Three LED groups, one register each, 2 bits per
+ * port: 0 = hardware indication (link/activity), 1 = force blink,
+ * 2 = force off, 3 = force on. All four values verified on DIR-842 hardware.
+ */
+#define RTL8367B_LED_FORCE_MODE_REG(_g)		(0x1b08 + ((_g) << 1))
+#define RTL8367B_NUM_LED_GROUPS			3
+
 #define RTL8367B_MIB_COUNTER_REG(_x)		(0x1000 + (_x))	/*GOOD*/
 #define RTL8367B_MIB_COUNTER_PORT_OFFSET	0x007c /*GOOD*/
 
@@ -1326,6 +1334,31 @@ static int rtl8367b_setup(struct rtl8366_smi *smi)
 	 */
 	for (i = 0; i < RTL8367B_NUM_PORTS; i++)
 		REG_WR(smi, RTL8367B_PORT_ISOLATION_REG(i), RTL8367B_PORTS_ALL);
+
+	/*
+	 * Hand the panel LEDs back to the switch's own link/activity indication.
+	 *
+	 * ★ The bootloader leaves group 0 at 0x0afe -- 2 bits per port, so ports
+	 * 1/2/3 = mode 3 (force ON) and ports 0/4 = mode 2 (force OFF). On a
+	 * DIR-842 that is three LAN LEDs lit regardless of link with Internet and
+	 * LAN4 dead, which is exactly the "the LEDs are wrong" symptom; nothing in
+	 * this driver ever touched these registers, so whatever the loader left
+	 * simply stayed. Stock papers over it by force-driving every LED from
+	 * software -- its eth_leds_ctrl() writes these same 2-bit fields, mode 3
+	 * for a lit port and mode 2 for a dark one, on every link change.
+	 *
+	 * Mode 0 is hardware indication, verified on hardware: with these cleared,
+	 * a cabled jack blinks with traffic and dark jacks stay dark, with no
+	 * software in the path at all. That is both the smaller change and the
+	 * better behaviour, so clear the force fields instead of replicating
+	 * stock's polling. A board that genuinely wants a forced LED can set its
+	 * own field afterwards.
+	 *
+	 * (DIR-842 jack mapping is reversed: LAN1=port3 .. LAN4=port0,
+	 * Internet=port4. See docs/LEDS.md.)
+	 */
+	for (i = 0; i < RTL8367B_NUM_LED_GROUPS; i++)
+		REG_WR(smi, RTL8367B_LED_FORCE_MODE_REG(i), 0);
 
 	return 0;
 }
