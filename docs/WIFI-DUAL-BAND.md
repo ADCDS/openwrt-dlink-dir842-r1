@@ -826,3 +826,86 @@ only quantified the cost.
 `rtw88_8822be`. After a few cycles the interface loses the profile MAC (blank efuse ->
 random MAC per probe), `txpower` drifts 17 -> 20 dBm, and the AP stops being scannable —
 the readings become meaningless. Reboot between measurements instead.
+
+### Deeper pass with `RTW88_DEBUGFS` — what the chip is actually doing
+
+Enabling `CPTCFG_RTW88_DEBUG`/`RTW88_DEBUGFS` (in `openwrt/package/kernel/mac80211/realtek.mk`;
+diagnostic only, **not shipped**) exposes `tx_pwr_tbl`, `rf_read`/`rf_write`,
+`read_reg`/`write_reg` and `phy_info` under
+`/sys/kernel/debug/ieee80211/phy1/rtw88/`. Four things came out of it, and together they
+rule out everything rtw88 controls.
+
+**1. The driver already asks for maximum power.** `tx_pwr_tbl` shows every rate on every
+path at `pwr = 63 (0x3f)` — `max_power_index`. A blank efuse leaves the base at 254, which
+clamps *high*, not low:
+
+```
+path rate       pwr       base      (byr  lmt ) rem
+   A  OFDM_6M    63(0x3f)  254   -2 (  14   -2)    0
+   A  MCS9       63(0x3f)  253  -10 (  12  -10)    0
+```
+
+★ So this is **not** a power-table or calibration-index problem. The chip is told to
+transmit at full gain and still radiates ~13-15 dB low. The loss is downstream of the
+power computation.
+
+**2. The RF front-end IS correctly configured.** Despite the `write RF mode table fail`
+WARN (which early-returns past `set_channel_rfe`), the eFEM registers read back exactly
+what rtw88 intends for 5 GHz:
+
+| reg | live | rtw88's 5G eFEM target |
+|---|---|---|
+| `0xcb0` RFESEL0 | `0x77`**`177517`** | `0x177517` ✓ |
+| `0xcb4` RFESEL8 | `0x0000`**`75`**`77` | byte1 `0x75` ✓ |
+| `0xcb8` RFECTL | `0x00000000` | BIT(5) clear ✓ |
+| `0xca0` TRSW | `0x0000a501` | `0xa501` = 2TX/2RX ✓ |
+
+★ "The external PA is stuck in bypass because the WARN skipped its setup" is therefore
+**refuted**.
+
+**3. Both RF paths are alive and identically tuned.** `rf_read` on paths 0/1: `rf[0x18]`
+(channel) identical, `rf[0x55]`/`rf[0x56]`/`rf[0x8f]` identical. No dead chain.
+
+**4. ★ rtw88 implements only a fraction of this chip's front-end variants.** The stock
+kernel carries Realtek's full ODM driver, with `phy_reg_pg` and `txpwr_lmt` tables for RFE
+types **2, 3, 4, 5, 12, 15, 16, 17, 18**, and describes them:
+
+```
+RFE type 2: APA1+ALNA1+GPA1+GLNA1      RFE type 4: APA1+ALNA3+GPA1+GLNA1
+RFE type 3: APA2+ALNA2+GPA2+GLNA2      RFE type 5: APA2+ALNA4+GPA2+GLNA2
+RFE type 0: ALNA5+GLNA3   (LNA only, no PA)
+```
+
+rtw88 has only `bb_pg` types 2/3/5 and `txpwr_lmt` types 0/2/5. With the efuse blank the
+type cannot be read, and our fallback guesses 2. **If this board is any of 4/12/15/16/17/18,
+rtw88 cannot represent it and no available option is correct.** That is the leading
+remaining explanation and it is a driver-coverage limitation, not a misconfiguration.
+
+### ★ A measurement warning that invalidates part of the earlier sweep
+
+Client RSSI of our AP swung between **-64 and -87 dBm across this session for nominally
+identical configurations** — the phone moves, and Android's scan cache ages. The
+`rfe_option` 2/3/5 comparison recorded above (-74 / -84 / -81) was **single-sample inside
+that noise band and must not be treated as a ranking.** Re-run it, if at all, with the
+position-independent metric: measure our AP and a fixed reference AP **in the same scan**
+and compare the delta, averaged over several scans (`tools/bench/` idea, not yet landed —
+the phone was disconnected before a baseline could be taken).
+
+Also: `write_reg` cannot be used to explore RFESEL values. `rtw_write32s_mask()` is a
+special multi-page BB write that the driver re-applies, so a poke to `0xcb0` reads back
+unchanged.
+
+### Where this leaves the 5 GHz signal
+
+Everything rtw88 controls is set correctly: full power index, correct eFEM registers, both
+paths live, right channel and bandwidth. The deficit is real (~13-15 dB vs our own 2.4 GHz
+radio, measured same-client same-instant) and is **not fixed**. Two candidate paths remain,
+neither a config change:
+
+1. **Determine the board's true RFE type and port the missing tables** from the stock ODM
+   driver (`odm_read_and_config_mp_8822b_phy_reg_pg_type*` / `txpwr_lmt_type*`). Stock
+   reads the same blank efuse, so how *it* decides the type is the thing to find.
+2. **Rule out the antenna path physically.** Both directions are weak (the AP hears the
+   client poorly too), which is more consistent with a feedline/connector problem than with
+   a PA-only fault — a PA fault would degrade TX alone. This is a hardware check, not a
+   software one.
