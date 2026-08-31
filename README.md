@@ -139,6 +139,34 @@ CPU ~99.7 % idle. As far as we know this is the first working mainline OpenWrt
   (retained but inert, since `fs/pstore` is no longer compiled) and the driver's
   `skb_shared_info` guard, whose writer was never confirmed.
 
+- **A roaming client no longer panics the box** — ★ new in v1.3. `rtw_pci_tx_write_data()`
+  pushed the 48-byte hardware TX descriptor unconditionally, so an skb arriving with less
+  headroom overran its own head: `skb_under_panic ... put:48 ... dev:wlan1`, a hard kernel
+  panic and reboot, triggered simply by a phone roaming onto the AP. Root-caused to one
+  line and fixed with an `skb_cow_head()`; verified on hardware with the same roam that
+  crashed it 4× before. rtw88 declares `extra_tx_headroom` correctly and its own internal
+  skbs reserve properly — the frames arrive via the iTXQ path
+  (`ieee80211_tx_dequeue()`), which performs no headroom check at all.
+
+- **Panel LEDs work** — ★ new in v1.3. The bootloader leaves the RTL8367S per-port LED
+  force-mode set (`0x1b08 = 0x0afe`: LAN1–3 forced ON regardless of link, Internet and LAN4
+  forced OFF) and the switch driver never touched those registers, so whatever the loader
+  left simply persisted. `rtl8367b_setup()` now clears the force fields, handing the panel
+  back to the switch's own link/activity indication — no polling, no software in the
+  datapath. Full decode, including why there is exactly ONE GPIO LED on this board:
+  [`docs/LEDS.md`](docs/LEDS.md).
+
+- **A bridged AP can now recover from the RX-stall wedge** — ★ new in v1.3. A UDP flood at
+  the box (~200 Mbit/s; TCP cannot trigger it at any rate) latches the CPU RX path:
+  `rx_packets` frozen, `USEDDSC` pinned at 435–470, napi still polling, box unreachable
+  until a power cycle. The existing detector declares on large-frame FCS *failures*, so
+  with zero frames delivered it can never fire. A second detector now declares on
+  pool-full + zero delivery, and `fabric_gw_rearm` lets bridge role use the level-3 reset
+  that actually clears it without the `gw_rearm` half that re-freezes L2 aging.
+  ★ Partial: a softer degraded mode (16–20% loss at 1.1–2.7 s RTT) is **not** fixed and the
+  detector does not see it, and prevention is untouched — the box remains DoS-able by
+  ~200 Mbit/s of UDP. [`docs/RX-STALL-WEDGE.md`](docs/RX-STALL-WEDGE.md).
+
 **Known limitations**
 
 - **Pre-production.** Everything above is measured on an isolated bench (one host on a
@@ -154,6 +182,15 @@ CPU ~99.7 % idle. As far as we know this is the first working mainline OpenWrt
   ASIC's masquerade IP is reprogrammed from the live WAN IP per flow.
 - **Blank WiFi efuse** — this board keeps no RTL8822BE calibration on-chip, so TX power
   is uncalibrated (works, but not "loud"); handled in software (default RFE + pinned MAC).
+  ★ **Now quantified (v1.3):** measuring both of our own radios with one client at the same
+  instant gives 2.4 GHz **−60 dBm** vs 5 GHz **−81 dBm**. 5 GHz costs ~6–8 dB of extra path
+  loss, so **~13–15 dB is unexplained** and specific to the 8822BE path — the 2.4 GHz radio
+  is the control proving board, placement and antennas are fine. That caps a *same-room*
+  client at `VHT-MCS 7 / NSS 1` and ~130 Mbit/s of TCP, which is normal efficiency for that
+  PHY rate: the signal is the limit, not the throughput or any offload setting. Crystal cap,
+  RF front-end type, channel/regulatory band, and CPU were each tested and **refuted** —
+  see [`docs/WIFI-DUAL-BAND.md`](docs/WIFI-DUAL-BAND.md). Not fixable in software without
+  recovering real calibration data from the stock kernel.
 - **Download throughput is variable** (**681–906 Mbit** across runs) with 1200–2500 TCP retransmits per
   10 s run. The router is not the bottleneck (CPU 0.3 %, zero interface errors), but the
   loss source is not yet identified. Take a range, not a single run.
@@ -175,9 +212,13 @@ CPU ~99.7 % idle. As far as we know this is the first working mainline OpenWrt
   also fixed.)
 - `rtl819x: recovery level 3` fires ~2× per boot. Pre-existing, benign, unexplained.
 
-> ★ **Running v1.1? Upgrade.** v1.1 wedges CPU-originated TX on a cold power-on: the box
-> boots, serves WiFi and receives fine, but silently drops everything it originates on the
-> wire, so it is unreachable over wired LAN. v1.2 fixes it.
+> ★ **Running v1.1 or v1.2? Upgrade.**
+> **v1.1** wedges CPU-originated TX on a cold power-on: the box boots, serves WiFi and
+> receives fine, but silently drops everything it originates on the wire, so it is
+> unreachable over wired LAN. v1.2 fixed that.
+> **v1.2** panics and reboots when a client roams onto the 5 GHz AP (`skb_under_panic` on
+> `wlan1`), gets its panel LEDs wrong, and — in bridge role — can never auto-recover from
+> the RX-stall wedge. v1.3 fixes all three.
 
 ## Building
 

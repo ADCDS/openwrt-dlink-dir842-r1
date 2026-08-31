@@ -1,15 +1,17 @@
 # Prebuilt images
 
-Built 2026-08-31 from the **v1.2** tree by the exact clean-room path the README
+Built 2026-08-31 from the **v1.3** tree by the exact clean-room path the README
 documents: fresh clone → `./build.sh` inside the Debian 11 (bullseye) container
 from `docs/BENCH.md` §7. Nothing outside this repository went into them — **dual-band**
 (2.4 GHz `DIR842-2G` via the vendor `rtl8192cd` driver + 5 GHz `DIR842-OpenWrt` via
 rtw88, ⚠ both open by default) + wired + hardware-NAT + 802.11r images.
 
-★ **v1.2 removes the persistent crash log** that v1.1 advertised. An attached
-pstore/ramoops wedges CPU-originated TX on this board: the box boots, serves WiFi and
-receives normally while silently dropping everything it originates on the wire. If you are
-running v1.1, upgrade. See [`../docs/COLD-BOOT-TX-WEDGE.md`](../docs/COLD-BOOT-TX-WEDGE.md) §9.
+★ **v1.3 fixes a kernel panic that v1.2 users hit in normal use.** A client roaming onto
+the 5 GHz AP triggers `skb_under_panic` on `wlan1` and the box panics and reboots. It also
+fixes the panel LEDs (LAN1–3 were lit regardless of link, Internet and LAN4 dead) and lets
+a bridged AP auto-recover from the RX-stall wedge, which v1.2 could not do at all. If you
+are on v1.1 or v1.2, upgrade. See
+[`../docs/RX-STALL-WEDGE.md`](../docs/RX-STALL-WEDGE.md) and [`../docs/LEDS.md`](../docs/LEDS.md).
 
 > **The `.bin` files are not committed to git** (they are build artifacts). Download them
 > from the repo's **[latest release](https://github.com/ADCDS/openwrt-dlink-dir842-r1/releases/latest)**,
