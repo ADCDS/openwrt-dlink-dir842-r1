@@ -65,7 +65,11 @@ traffic and roaming; treat it as **pre-production** regardless and keep a flash 
 1. [`RETRACTIONS-AND-METHOD.md`](RETRACTIONS-AND-METHOD.md) — **first**. It is the cheapest
    way to avoid re-running twenty already-falsified experiments.
 2. [`BENCH.md`](BENCH.md) — you cannot test anything until the bench is back up.
-3. Then whichever subsystem doc covers what you are touching.
+   Bench tooling lives in [`../tools/bench/`](../tools/bench/).
+3. [`COLD-BOOT-TX-WEDGE.md`](COLD-BOOT-TX-WEDGE.md) — if the box boots but answers
+   nothing it originates, read §1 first: one register tells you in ten seconds
+   whether it is this bug. §9 is the open end: do not re-enable pstore without it.
+4. Then whichever subsystem doc covers what you are touching.
 
 ## The current docs
 
@@ -78,6 +82,7 @@ traffic and roaming; treat it as **pre-production** regardless and keep a flash 
 | [`RETRACTIONS-AND-METHOD.md`](RETRACTIONS-AND-METHOD.md) | Every falsified hypothesis and retracted claim, plus the measurement rules and bench confounds they produced. |
 | [`OTA-INSTALL.md`](OTA-INSTALL.md) | Install OpenWrt over the air with **no serial cable** — upload the factory image through the stock D-Link web UI — and revert just as easily. Verified end-to-end on hardware. Product-facing. |
 | [`RESTORE-STOCK.md`](RESTORE-STOCK.md) | How to return to pristine D-Link firmware and back to OpenWrt at will — the flash partition map, why it's reversible, and both restore routes (verified on hardware). Product-facing. |
+| [`COLD-BOOT-TX-WEDGE.md`](COLD-BOOT-TX-WEDGE.md) | The cold-autoboot CPU-TX wedge: everything the box originated was dropped on a hands-off power-on boot, while RX stayed healthy. **Fixed in practice** by removing the `ramoops` carve-out — nothing in the ethernet driver was needed — but ★ the mechanism is NOT established: §9 records four measured attempts to keep ramoops (withholding the DRAM outright, `PSTORE_CONSOLE=n`, `unbuffered`, relocating the window) that all still wedge, which retracts §2's "it corrupts DMA memory" story. Carries the refutation list, the one-register fingerprint, the bootloader jump-path RE, and the next experiment to run. |
 | [`M7-LARGE-FRAME-RX-WEDGE.md`](M7-LARGE-FRAME-RX-WEDGE.md) | Root cause and fix for the RX-FIFO drain-lag race that corrupted box-terminating frames larger than ~128 B — the bug that broke DHCP and SSH. Part reference, part journal — it carries a banner. |
 
 ## The historical journals

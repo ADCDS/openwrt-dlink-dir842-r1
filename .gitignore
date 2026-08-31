@@ -7,3 +7,12 @@ images/*.itb
 # python bytecode
 __pycache__/
 *.pyc
+
+# bench session artifacts (see docs/BENCH.md, tools/bench/)
+dir842-uart.log
+daemon.log
+spammer.out
+uart-cmd.pending
+esc-spam.flag
+# local flash-back images; large binaries, ship as releases
+known-good-images/

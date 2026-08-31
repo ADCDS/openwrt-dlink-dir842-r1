@@ -1,3 +1,19 @@
+fs/pstore: don't block in atomic context
+
+★ STATUS: INERT IN THE SHIPPED BUILD, DELIBERATELY RETAINED.
+
+The DIR-842 subtarget sets `# CONFIG_PSTORE is not set`, so `fs/pstore/` is not
+compiled and this patch changes nothing in the image. It is kept because the
+bug it fixes is real, was found on this hardware, and is not obvious: anyone who
+re-enables pstore (see docs/COLD-BOOT-TX-WEDGE.md §9.8 for the experiment that
+would justify doing so) needs it, and rediscovering it costs a hang that looks
+like a dead box rather than a crash.
+
+Why pstore is off at all: an attached ramoops wedges CPU-originated TX on this
+board. RX stays healthy while everything the box originates is dropped. The
+mechanism is NOT established -- see docs/COLD-BOOT-TX-WEDGE.md §9.6-9.8, which
+retracts the earlier "ramoops corrupts DMA memory" explanation.
+
 --- a/fs/pstore/platform.c
 +++ b/fs/pstore/platform.c
 @@ -140,6 +140,20 @@

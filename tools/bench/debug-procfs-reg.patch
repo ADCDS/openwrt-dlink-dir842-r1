@@ -1,0 +1,221 @@
+# Optional debug instrumentation for the rtl819x datapath — NOT part of any fix.
+#
+# Adds /proc/rtl865x_reg:
+#   read   -> CPU-interface register block (0xB8010000..FC), per-port SoC MIB
+#             counters, TX ring state (cur/done/CPUTPDCR0) and raw descriptor
+#             dumps from both the reclaim pointer and the live producer pointer.
+#   "r ADDR N" > /proc/rtl865x_reg  -> arm a register-window dump
+#   "w ADDR VAL" > /proc/rtl865x_reg -> poke one 32-bit register
+#
+# This is what located the cold-autoboot CPU-TX wedge (docs/COLD-BOOT-TX-WEDGE.md):
+# the TX ring never draining (cur climbs, done frozen) and CPUTPDCR0 never leaving
+# the ring base were both read through it.
+#
+# ⚠ The "w" poke is a footgun: it writes an arbitrary MMIO address with no
+# validation beyond a range check, and a bad address WILL panic the box (it did
+# once during the hunt). Also note it can only safely take addresses in the
+# 0xB8xxxxxx / 0xBBxxxxxx MMIO windows — never a raw DMA/physical address read
+# out of a ring-base register.
+#
+# Apply with:  git apply tools/bench/debug-procfs-reg.patch
+# (also carries a now-refuted cpu_ext_port knob; harmless, defaults to the
+#  historical value 3 — see docs/COLD-BOOT-TX-WEDGE.md §refuted)
+#
+diff --git a/files/target/linux/realtek/files-4.14/drivers/net/ethernet/rtl819x/rtl819x_swnic.c b/files/target/linux/realtek/files-4.14/drivers/net/ethernet/rtl819x/rtl819x_swnic.c
+index 2e2718e..8c3b210 100644
+--- a/files/target/linux/realtek/files-4.14/drivers/net/ethernet/rtl819x/rtl819x_swnic.c
++++ b/files/target/linux/realtek/files-4.14/drivers/net/ethernet/rtl819x/rtl819x_swnic.c
+@@ -75,6 +75,27 @@ static int pid_dump;
+ module_param(pid_dump, int, 0644);
+ MODULE_PARM_DESC(pid_dump, "log source port/vid/asic0 for the next N RX frames (CPU-tag bring-up instrument)");
+ 
++/*
++ * #18 EXPERIMENT: ph_asic0's srcExtPortNum sub-field is only 2 BITS
++ * (rtl_pktHdr.ph_asic0 comment: "srcExtPortNum(0..1)/extPortList(8..11)/
++ * queueId" — bits[1:0]), a genuinely different, narrower address space than
++ * the port0-8 CPU-tag numbering (jacks 0-4, CPU=8) that everything else in
++ * this driver uses. It was hardcoded to 3 by commit 3bf4b661f3 BEFORE CPU-tag
++ * mode existed (back when port0 WAS the physical RGMII trunk and any nonzero
++ * srcExtPortNum just needed to not collide with it) specifically to defeat a
++ * source-port filter ("egress = destMask & ~(1<<srcPort)"); it was never
++ * revisited when CPU-tag mode later redefined the whole port numbering
++ * scheme, and every CPU-tag-mode verification on record measured
++ * hardware-forwarded ROUTER-role throughput, never a bridge-role
++ * CPU-injected unicast reply specifically. Runtime-tunable (no reboot
++ * needed) so all 4 possible values (2 bits) can be swept with multiple
++ * trials each per this project's own measurement rule 7 (one clean run
++ * proves nothing for the wedge class of bug).
++ */
++static int cpu_ext_port = 3;
++module_param(cpu_ext_port, int, 0644);
++MODULE_PARM_DESC(cpu_ext_port, "#18: ph_asic0 srcExtPortNum value (0-3) for CPU-injected direct-portlist TX; historical default 3, pre-dates CPU-tag mode");
++
+ /*
+  * M7 FCS wedge signal: every large (>132 B) delivered frame gets its Ethernet
+  * FCS software-verified (EXCLUDE_CRC is clear, so ph_len includes the 4 FCS
+@@ -636,7 +657,7 @@ static int32 _New_swNic_send(void *skb, void *output, uint32 len,
+ 	 * the HWLOOKUP branch already used; see rtl865x_asichal.c PORT0_ROUTER_MODE
+ 	 * note re: source-port filtering blocking egress back out the trunk.)
+ 	 */
+-	ph->ph_asic0 = (3 << 0);	/* ph_srcExtPortNum = CPU */
++	ph->ph_asic0 = (cpu_ext_port & 0x3) << 0;	/* #18: ph_srcExtPortNum, see cpu_ext_port param */
+ 	if (nicTx->flags & PKTHDR_HWLOOKUP) {
+ 		/* CPU-injected frame, let the switch L2-bridge it (translation of
+ 		 * the old tx_hwlkup|tx_bridge|tx_extspa=CPU descriptor bits). */
+@@ -796,3 +817,30 @@ void New_swNic_freeRings(void)
+ 
+ 	free_all_coherent();
+ }
++
++/* ---- DEBUG (/proc/rtl865x_reg): passive TX-ring visibility ---------------- */
++void New_swNic_txState(uint32 *cur, uint32 *done, uint32 *cnt)
++{
++	*cur = txCurr;
++	*done = txDoneIdx;
++	*cnt = txCnt;
++}
++
++/* Raw words for TX slot i: [0]=ring word, [1..6]=pkthdr, [7..14]=mbuf. */
++int New_swNic_txSlot(uint32 i, uint32 *w)
++{
++	volatile uint32 *tr, *p;
++	int k;
++
++	if (!txCnt || i >= txCnt || !txRing.orig || !txPh.orig || !txMb.orig)
++		return -1;
++	tr = TXR();
++	w[0] = tr[i];
++	p = (volatile uint32 *)TXPH(i);
++	for (k = 0; k < 6; k++)
++		w[1 + k] = p[k];
++	p = (volatile uint32 *)TXMB(i);
++	for (k = 0; k < 8; k++)
++		w[7 + k] = p[k];
++	return 0;
++}
+diff --git a/files/target/linux/realtek/files-4.14/drivers/net/ethernet/rtl819x/rtl865x_asichal.c b/files/target/linux/realtek/files-4.14/drivers/net/ethernet/rtl819x/rtl865x_asichal.c
+index 3d2e53b..25619be 100644
+--- a/files/target/linux/realtek/files-4.14/drivers/net/ethernet/rtl819x/rtl865x_asichal.c
++++ b/files/target/linux/realtek/files-4.14/drivers/net/ethernet/rtl819x/rtl865x_asichal.c
+@@ -1914,6 +1914,113 @@ static const struct file_operations l2flush_fops = {
+ 	.read = seq_read, .llseek = seq_lseek, .release = single_release,
+ };
+ 
++
++/* ---- /proc/rtl865x_reg: PASSIVE inspection + poke (DEBUG) -----------------
++ * read : the regdump_base/regdump_n window (WITHOUT running gw_prog, unlike
++ *        /proc/rtl865x_gw), the whole CPU-interface block, the SoC per-port MIB
++ *        counters and the CPU TX ring (indices + descriptor words from the
++ *        reclaim point).
++ * write: "w ADDR VAL"  poke a 32-bit register (hex, 0xB8000000-0xBBFFFFFF)
++ *        "r ADDR N"    re-arm the dump window (hex addr, decimal words)
++ */
++extern void New_swNic_txState(u32 *cur, u32 *done, u32 *cnt);
++extern int New_swNic_txSlot(u32 i, u32 *w);
++
++static int reg_show(struct seq_file *m, void *v)
++{
++	u32 cur, done, cnt, i, n;
++	int p;
++
++	gw_regdump(m);
++	seq_printf(m, "[cpu-iface 0xB8010000..FC]\n");
++	for (i = 0; i < 0x100; i += 16)
++		seq_printf(m, "  %08x: %08x %08x %08x %08x\n", 0xB8010000u + i,
++			   REG32(0xB8010000u + i), REG32(0xB8010004u + i),
++			   REG32(0xB8010008u + i), REG32(0xB801000Cu + i));
++	seq_printf(m, "[mib] P inOct inUc inMc inBc inDisc drop fcs | outOct outUc outMc outBc outDisc\n");
++	for (p = 0; p <= 8; p++) {
++		u32 ib = 0xBB801100u + p * 0x80, ob = 0xBB801800u + p * 0x80;
++
++		seq_printf(m, "  P%d %u %u %u %u %u %u %u | %u %u %u %u %u\n", p,
++			   REG32(ib), REG32(ib + 8), REG32(ib + 0x3C), REG32(ib + 0x40),
++			   REG32(ib + 0x44), REG32(ib + 0x48), REG32(ib + 0x4C),
++			   REG32(ob), REG32(ob + 8), REG32(ob + 0xC), REG32(ob + 0x10),
++			   REG32(ob + 0x14));
++	}
++	seq_printf(m, "  cpuEvent=%u mibctl=%08x\n", REG32(0xBB801084u), REG32(0xBB801000u));
++	New_swNic_txState(&cur, &done, &cnt);
++	seq_printf(m, "[txring] cur=%u done=%u cnt=%u CPUTPDCR0=%08x CPUICR=%08x CPUIISR=%08x\n",
++		   cur, done, cnt, REG32(0xB8010020u), REG32(0xB8010000u), REG32(0xB801002Cu));
++	for (n = 0, i = done; n < cnt && n < 10; n++, i = (i + 1 == cnt) ? 0 : i + 1) {
++		u32 w[15];
++
++		if (New_swNic_txSlot(i, w))
++			break;
++		seq_printf(m, "  [%3u]%s tr=%08x ph=%08x %08x %08x %08x %08x %08x mb=%08x %08x %08x %08x %08x %08x %08x %08x\n",
++			   i, (i == cur) ? "*" : " ", w[0], w[1], w[2], w[3], w[4], w[5], w[6],
++			   w[7], w[8], w[9], w[10], w[11], w[12], w[13], w[14]);
++	}
++	/* #16 debug: ALSO show a window of the freshest slots ending at cur —
++	 * the loop above always starts at done, which can be permanently
++	 * frozen while cur keeps advancing, in which case the above never
++	 * shows what a NEW tx actually looks like. */
++	if (cnt) {
++		u32 start = (cur + cnt - 12) % cnt;
++
++		seq_printf(m, "[txring recent, ending at cur]\n");
++		for (n = 0, i = start; n < 12 && n < cnt; n++, i = (i + 1 == cnt) ? 0 : i + 1) {
++			u32 w[15];
++
++			if (New_swNic_txSlot(i, w))
++				break;
++			seq_printf(m, "  [%3u]%s tr=%08x ph=%08x %08x %08x %08x %08x %08x mb=%08x %08x %08x %08x %08x %08x %08x %08x\n",
++				   i, (i == cur) ? "*" : (i == done) ? "D" : " ",
++				   w[0], w[1], w[2], w[3], w[4], w[5], w[6],
++				   w[7], w[8], w[9], w[10], w[11], w[12], w[13], w[14]);
++		}
++	}
++	return 0;
++}
++
++static ssize_t reg_write(struct file *f, const char __user *ub, size_t len, loff_t *off)
++{
++	char kb[64];
++	u32 a, v;
++	int n;
++
++	if (len >= sizeof(kb))
++		return -EINVAL;
++	if (copy_from_user(kb, ub, len))
++		return -EFAULT;
++	kb[len] = 0;
++	if (kb[0] == 'w') {
++		if (sscanf(kb + 1, "%x %x", &a, &v) != 2)
++			return -EINVAL;
++		if ((a & 3) || a < 0xB8000000u || a >= 0xBC000000u)
++			return -EINVAL;
++		REG32(a) = v;
++		pr_err("rtl865x_reg: wrote %08x = %08x (readback %08x)\n", a, v, REG32(a));
++	} else if (kb[0] == 'r') {
++		if (sscanf(kb + 1, "%x %d", &a, &n) != 2)
++			return -EINVAL;
++		regdump_base = a;
++		regdump_n = n;
++	} else {
++		return -EINVAL;
++	}
++	return len;
++}
++
++static int reg_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, reg_show, NULL);
++}
++
++static const struct file_operations reg_fops = {
++	.owner = THIS_MODULE, .open = reg_open, .write = reg_write,
++	.read = seq_read, .llseek = seq_lseek, .release = single_release,
++};
++
+ static int __init rtl865x_asichal_init(void)
+ {
+ 	proc_create("rtl865x_gw", 0444, NULL, &gw_proc_fops);
+@@ -1921,6 +2028,7 @@ static int __init rtl865x_asichal_init(void)
+ 	proc_create("rtl865x_napt", 0444, NULL, &napt_scan_fops);
+ 	proc_create("rtl865x_fabric", 0444, NULL, &fabric_fops);
+ 	proc_create("rtl865x_l2flush", 0644, NULL, &l2flush_fops);
++	proc_create("rtl865x_reg", 0644, NULL, &reg_fops);	/* DEBUG, passive */
+ 	/* ⚠ NOTE for bridge/AP deployments: /proc/rtl865x_gw above is 0444 but is
+ 	 * NOT a passive read — opening it runs gw_prog(), which programs the full
+ 	 * router datapath and sets TEACR bit0 (freezing L2 aging). On a bridged box

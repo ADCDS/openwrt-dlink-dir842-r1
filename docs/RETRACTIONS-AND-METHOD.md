@@ -111,6 +111,12 @@ every right-hand one. Hashes marked **mirror** are in the publishable repo
 | 31 | R3: "the LED GPIO numbers are not safely recoverable, this needs a human check" | **WRONG** — they *were* recovered by the same static-decode method the doc called unsafe (`gpiom.ko`'s `dev_leds` / `dev_buttons` tables). ★ And the first LED node was **actively dangerous**. See below | `70c16cab8f` |
 | 32 | "WAN ingress-ACL overlap concern" (docs-only) | **RETRACTED as a decode error** — the config matches stock exactly | mirror `d53dcfd` |
 | 33 | R4/G4: "rtw88's 5 GHz is `wlan1` and the vendor root device is `wlan0`" | **RECORDED AS MEASURED — and the recommended fix caused the next bug.** Pinning load order by giving the vendor module AUTOLOAD made `rtl8192cd` claim `wlan0` first, so mac80211 lost its derived name and the 5 GHz AP died | `35ec543891` → `9edc6bc5a8` → `b830957df9` |
+| 34 | ★★ "The cold-autoboot CPU-TX wedge is a switch-core clock / reset / config problem" | **ALL FALSIFIED — the cause was `ramoops` corrupting DMA memory.** Ten hypotheses over three sessions (clock gate, settle time, `srcExtPortNum`, jack-PHY AN restart, external-chip cold bring-up, switch-core reset at four different points, role/`gw_prog`) plus bit-identical register sweeps of BOTH chips. The fault leaves **no register fingerprint** because it is in DRAM, not a register. See below | `docs/COLD-BOOT-TX-WEDGE.md` |
+| 35 | "The wedge kills CPU **unicast** while broadcast still works" | **THE WRONG FRAME** — port0's out-multicast/broadcast counters climb from jack-to-jack flooding across the CPU-tag trunk, not from CPU-originated frames. *All* CPU-originated TX is dead. Cost most of a session chasing a unicast-specific classifier | `docs/COLD-BOOT-TX-WEDGE.md` §1 |
+| 36 | "`0x1219 != 0` proves the loader configured the external switch, so preserve it" | **THE GATE HAS NEVER FIRED ON THIS BOARD** — `0x1219` reads `0x0040` on every boot path, so `rtl8367b_setup()`'s EXT1 cold bring-up has never executed here. Forcing it to run is harmless (it does NOT desync the RGMII pair — index #25's warning applied to a *partial* replica plus a gpio474 reset) but changes nothing | `docs/COLD-BOOT-TX-WEDGE.md` §4-5 |
+| 37 | ★★ R6: "the kernel excludes this range from the normal allocator" (the `ramoops` `/reserved-memory` node) | **FALSE, AND SILENTLY SO.** `arch/mips` (4.14) never `select`s `OF_RESERVED_MEM`, so `fdt_reserved_mem_save_node()`/`fdt_init_reserved_mem()` are no-op stubs: the node is matched and **nothing** is reserved, with no warning. ★ And forcing `OF_RESERVED_MEM=y` is **still** not enough — measured, non-image reserved moved 697K→700K, not +128K — because MIPS rebuilds all memory state in `bootmem_init()` from `boot_mem_map`, i.e. from the DT `/memory` node | `docs/COLD-BOOT-TX-WEDGE.md` §9.1-9.2 |
+| 38 | "`ramoops: attached 0x20000@0x3fe0000` in the boot log means the carve-out is working" | **PROVES ONLY THAT THE DRIVER BOUND.** `of_platform_default_populate_init()` special-cases ramoops and `ramoops_parse_dt()` reads `reg` straight from the DT — **the binding path never consults the reservation.** This log line was present throughout the entire three-session hunt while the memory was being handed to the allocator | `docs/COLD-BOOT-TX-WEDGE.md` §9.1 |
+| 39 | ★★ **Our own** §2 claim: "the wedge is ramoops overwriting DRAM the allocator handed to the rtl819x driver" | **RETRACTED THE SAME DAY IT WAS WRITTEN.** The overlap is real and was later *demonstrated* (`CPURPDCR0=03fe2000`, the RX ring inside the old ramoops window) — but it is not sufficient. Removing the overlap by every available means still wedges TX: `/memory` withheld so the region is outside the kernel map (5/5 pass with pstore off, **fail with it on**), `PSTORE_CONSOLE=n`, `unbuffered`, and relocating to a hole at 48 MB — 2/2 failing trials each. ★ The mechanism was inferred from one correlation and written up as settled; only the missing control (shrunk `/memory` **with pstore off**) exposed it | `docs/COLD-BOOT-TX-WEDGE.md` §9.6-9.8 |
 
 ### The ones that cost the most
 
@@ -305,6 +311,49 @@ unreclaimable. This is the whole of index #22's 5 GHz half.
 
 **#14 — A SOFTWARE-FLOWTABLE A/B WAS INVALID** because `iptables -D` did not match the fw3 rule
 (fw3's rule carries `-m comment`), so **both** arms had offload active.
+
+
+**#15 — `openwrt/files/` SILENTLY BAKES THE PRIVATE HOUSE PROFILE INTO EVERY IMAGE.**
+An earlier session left `etc/ap-profile/` and `etc/uci-defaults/99-zzz-dir842-ap` in
+`openwrt/files/`, which OpenWrt copies into every build. Images built with a plain `make`
+and believed "generic" were in fact house-profile, **bridge role**, `192.168.100.3`,
+hostname `gwr1200ac-ap`. This hid the router-vs-bridge variable for three sessions. For a
+true generic build, clear `openwrt/files/` and confirm the box reports `OpenWrt` /
+`192.168.0.1`.
+
+**#16 — A WRONG TARGET IP IS INDISTINGUISHABLE FROM A TOTAL OUTAGE.** The pre-ramoops
+reference image boots at `192.168.0.1`; an ARP test aimed at `192.168.100.3` returned
+0/20 and **nearly refuted the one correct hypothesis of the whole hunt**. Confirm
+`uci get network.lan.ipaddr` before trusting any zero-reply result. (This is #8 again,
+in a new costume.)
+
+**#17 — NEVER RESET THE FABRIC AFTER THE RINGS ARE PROGRAMMED.** `rtl819x_fabric_full_reset()`
+invalidates CPU-port descriptor state and must be followed immediately by
+`New_swNic_init()`. Calling it from inside `rtl865x_start()` (i.e. after the rings are up)
+wipes them: `CPUIISR` bit 17 `PKTHDR_DESC_RUNOUT` asserts forever, producing an IRQ storm
+that escalates into a tty-layer oops and needs a power-cycle **and reflash**.
+
+
+**#18 — A PSTORE BACKEND AND A RESERVATION CHANGE IN THE SAME BUILD PANICS THE BOX.**
+Re-enabling `CONFIG_PSTORE_RAM` **and** `CONFIG_PSTORE_CONSOLE` while the carve-out was
+still (unknowingly) unreserved killed the box in ~74 s: a slab freelist pointer overwritten
+with `0x30303030` — ASCII `"0000"`, i.e. console text — then `Kernel panic … Fatal
+exception in interrupt`. ★ Prove the memory is out of the allocator FIRST, on a build with
+pstore off, using the `Memory:` / `MemTotal` arithmetic. Only then turn a backend on.
+(It reboots and recovers on its own; no reflash needed.)
+
+**#20 — A SINGLE ARP BURST AT t+45 s CAN READ AS A TOTAL WEDGE ON A HEALTHY BOX.** A known-good
+purged build was caught at `t45=0 t70=20` — the box simply had not finished bringing
+`br-lan` up at 45 s. ★ Any trial that samples once, early, can manufacture a failure that
+looks identical to the CPU-TX wedge. `tools/bench/autoboot-trial.py` therefore bursts twice
+(t+45 s and t+70 s) and judges on the later one. The lone unexplained failure in the
+"15/16" ramoops-free run was measured with a single early burst and is most likely this.
+
+**#19 — `memblock=debug` VIA DT `bootargs` PRODUCES NO OUTPUT ON THIS PLATFORM.** Zero
+`memblock_dbg()` lines, not even from `bootmem_init()`'s `memblock_add_node()` calls,
+despite `/proc/cmdline` showing the flag, both the macro and `early_param("memblock")`
+compiled in, and an unwrapped log buffer. **Cause not established.** Do not budget a cycle
+on this expecting a trace — use the `Memory:` line, which is direct and needs no flag.
 
 ---
 

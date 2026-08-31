@@ -224,10 +224,21 @@ CONFIG_PPP=m
 CONFIG_PPPOE=m
 CONFIG_PPP_ASYNC=m
 CONFIG_PRINTK_TIME=y
-CONFIG_PSTORE=y
-CONFIG_PSTORE_CONSOLE=y
-CONFIG_PSTORE_RAM=y
-CONFIG_PSTORE_ZLIB_COMPRESS=y
+# DIR-842: pstore is OFF ENTIRELY -- core included, not just the backends.
+# An attached ramoops WEDGES CPU-originated TX on this box: RX stays healthy,
+# port 6 ifOutUcastPkts stops climbing, and ARP replies plus the box's own
+# pings vanish. Absent, the same tree passes 15/16 and 6/6.
+# ★ It is NOT the allocator collision docs/COLD-BOOT-TX-WEDGE.md §2 blamed --
+# that claim is retracted in §9.6. Withholding the region from the kernel
+# outright (a /memory node ending at 0x3fe0000, verified `Memory: .../65408K`)
+# removes every overlap with kernel allocations and TX still dies, while the
+# identical shrink with pstore off passes 5/5. Also refuted, 2/2 failing
+# power-cycle trials each: PSTORE_CONSOLE=n (write volume), `unbuffered`
+# (ioremap vs ioremap_wc), and moving the window to a hole at 0x3000000
+# (address). The mechanism is still unknown -- see §9.8 for the next
+# experiment. Do not re-enable this on the strength of a clean boot log:
+# `ramoops: attached ...` prints fine in every one of the failing configs.
+# CONFIG_PSTORE is not set
 CONFIG_RATIONAL=y
 # CONFIG_RCU_NEED_SEGCBLIST is not set
 # CONFIG_RCU_STALL_COMMON is not set
