@@ -349,6 +349,32 @@ looks identical to the CPU-TX wedge. `tools/bench/autoboot-trial.py` therefore b
 (t+45 s and t+70 s) and judges on the later one. The lone unexplained failure in the
 "15/16" ramoops-free run was measured with a single early burst and is most likely this.
 
+**#23 — A HIGHER REGULATORY CEILING IS NOT MORE SIGNAL.** BR allows 17 dBm on 5 GHz ch36 but
+30 dBm on ch149, so moving the AP up looked like a free +13 dB. `iw` duly reported
+`txpower 17.00 -> 30.00 dBm` — and the client's RSSI went **-67 to -87 dBm**, i.e. ~20 dB
+WORSE. On this unit the upper band radiates far less than the lower one regardless of what
+the regulatory table permits. ★ Measure the client, never the `txpower` the driver claims.
+
+**#22 — "write RF mode table fail" IS NOT A MISTUNED CRYSTAL.** `03-rtw8822b-blank-efuse-rfe.patch`
+reasons that the blank efuse leaves `crystal_cap = 0` and that this is "consistent with the RF
+synthesiser being off-frequency from a mistuned crystal", and adds `xtal_cap_override` with the
+instruction "sweep it instead of guessing". ★ The sweep was run and the hypothesis is REFUTED:
+the failure is **intermittent (~50%) and independent of the value**. The four values decoded from
+the stock MAC partition (39, 49, 35, 24) all failed; a coarse 0-63 sweep gave a non-monotonic
+scatter (16 ✓, 28 ✗, 44 ✓, 56 ✗, 63 ✓); and re-running a SINGLE value three times gave
+pass/fail/fail at 0 and pass/fail/pass at 16. A detuned crystal would produce a contiguous
+working range, not a coin flip. This is a probe-time race in RF register access.
+★ `xtal_cap_override` is a dead end — do not sweep it again.
+
+**#21 — AN INTERFACE COUNTER MEASURES THE WHOLE LAN, NOT THE BOX.** A kill-switch harness
+watched `enp4s0` rx pkt/s to catch the box "flooding the LAN", and duly fired at
+10512-17777 pkt/s — on BOTH arms of an experiment, including the control. ★ All false: the
+counter includes the bench host's own downloads and every other host's traffic. An
+attributed capture over a full boot showed the box emitting **12 frames in 100 s** while
+the gateway and the bench host accounted for 109k. Two hypotheses built on that reading
+("a wedged box floods the LAN", and a `br-lan` STP-loop theory) were withdrawn. Count
+frames **by source MAC**; never trust an interface total on a shared segment.
+
 **#19 — `memblock=debug` VIA DT `bootargs` PRODUCES NO OUTPUT ON THIS PLATFORM.** Zero
 `memblock_dbg()` lines, not even from `bootmem_init()`'s `memblock_add_node()` calls,
 despite `/proc/cmdline` showing the flag, both the macro and `early_param("memblock")`

@@ -773,3 +773,56 @@ cold-boot cost above does not apply to you.
    `delete wireless.radio0` / `delete wireless.default_radio0`. (Residual and
    low-stakes: whether `radio0` exists yet when `10_` first runs on a truly virgin
    overlay — `10_`'s `exit 1` retry-next-boot guard covers both outcomes.)
+
+---
+
+## ★ 5 GHz is ~13-15 dB quieter than it should be — measured, and five explanations refuted
+
+**Symptom:** a client in the SAME ROOM as the box measures the 5 GHz AP at **-67 to -81 dBm**
+and speedtests at ~130 Mbit/s. The link negotiates `VHT-MCS 7 80MHz NSS 1` (292.5 Mbit/s
+PHY), so ~130 Mbit/s of TCP is *normal efficiency for that PHY rate* — the PHY rate is the
+problem, and the PHY rate is a consequence of signal.
+
+### The measurement that localises it
+
+Both of our own radios, scanned by the same phone at the same instant:
+
+| our radio | freq | client RSSI |
+|---|---|---|
+| 2.4 GHz (vendor `rtl8192cd`, `wlan0`) | 2437 | **-60 dBm** |
+| 5 GHz (rtw88 8822BE, `wlan1`) | 5180 | **-81 dBm** |
+
+21 dB apart. 5 GHz costs ~6-8 dB of extra path loss at these frequencies, so roughly
+**13-15 dB is unexplained** and it is specific to the 8822BE path. ★ The 2.4 GHz radio is
+the control: board, placement and antennas are fine.
+
+For reference the house's main router reads **-40 dBm** on its 5 GHz from the same spot.
+
+### The driver is asking for full power
+
+Not a power-index bug: a blank efuse leaves `txpwr_idx_table[]` all `0xff`, which clamps
+*high* against `max_power_index = 0x3f`, so the requested power ends up at the regulatory
+ceiling. `iw` confirms `txpower 17.00 dBm` on ch36. The power is requested and not radiated.
+
+### ★ Refuted — do not re-try these
+
+| hypothesis | test | result |
+|---|---|---|
+| Mistuned crystal (`xtal_cap_override`, patch 03's own theory) | swept stock-partition candidates 39/49/35/24, then 0-63 | **REFUTED** — the RF WARN is intermittent ~50% and value-independent; same value gives pass/fail/fail. Confound #22 |
+| Wrong RF front-end type | `rfe_option` 2 (eFEM) / 3 / 5 (iFEM) swept at runtime | **REFUTED** — 2 (the shipped guess) is the BEST: -74 vs -84 (3) and -81 (5) |
+| Regulatory ceiling (BR allows 17 dBm on ch36 but 30 dBm on ch149) | moved to ch149; `txpower` did rise 17 -> 30 dBm | **REFUTED, and it BACKFIRED** — client RSSI went -67 -> **-87**. ★ On this unit the LOW band is the better band despite the lower legal cap. Reverted |
+| CPU / bridge bottleneck | `/proc/stat` during a client transfer | **REFUTED** — box ~85% idle. (Separately, terminated TCP tops out ~152 Mbit/s, so the CPU is a ceiling but not this one) |
+| Hardware NAT offload not working | `hwnat=N` | **NOT APPLICABLE** — the box is a pure bridge (no `network.wan`); offload accelerates routed/NAT traffic and there is none. Enabling it changes nothing |
+| `NSS 1` on a 2x2 chip is an anomaly | signal check | **NO** — at -67 dBm, MCS 7 / NSS 1 is correct rate adaptation, not a fault |
+
+### Where that leaves it
+
+The 8822BE requests full regulatory power and radiates ~13-15 dB below its own 2.4 GHz
+sibling, and no software knob available recovers it. This is consistent with what
+`README.md` already warns: the blank efuse means **no per-unit RF calibration**. Tonight
+only quantified the cost.
+
+★ **Bench note:** do NOT characterise this with repeated `rmmod`/`modprobe` of
+`rtw88_8822be`. After a few cycles the interface loses the profile MAC (blank efuse ->
+random MAC per probe), `txpower` drifts 17 -> 20 dBm, and the AP stops being scannable —
+the readings become meaningless. Reboot between measurements instead.

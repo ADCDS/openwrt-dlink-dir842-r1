@@ -548,7 +548,14 @@ it still wedges TX, the damage is not plausibly ramoops' *writes*. What remains:
    is weak.** That trial sampled ARP only once, at t+45 s, and a healthy purged build has
    since been caught at `t45=0 t70=20` — a slow boot, not a wedge. The lone historical
    failure was most likely the same thing, which would make the ramoops-free config 16/16.
-   Marginality is still worth testing, but it no longer has that data point behind it.
+
+   ★★ **TESTED — AND STILL NOT SETTLED. See §9.10.** +31K of unrelated kernel code
+   (inert ciphers, no pstore anywhere) failed 3 of 13 judged trials against 0 of 12 for the
+   unmodified control. That is NOT separable (Fisher p ≈ 0.25) and the run was
+   underpowered, so it neither confirms nor refutes marginality — and the direction of the
+   difference mildly favours it. What it does show is that padding is nowhere near the
+   *deterministic* failure ramoops produced, so size/layout alone is not a sufficient
+   explanation. Retraction row 39 stands.
 2. Probe-time side effects other than the ring write: `request_mem_region()` inserting into
    `iomem_resource`, `pstore_register()`'s 32 KB `kmalloc` for `psinfo->buf`, the extra
    platform device on the bus, the registered `kmsg_dumper`.
@@ -588,3 +595,94 @@ forensics) is a *different failure* from the TX wedge, and only the first one be
 "ramoops scribbles on live memory": it needs `PSTORE_CONSOLE` and an actual overlap. The
 wedge survives removing both. Treating them as one phenomenon is what produced the wrong
 §2 explanation — do not merge them again.
+
+### 9.10 ★ The marginality experiment — RUN TO COMPLETION
+
+§9.8 asked the one question that would settle §9: does the wedge track **ramoops
+specifically**, or is this box merely MARGINAL, with pstore only pushing it over the line?
+Answer: **the marginality hypothesis is weakened. Padding does not reproduce the wedge.**
+
+#### Design
+
+Two arms, identical but for padding. Padding was `CONFIG_CRYPTO_SERPENT` +
+`CONFIG_CRYPTO_TWOFISH` (+`_COMMON`) — inert ciphers nothing on this board selects or
+invokes, deliberately chosen so the change touches neither the ethernet driver nor the DTS.
+Both arms have **no pstore and no ramoops anywhere**.
+
+| | control | padded |
+|---|---|---|
+| kernel code | 4131K | **4162K (+31K)** |
+| rodata / rwdata | 892K / 157K | 896K / 161K |
+| init | 1212K | 1172K |
+| `vmlinux` text | 4495473 | 4528193 (**+32720 B**) |
+
+Padding confirmed live (`grep -c serpent /proc/crypto` = 2). The perturbation is comparable
+to what pstore added (+16K code, +48K init).
+
+#### Result
+
+Judged on the **t+70 s** burst only (rule 7; confound #20 — a healthy box has been seen at
+`t45=0 t70=20`). Trials where the harness aborted early are excluded from pass/fail.
+
+| arm | judged trials | FAIL | rate |
+|---|---|---|---|
+| A — control | **12** | **0** | 0% |
+| B — padded | **13** | **3** | 23% |
+
+★ **Not statistically separable.** Fisher exact on 0/12 vs 3/13 gives two-tailed p ≈ 0.25.
+Three failures out of thirteen against zero out of twelve is the kind of split that arises
+by chance at this sample size, and it must not be read as an effect.
+
+★★ **And the comparison that actually matters:** with ramoops present the wedge was
+**deterministic — it failed essentially every hands-off boot**, which is what made it
+findable at all. Padding produces at most an intermittent 23%, indistinguishable from
+noise. A +31K code shift is therefore **not** equivalent to attaching ramoops.
+
+#### Conclusion — ★ read this carefully, it is weaker than it first looks
+
+- ★ **The experiment is UNDERPOWERED AND INCONCLUSIVE. It did not settle marginality.**
+  Resist the tidier summary. Control 0/12 vs padded 3/13 is not significant (p ≈ 0.25) —
+  but note the *direction*: the padded arm failed and the control never did. If anything
+  that leans mildly TOWARD marginality, not away from it. "Padding did not reproduce the
+  wedge, therefore the box is not marginal" does **not** follow from this data.
+- **What the data does support, and only this:** +31K of unrelated code is not equivalent
+  to attaching ramoops. Ramoops failed essentially *every* hands-off boot; padding failed 3
+  of 13. Those are different regimes, and that gap survives the small sample. So kernel
+  size/layout alone is not a sufficient explanation for what ramoops did.
+- **Retraction row 39 stands as written.** "ramoops attached ⇒ wedge" remains the solid
+  correlation. The mechanism is still unknown — this experiment eliminates one candidate
+  explanation and supplies none.
+- ★ **The 3 Arm-B failures are the loose end.** At n=13 they carry no statistical weight,
+  but they are the only signal here pointing at marginality and they went unexplained.
+  Settling this properly needs a far larger sample than a hands-off power-cycle rig
+  produces in an evening (~3 min/trial); at 23% vs 0%, separating them at p<0.05 needs
+  roughly 40+ trials per arm.
+
+#### ★ A confound this experiment created, and then caught
+
+An unguarded Arm-B run coincided with a **house-wide LAN outage**, and the working
+hypothesis became "a wedged box floods the LAN" — which would have neatly explained the
+historical outages in issue #2's preamble. A kill-switch harness was built to bound the
+damage (cut power on sustained high rx), and it duly "fired" on 10512-17777 pkt/s several
+times, including **on the control arm**.
+
+★ **All of it was false.** The harness measured *total* rx on the bench host's NIC, which
+includes that host's own downloads and all other house traffic. An attributed capture over
+a full 100 s boot cycle settles it:
+
+| source MAC | frames in 100 s |
+|---|---|
+| `50:4f:3b:32:68:9c` (house gateway) | 69346 |
+| `00:e0:4c:a7:00:6c` (**the bench host itself**) | 40193 |
+| `e0:1c:fc:51:c9:ef` (box `br-lan`/`eth0.2`) | **12** |
+| `00:e0:4c:81:86:86` (box `wlan0`) | **0** |
+| `e0:1c:fc:51:c9:f0` (box `wlan1`) | **0** |
+
+**The box emits 12 frames in 100 seconds across a full boot. It does not flood.** The
+"floods" were the bench host's own traffic. Two hypotheses built on that reading — "a
+wedged box floods the LAN" and the `br-lan` STP-loop theory — have **no supporting evidence
+and are withdrawn**. The cause of the observed house outage remains unknown and is NOT
+attributable to this box on the evidence collected.
+
+★ Rule for anyone measuring "is the box flooding": count frames **by source MAC**, never
+interface totals. An interface counter on a shared LAN measures the whole LAN.
