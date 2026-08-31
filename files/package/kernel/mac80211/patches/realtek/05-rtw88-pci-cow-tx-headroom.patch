@@ -1,0 +1,32 @@
+--- a/drivers/net/wireless/realtek/rtw88/pci.c
++++ b/drivers/net/wireless/realtek/rtw88/pci.c
+@@ -748,6 +748,29 @@
+ 	else if (!avail_desc(ring->r.wp, ring->r.rp, ring->r.len))
+ 		return -ENOSPC;
+
++	/* ★ Guarantee headroom for the hardware TX descriptor before pushing it.
++	 *
++	 * Without this the box panics outright:
++	 *
++	 *   skb_under_panic: text:rtw_pci_tx_write_data+0x12c [rtw88_pci]
++	 *                    put:48 head:830ad000 data:830acff2 dev:wlan1
++	 *
++	 * put:48 is tx_pkt_desc_sz; the skb arrived with 34 bytes of headroom,
++	 * exactly ETH_HLEN short. Reproduced by roaming a client onto this AP.
++	 *
++	 * rtw88 is not obviously at fault -- it declares
++	 * hw->extra_tx_headroom = chip->tx_pkt_desc_sz, and its own internal skbs
++	 * (rsvd page, h2c) skb_reserve() correctly. But frames reach this function
++	 * through the iTXQ path, wake_tx_queue -> ieee80211_tx_dequeue(), and this
++	 * backport's ieee80211_tx_dequeue() performs no headroom check at all
++	 * before handing the skb to the driver.
++	 *
++	 * Fixing it here is local, cannot regress other mac80211 users, and turns a
++	 * hard panic into a cheap reallocation.
++	 */
++	if (skb_cow_head(skb, chip->tx_pkt_desc_sz))
++		return -ENOMEM;
++
+ 	pkt_desc = skb_push(skb, chip->tx_pkt_desc_sz);
+ 	memset(pkt_desc, 0, tx_pkt_desc_sz);
+ 	pkt_info->qsel = rtw_pci_get_tx_qsel(skb, queue);
