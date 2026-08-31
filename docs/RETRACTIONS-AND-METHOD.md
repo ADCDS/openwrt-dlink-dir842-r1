@@ -366,6 +366,15 @@ pass/fail/fail at 0 and pass/fail/pass at 16. A detuned crystal would produce a 
 working range, not a coin flip. This is a probe-time race in RF register access.
 ★ `xtal_cap_override` is a dead end — do not sweep it again.
 
+**#24 — "SERIAL TX TO THE BOX IS DEAD" WAS THE STALLED DAEMON, AGAIN.** Hours of work were
+planned around the belief that the box's UART RX had failed in hardware: `loader.py catch`
+failed, direct writes to `/dev/ttyUSB0` got no response, and the daemon's own command file
+produced no echo. ★ All of it was `uart_daemon.py` having silently stalled. After a restart
+the box echoed a test command immediately. RX kept working throughout, which is what made
+it look like a one-way hardware fault. ★ Before concluding ANYTHING about the serial link,
+check `dir842-uart.log` is still GROWING and restart the daemon -- a stalled daemon looks
+exactly like dead TX, and this is the third time it has cost real time in one session.
+
 **#21 — AN INTERFACE COUNTER MEASURES THE WHOLE LAN, NOT THE BOX.** A kill-switch harness
 watched `enp4s0` rx pkt/s to catch the box "flooding the LAN", and duly fired at
 10512-17777 pkt/s — on BOTH arms of an experiment, including the control. ★ All false: the

@@ -909,3 +909,40 @@ neither a config change:
    client poorly too), which is more consistent with a feedline/connector problem than with
    a PA-only fault — a PA fault would degrade TX alone. This is a hardware check, not a
    software one.
+
+### The `txpwr_idx_table` blank-efuse gap — analysed, and it is NOT the cause
+
+`rtw8822b.c` copies `efuse->txpwr_idx_table[i] = map->txpwr_idx_table[i]` with **no 0xff
+check**, unlike `crystal_cap` / `pa_type` / `lna_type` which all have blank-efuse fallbacks.
+On this board that table is therefore all `0xff`, and `tx_pwr_tbl` shows the consequence:
+
+```
+pwr = 63 (0x3f)   base = 254   byr = 14   lmt = -2
+```
+
+`base + byr` saturates against `max_power_index = 0x3f`. It is tempting to "fix" this by
+defaulting the table the way the other fields are defaulted.
+
+★ **Do not — it would make things worse.** Index 63 is *maximum* TX gain, so saturating
+high means the chip is already being driven as loud as it goes. Any sane default (0x2D,
+etc.) is LOWER than 63 and would reduce output. And an over-driven PA would show as high
+RSSI with poor EVM, not the low RSSI actually measured. The power-index path is therefore
+ruled out as the cause of the deficit; the loss is downstream of it.
+
+### ★ Blocked on instrumentation, not on ideas
+
+There is currently **no 5 GHz receiver on the bench**: the phone (the only 5 GHz client) was
+disconnected from USB, and the host's USB adapter is a Ralink RT3070 reporting **0** 5 GHz
+channels. Since raw RSSI also swings ~20 dB with client position, any change made now would
+be unverifiable, and shipping an unverified RF change is precisely what
+`RETRACTIONS-AND-METHOD.md` exists to prevent.
+
+To resume, one of these is needed:
+1. A 5 GHz client at a **fixed** position, measured with the ours-minus-reference delta
+   (both APs in the same scan) rather than raw RSSI.
+2. A physical check of the 8822BE's u.FL pigtails and card seating. ★ Both directions are
+   weak -- the AP hears the client poorly *and* the client hears the AP poorly -- which fits
+   a feedline/connector fault better than a PA-only fault, since a PA fault degrades TX
+   alone.
+3. Determining the board's true RFE type from the stock ODM driver and porting the missing
+   `phy_reg_pg` / `txpwr_lmt` tables (types 4/12/15/16/17/18 are absent from rtw88).
