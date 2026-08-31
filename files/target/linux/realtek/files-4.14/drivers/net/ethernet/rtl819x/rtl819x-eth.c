@@ -898,6 +898,27 @@ static int fabric_autoreset = 3;
 module_param(fabric_autoreset, int, 0644);
 MODULE_PARM_DESC(fabric_autoreset, "wedge detector action: 0=log only, 1/2/3=auto ladder level (default 3)");
 
+/*
+ * ★ Does level-3 recovery re-arm the ASIC gw program afterwards?
+ *
+ * Default 1 (router): FULL_RST wipes the TLU tables, and without gw_rearm the
+ * ASIC refuses even small CPU-bound frames, so a router MUST reprogram them.
+ *
+ * ★ Set 0 on a BRIDGE. gw_rearm() -> gw_prog() reprograms the router
+ * scaffolding and re-freezes L2 aging (TEACR bit0), which on a bridged AP is
+ * the permanent-blackhole condition fixed in 5ff1a1f. Measured: after a
+ * level-3 recovery on a bridge, ARP stayed perfect (20/20) while ICMP sat at
+ * ~1000 ms with 20% loss and ssh timed out.
+ *
+ * A bridge never runs gw_prog at boot (dir842-asic skips it by role) and works
+ * fine, so it does not need the re-arm after a reset either -- which is what
+ * lets bridge role use the full reset it actually needs to clear an RX stall,
+ * instead of being capped at the level-2 soft reset that does not clear it.
+ */
+static int fabric_gw_rearm = 1;
+module_param(fabric_gw_rearm, int, 0644);
+MODULE_PARM_DESC(fabric_gw_rearm, "level-3 recovery re-arms the ASIC gw program (default 1; set 0 in bridge role)");
+
 static int fabric_reset_mode;	/* latched ladder level for the queued hang_work */
 
 static void rtl819x_hang_work(struct work_struct *w)
@@ -973,8 +994,14 @@ static void rtl819x_hang_work(struct work_struct *w)
 		 * in-kernel; it takes rtl865x_hal_lock itself, so it must run
 		 * after the unlock above.
 		 */
-		rtl865x_gw_rearm();
-		pr_err("rtl819x: ASIC gw scaffolding re-armed in-kernel (netif/L2/L3/NAT tables reprogrammed)\n");
+		if (fabric_gw_rearm) {
+			rtl865x_gw_rearm();
+			pr_err("rtl819x: ASIC gw scaffolding re-armed in-kernel (netif/L2/L3/NAT tables reprogrammed)\n");
+		} else {
+			/* Bridge role: see fabric_gw_rearm. Re-arming here would
+			 * re-freeze L2 aging and blackhole a roaming client. */
+			pr_err("rtl819x: gw re-arm SKIPPED (fabric_gw_rearm=0, bridge role)\n");
+		}
 	}
 	pr_err("rtl819x: recovery level %d complete\n", mode);
 	napi_schedule(&priv->napi);
@@ -1074,6 +1101,71 @@ static void rtl819x_hang_check(struct rtl819x_eth_priv *priv)
 				    (!fcs_last_auto ||
 				     time_after(jiffies, fcs_last_auto + 5 * HZ))) {
 					fcs_last_auto = jiffies | 1;
+					fabric_reset_mode = fabric_autoreset;
+					schedule_work(&priv->hang_work);
+				}
+			}
+		}
+	}
+
+	/* ★ Second detector: the RX-STALL wedge, which the FCS detector above
+	 * structurally CANNOT see.
+	 *
+	 * That detector declares on large-frame FCS *failures* (dfail >= 4 and a
+	 * 4:1 majority). This wedge stops RX completely -- rx_done=0 on every
+	 * poll, rx_packets frozen -- so dok and dfail are both zero and the
+	 * dfail >= 4 gate can never trip, no matter how long the box is down.
+	 * That is exactly why issue #2 sat at 40% loss for 10+ minutes with the
+	 * detector armed and silent.
+	 *
+	 * Measured here with a 200 Mbit/s UDP flood at the box (TCP never does it
+	 * -- it backs off; terminated TCP ran clean to the 152 Mbit/s CPU ceiling
+	 * with USEDDSC never moving off 138):
+	 *
+	 *   PRESSURE poll#101487 rx_done=0 rx_pkts=504576 USEDDSC=470 runout=0
+	 *   PRESSURE poll#101488 rx_done=0 rx_pkts=504576 USEDDSC=470 runout=0
+	 *
+	 * i.e. napi still polling ~61/s, the shared pool pinned near full,
+	 * DSCRUNOUT never latched, and not one frame delivered -- for 386 s,
+	 * until a power cycle. The box is unreachable the whole time.
+	 *
+	 * Signature: pool full AND zero frames delivered for two consecutive
+	 * windows. ★ The pool occupancy is what separates this from an idle box
+	 * -- idle measures USEDDSC ~138-146 on this board, a wedge 450+ -- so
+	 * "no RX" alone is deliberately NOT enough to trip it.
+	 */
+	{
+		static unsigned long stall_prev_rx;
+		static int stall_win, stall_hits;
+		static unsigned long stall_last_auto;
+
+		if (++stall_win >= 256) {	/* ~2.5s @ ~10ms ticks, as above */
+			u32 gd = REG32(GDSR0);
+			unsigned int used = (gd & GDSR0_USEDDSC_MASK) >> 16;
+			unsigned long rx = priv->dev->stats.rx_packets;
+
+			stall_win = 0;
+
+			if (used > 256 && rx == stall_prev_rx)
+				stall_hits++;
+			else
+				stall_hits = 0;
+			stall_prev_rx = rx;
+
+			if (stall_hits >= 2) {	/* ~5s pool-full with zero delivery */
+				stall_hits = 0;
+				pr_err("rtl819x: RX-STALL WEDGE detected (USEDDSC=%u, rx_packets frozen at %lu)%s\n",
+				       used, rx,
+				       fabric_autoreset ? " - auto recovery"
+						        : " - set fabric_reset=2 to recover");
+				/* Same holdoff convention as the FCS path above:
+				 * !stall_last_auto means "never fired" (INITIAL_JIFFIES
+				 * on MIPS would otherwise defer the first one), |1 keeps
+				 * the sentinel unambiguous. */
+				if (fabric_autoreset &&
+				    (!stall_last_auto ||
+				     time_after(jiffies, stall_last_auto + 5 * HZ))) {
+					stall_last_auto = jiffies | 1;
 					fabric_reset_mode = fabric_autoreset;
 					schedule_work(&priv->hang_work);
 				}
@@ -1217,14 +1309,39 @@ static int rtl819x_eth_poll(struct napi_struct *napi, int budget)
 	{
 		static unsigned long pc;
 		u32 gd = REG32(GDSR0);
+		unsigned int used = (gd & GDSR0_USEDDSC_MASK) >> 16;
+		bool runout = !!(gd & GDSR0_DSCRUNOUT);
+		bool pressure = runout || used > 256;
+		bool beat;
+
+		/* ★ Increment UNCONDITIONALLY. This used to sit in the third operand
+		 * of a ||, so short-circuit evaluation skipped it the moment
+		 * `pressure` was true -- i.e. poll# froze exactly when the box was in
+		 * trouble. A real wedge then logged the same "poll#20497" 2419 times,
+		 * which reads as "the napi loop has hung" when in fact only the
+		 * counter had stopped. It cost real diagnostic time; don't put side
+		 * effects back into this condition. */
+		beat = !(++pc & 0x3ff);
+
 		/* Descriptor-pool watch: log if the shared pool is filling (USEDDSC)
-		 * or has latched a run-out (DSCRUNOUT) - the large-frame drop signature
-		 * - as well as the periodic liveness heartbeat. */
-		if ((gd & GDSR0_DSCRUNOUT) || ((gd & GDSR0_USEDDSC_MASK) >> 16) > 256 ||
-		    !(++pc & 0x3ff))
+		 * or has latched a run-out (DSCRUNOUT) - the large-frame drop
+		 * signature - as well as the periodic liveness heartbeat. */
+		if (pressure)
+			/* ★ Rate-limited, and it must stay that way. `pressure` is true
+			 * on EVERY poll while the pool is full, and printk to a serial
+			 * console is synchronous. Unthrottled this measured 37.7 lines/s
+			 * = ~3772 B/s against a 3840 B/s (38400 8N1) console: 98% of the
+			 * line, with every napi poll blocking on the UART. The diagnostic
+			 * became a denial-of-service precisely when the box was already
+			 * under pressure, turning a degraded box into an unreachable one.
+			 * See the USEDDSC=451 episode in docs/ and issue #2. */
+			pr_err_ratelimited("rtl819x DP: PRESSURE poll#%lu rx_done=%d rx_pkts=%lu CPUIISR=%08x USEDDSC=%u runout=%d\n",
+					   pc, rx_done, dev->stats.rx_packets,
+					   REG32(CPUIISR), used, runout);
+		else if (beat)
 			pr_err("rtl819x DP: poll#%lu rx_done=%d rx_pkts=%lu CPUIISR=%08x USEDDSC=%u runout=%d\n",
 			       pc, rx_done, dev->stats.rx_packets, REG32(CPUIISR),
-			       (gd & GDSR0_USEDDSC_MASK) >> 16, !!(gd & GDSR0_DSCRUNOUT));
+			       used, runout);
 	}
 
 	return rx_done;
