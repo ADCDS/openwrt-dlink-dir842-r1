@@ -116,25 +116,39 @@ CPU ~99.7 % idle. As far as we know this is the first working mainline OpenWrt
   station's stale row), and re-verified live against the actual trigger that caused the
   first outage: 0% packet loss over a 610-second monitored trial with a hardware
   kill-switch armed. Full story: [`docs/SWITCH-AND-DATAPATH.md`](docs/SWITCH-AND-DATAPATH.md) §10.
-- **Persistent crash log** — pstore/ramoops (new in v1.1). An oops/panic now survives
-  the reboot `panic_on_oops`+`panic=3` already trigger, readable afterwards from
-  `/sys/fs/pstore/`. Getting it there safely meant fixing two bugs it exposed on real
-  hardware: `pstore_dump()` could call a blocking primitive from interrupt context,
-  turning a clean panic-reboot into a permanent hang (fixed); and, separately, a
-  boot-timing shift from ramoops made a pre-existing bug in the wired RX path 100%
-  reproducible on every fresh-flash boot — a still-hardware-owned RX cluster's
-  `skb_shared_info` was found clobbered with stray kernel console text at free time.
-  The driver now detects and safely clears a clobbered `skb_shared_info` instead of
-  freeing it as real, logging the region so the actual writer can eventually be
-  identified — a verified-safe mitigation, not yet a root-cause fix. Verified on
-  hardware: 100% reproducible crash-loop before the fix, clean boot to a working
-  shell after it, with the guard firing exactly once on the known clobbered cluster.
+- **Wired datapath survives a cold power-on** — ★ the headline fix in v1.2, and it is a
+  *removal*. v1.1 shipped a persistent crash log (pstore/ramoops); on this board an
+  attached ramoops wedges CPU-originated TX. On a hands-off power-on the box boots, serves
+  WiFi and shows perfectly healthy RX, while silently dropping **everything it originates**
+  on the wire — no ARP replies, no answer to its own pings. It looks alive and is
+  unreachable over wired LAN. v1.2 removes pstore entirely (core included) and restores
+  full `/memory`. Verified 6/6 on genuine hands-off power-cycle autoboots, 20/20 ARP
+  replies each, 0% ping loss.
+
+  ★ **Fixed by removal, not by understanding.** The mechanism is *not* established, and
+  v1.1's explanation of the related `skb_shared_info` clobber — a "boot-timing shift from
+  ramoops" — is **retracted**. Four different ways of making ramoops safe were each
+  measured and each still wedged TX: withholding the DRAM from the kernel outright so no
+  allocation can overlap it, `PSTORE_CONSOLE=n`, `unbuffered` (plain `ioremap` instead of
+  write-combining), and relocating the window off the top of DRAM. So it is not the
+  memory's ownership, its address, the mapping type, or the write volume. Full record,
+  including the one experiment that would move it forward:
+  [`docs/COLD-BOOT-TX-WEDGE.md`](docs/COLD-BOOT-TX-WEDGE.md) §9.
+
+  Two fixes from that work are kept: the `pstore_dump()` interrupt-context hang fix
+  (retained but inert, since `fs/pstore` is no longer compiled) and the driver's
+  `skb_shared_info` guard, whose writer was never confirmed.
 
 **Known limitations**
 
 - **Pre-production.** Everything above is measured on an isolated bench (one host on a
   LAN jack, one Pi on the WAN jack), not from months of running someone's house. It
   routes, but treat it as pre-production and keep your backup.
+- **No persistent crash log.** pstore/ramoops is off entirely — it wedges the wired TX
+  path on this board (see above). A panic still reboots via `panic_on_oops`+`panic=3`, but
+  leaves no readable record; capture crashes over the serial console instead. Re-enabling
+  it is not a matter of doing it "properly": four correct-looking ways were measured and
+  all still wedged. [`docs/COLD-BOOT-TX-WEDGE.md`](docs/COLD-BOOT-TX-WEDGE.md) §9.
 - **WAN ships as a DHCP client.** If your ISP needs PPPoE (or a static address), set it in
   LuCI — *Network → Interfaces → WAN*. Hardware offload follows a dynamic address: the
   ASIC's masquerade IP is reprogrammed from the live WAN IP per flow.
@@ -160,6 +174,10 @@ CPU ~99.7 % idle. As far as we know this is the first working mainline OpenWrt
   offloaded bulk TCP dying while ICMP passed — was a stale connected-route ARP binding,
   also fixed.)
 - `rtl819x: recovery level 3` fires ~2× per boot. Pre-existing, benign, unexplained.
+
+> ★ **Running v1.1? Upgrade.** v1.1 wedges CPU-originated TX on a cold power-on: the box
+> boots, serves WiFi and receives fine, but silently drops everything it originates on the
+> wire, so it is unreachable over wired LAN. v1.2 fixes it.
 
 ## Building
 
