@@ -22,7 +22,7 @@ Notes learned the hard way (see HANDOFF-5.md §4):
    ~/ekaza-t206m/device.json from the invoking user's home and silently fails
    to power-cycle under sudo, which looks like a boot timeout.
 """
-import os, sys, time, re, subprocess
+import os, sys, time, re, subprocess, threading
 
 SP = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 LOG = SP + "/dir842-uart.log"
@@ -65,14 +65,41 @@ def cmd(s, timeout=15):
 
 
 def catch():
+    # ★ Open the tty ONCE and write ESC in a loop.
+    #
+    # Two earlier versions both failed, each for its own reason, and both
+    # surfaced only as a bare "catch: FAIL" while the box power-cycled fine:
+    #
+    #  1. `printf "\033" > /dev/ttyUSB0` in a 25 Hz shell loop -- REOPENING the
+    #     tty that fast starves uart_daemon.py's read loop, so the loader banner
+    #     never reaches the log and waitfor() times out. (Verified: the same
+    #     power-cycle without the spam captures the banner perfectly.)
+    #  2. Spamming through the daemon's command file -- the daemon logs a marker
+    #     per send, which throttles it to ~8 Hz and floods the log.
+    #
+    # Writing to an already-open fd costs nothing and does not disturb the
+    # daemon's reads.
     flag = SP + "/esc-spam.flag"; open(flag, "w").close()
-    spam = subprocess.Popen(["bash", "-c",
-        f'while [ -f "{flag}" ]; do printf "\\033" > {TTY} 2>/dev/null; '
-        f'sleep 0.04; done'])
+
+    def spam_tty():
+        try:
+            f = open(TTY, "wb", buffering=0)
+        except OSError:
+            return
+        with f:
+            while os.path.exists(flag):
+                try:
+                    f.write(b"\x1b")
+                except OSError:
+                    return
+                time.sleep(0.04)
+
+    spam = threading.Thread(target=spam_tty, daemon=True)
+    spam.start()
     subprocess.run([TOMADA, "off"], capture_output=True); time.sleep(4)
     off = size(); subprocess.run([TOMADA, "on"], capture_output=True)
     ok = waitfor(r"Escape booting by user", off, 45)
-    os.remove(flag); spam.wait()
+    os.remove(flag); spam.join(timeout=2)
     print("catch:", "OK" if ok else "FAIL")
     if not ok:
         sys.exit(1)
