@@ -117,6 +117,12 @@ every right-hand one. Hashes marked **mirror** are in the publishable repo
 | 37 | ★★ R6: "the kernel excludes this range from the normal allocator" (the `ramoops` `/reserved-memory` node) | **FALSE, AND SILENTLY SO.** `arch/mips` (4.14) never `select`s `OF_RESERVED_MEM`, so `fdt_reserved_mem_save_node()`/`fdt_init_reserved_mem()` are no-op stubs: the node is matched and **nothing** is reserved, with no warning. ★ And forcing `OF_RESERVED_MEM=y` is **still** not enough — measured, non-image reserved moved 697K→700K, not +128K — because MIPS rebuilds all memory state in `bootmem_init()` from `boot_mem_map`, i.e. from the DT `/memory` node | `docs/COLD-BOOT-TX-WEDGE.md` §9.1-9.2 |
 | 38 | "`ramoops: attached 0x20000@0x3fe0000` in the boot log means the carve-out is working" | **PROVES ONLY THAT THE DRIVER BOUND.** `of_platform_default_populate_init()` special-cases ramoops and `ramoops_parse_dt()` reads `reg` straight from the DT — **the binding path never consults the reservation.** This log line was present throughout the entire three-session hunt while the memory was being handed to the allocator | `docs/COLD-BOOT-TX-WEDGE.md` §9.1 |
 | 39 | ★★ **Our own** §2 claim: "the wedge is ramoops overwriting DRAM the allocator handed to the rtl819x driver" | **RETRACTED THE SAME DAY IT WAS WRITTEN.** The overlap is real and was later *demonstrated* (`CPURPDCR0=03fe2000`, the RX ring inside the old ramoops window) — but it is not sufficient. Removing the overlap by every available means still wedges TX: `/memory` withheld so the region is outside the kernel map (5/5 pass with pstore off, **fail with it on**), `PSTORE_CONSOLE=n`, `unbuffered`, and relocating to a hole at 48 MB — 2/2 failing trials each. ★ The mechanism was inferred from one correlation and written up as settled; only the missing control (shrunk `/memory` **with pstore off**) exposed it | `docs/COLD-BOOT-TX-WEDGE.md` §9.6-9.8 |
+| 40 | ★★ "Both directions are weak, so the 5 GHz deficit fits a feedline/connector fault" | **WRONG, AND IT POINTED AT THE WRONG HALF OF THE RADIO.** The box's 5 GHz RX is healthy: across six 5 GHz neighbours seen by both the box and a fixed reference receiver in the same room it reads within ~7 dB, and it hears the main router on 5745 at -53 dBm. ★ RX and TX share one antenna and cable, and antenna loss is **reciprocal** — so healthy RX *proves* the antenna path good and excludes feedline/connector/pigtail faults entirely. The deficit is **TX-only**. The original claim rested on the AP's view of one roaming phone, never on a controlled measurement | `docs/WIFI-DUAL-BAND.md` |
+| 41 | "The blank efuse pins the TX index at max, ~10 dB above this unit's factory calibration, so the PA is over-driven into compression" | **REFUTED BY DIRECT SWEEP.** Forcing the base index 63/48/42/36/30 (live, via `iw reg set`) gives a monotonic, linear response — ~0.5 dB per step, 17 dB over 33 steps. 63 is genuinely the loudest setting, not a saturated one. ★ The corollary matters more than the retraction: writing this unit's real NOR calibration values (35-45) into rtw88 would cut 5 GHz output a further **10-14 dB**. The vendor MIB indices are not on rtw88's `max_power_index` scale. A plausible "we found the missing calibration!" fix would have made the bug worse | `docs/WIFI-DUAL-BAND.md` |
+| 42 | "The intermittent `write RF mode table fail` WARN early-returns, so the RF mode LUT is never programmed and TX is crippled" | **REFUTED BY READBACK.** RF `0x3e`/`0x3f` already held the correct `0x34`/`0x4080c` on a boot where the WARN fired — the driver probes twice and a later `config_trx_mode` succeeds. Writing the skipped sequence by hand changed nothing. ★ A failing WARN in the log is not proof the guarded work did not happen | `docs/WIFI-DUAL-BAND.md` |
+| 43 | ★★ "The board's true RFE type is one rtw88 cannot express; port the missing ODM `phy_reg_pg`/`txpwr_lmt` tables (types 4/12/15/16/17/18)" — this doc's **leading remaining explanation** for the 5 GHz deficit | **REFUTED once the stock firmware was actually read.** Both table families are **offsets applied to the base TX power index**, and this board's blank efuse saturates that base at 254 -> clamped to `max_power_index` 63 for every rate. Offsets can only bring power **down** from the ceiling; no table, correct or not, raises output above the 63 we already have. ★ Stock's `RFE_Init` also disassembles to **exactly** rtw88's `rtw8822b_phy_rfe_init` (same seven writes), and stock merely requests `5G_TxPower: "100"`. A session of table-porting would have produced a quieter radio and a confident wrong writeup | `docs/WIFI-DUAL-BAND.md`; stock kernel `adriel/dir842-firmware` |
+| 44 | ★★ "This board is RFE type 10, rtw88 configures it as type 2 and therefore assumes an external 5 GHz PA that does not exist — **that** is the 13 dB, so implementing type 10 will fix it" | **THE FACT IS RIGHT, THE CONCLUSION WAS WRONG.** The board really is type 10 (`CONFIG_SLOT_0_RFE_TYPE_10=y` in the vendor Makefile; `phydm_init_hw_info_by_rfe_type_8822b()` defines it as `EXT_PA=FALSE`, `BOARD_EXT_TRSW`). A type-10 entry was added to rtw88 — iFEM CCA/tables plus the eFEM external-TRSW pin config, the exact combination this board needs — built, flashed and measured: **0 dB ours-minus-ref vs +3..+12 for the shipped type 2, i.e. ~7 dB WORSE.** ★ rtw88 models no drive-level difference between eFEM and iFEM; the RFE type there selects only CCA thresholds, pin pattern and power *offsets*, and offsets cannot exceed the saturated `max_power_index` (see #43). The mechanism was written up as settled before it was tested — the same error as #39 | `docs/WIFI-DUAL-BAND.md` |
+| 45 | ★★ "rtw88's `max_power_index = 0x3f` is an artificial cap ~16 dB below the hardware; raising it recovers the 5 GHz deficit" | **REFUTED BY INTERLEAVING.** A one-directional sweep looked textbook -- ours-minus-ref -2 dB at cap 63 rising to +8 dB at 84 then declining at 96/112/127, i.e. an under-driven PA hitting compression -- and `tx_pwr_tbl` confirmed the raised indices really were written. An interleaved A/B/A/B gave deltas of **+7, 0, +1, -1 dB (mean +1.75)**, with one round drifting to -77 dBm at an unchanged configuration. ★ The shape was real; the *cause* was session drift sampled in a convenient order. Single-direction RF sweeps on this bench are not evidence -- interleave, always | `docs/WIFI-DUAL-BAND.md`; confound #28 |
 
 ### The ones that cost the most
 
@@ -389,6 +395,55 @@ frames **by source MAC**; never trust an interface total on a shared segment.
 despite `/proc/cmdline` showing the flag, both the macro and `early_param("memblock")`
 compiled in, and an unwrapped log buffer. **Cause not established.** Do not budget a cycle
 on this expecting a trace — use the `Memory:` line, which is direct and needs no flag.
+
+**#28 — RAW WIFI RSSI DRIFTS ENOUGH TO INVENT A RESULT.** Our 5 GHz AP, measured from a
+*fixed* receiver in the same room with no configuration change at all, read -58 to -70 dBm
+across one session and moved ~8 dB across a reboot, while the 2.4 GHz control on the same
+box stayed within 3 dB. Any A/B smaller than ~10 dB read from raw RSSI is noise. ★ Two
+separate `rfe_option` sweeps were run on this project; the first was single-sample raw RSSI
+and was **retracted as meaningless**, the second used the rule below and stands. Measure
+our AP **and a fixed reference AP on the same band in the same scan**, average several
+scans, and report the *difference* — that cancels receiver drift and band-wide conditions.
+`tools/bench/rf-measure.sh` does this. Related: #23.
+
+**#29 — `top -bn1` ON THIS BOX READS ~4x TOO HIGH AND NEARLY PRODUCED A HEADLINE.** During a
+~98 Mbit/s wifi transfer a single `top -bn1` sample reported **75 % sys / 25 % idle**, which
+was one step from being written up as "the 130 Mbit/s ceiling is the SoC's CPU doing software
+wifi bridging" — a tidy, plausible, and completely wrong conclusion. `/proc/stat` deltas over
+an 8 s window on the same transfer: **17 % busy, 82 % idle** (8 % busy with no traffic).
+`top`'s first sample has no previous sample to difference against, and the ssh + `top`
+processes themselves land inside a single instantaneous reading on a single-core MIPS box.
+★ **Measure CPU on this box with `/proc/stat` deltas over several seconds, never `top -bn1`.**
+Use `tools/bench/cpu-delta.sh`.
+
+**#30 — `pkill -f` STILL SELF-MATCHES, EVEN WITH THE `[x]` TRICK.** `pkill -f "[i]perf3 -s"`
+killed the invoking shell (exit 144) because the bracket trick only helps when the *pattern
+text* differs from the *target text* — here the same command line also contained a literal
+`iperf3 -s`, which the regex matches. ★ Do not `pkill -f` for a process whose name appears
+anywhere else in the same command. Bind a fixed port and let the old listener be, or match on
+a PID file.
+
+**#31 — SERIAL TX TO THE BOX IS DEAD, AND THIS TIME IT IS NOT THE DAEMON (cf. #24).**
+Confound #24 says an apparent "serial TX dead" was really a silently stalled `uart_daemon.py`,
+three times. That explanation does **not** cover the current state, and the distinguishing
+evidence is a single reboot in which BOTH facts appear in the same log window:
+
+* the box's bootloader banner is captured (`---Realtek RTL8197F boot code ... v3.4.11B`) --
+  **RX works**, and the daemon is demonstrably alive and writing;
+* `---Escape booting by user` **never appears** -- the ESC never takes.
+
+The daemon also logs `[[daemon sent b'\x1b'...]]` for every ESC, so the bytes leave the host.
+★ Diagnosis order that gets here fast, without power-cycling anything:
+1. `BAUD = 38400`, not 115200 (`console=ttyS0,38400`). At 115200 the log is pure garbage and
+   looks like a dead link.
+2. There is **no shell on the serial console** -- no tty line in `/etc/inittab` -- so a typed
+   `echo MARKER` will never echo back even when TX is perfectly healthy. **Do not use echo as
+   a TX test.** The only valid TX test is whether the *bootloader* escapes.
+3. Grep the log for `boot code at` vs `Escape booting by user` around one reboot. Banner
+   present + escape absent = TX dead. Both present = TX fine.
+★ Consequence: `loader.py catch` cannot work, so there is **no bootloader recovery path**, and
+no destructive flash (e.g. writing stock back over the firmware partition) may be attempted
+until the TX wire/adapter is physically checked.
 
 ---
 

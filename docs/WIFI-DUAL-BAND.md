@@ -776,7 +776,14 @@ cold-boot cost above does not apply to you.
 
 ---
 
-## ★ 5 GHz is ~13-15 dB quieter than it should be — measured, and five explanations refuted
+## ★ 5 GHz is much quieter than it should be — measured, and nine explanations refuted
+
+> ★ **Read the later subsections first.** Everything down to "A measurement warning" was
+> measured with a hand-held phone before a fixed receiver existed. The "13-15 dB" figure
+> below is **superseded** — with a fixed receiver the gap is roughly 15-30 dB depending on
+> the boot — and the conclusion that the fault is bidirectional is **retracted** (it is
+> TX-only). The findings that stand are in "Instrumentation solved" onward.
+
 
 **Symptom:** a client in the SAME ROOM as the box measures the 5 GHz AP at **-67 to -81 dBm**
 and speedtests at ~130 Mbit/s. The link negotiates `VHT-MCS 7 80MHz NSS 1` (292.5 Mbit/s
@@ -929,20 +936,479 @@ etc.) is LOWER than 63 and would reduce output. And an over-driven PA would show
 RSSI with poor EVM, not the low RSSI actually measured. The power-index path is therefore
 ruled out as the cause of the deficit; the loss is downstream of it.
 
-### ★ Blocked on instrumentation, not on ideas
+### ★ Instrumentation solved — `tiny`, and a drift-free metric
 
-There is currently **no 5 GHz receiver on the bench**: the phone (the only 5 GHz client) was
-disconnected from USB, and the host's USB adapter is a Ralink RT3070 reporting **0** 5 GHz
-channels. Since raw RSSI also swings ~20 dB with client position, any change made now would
-be unverifiable, and shipping an unverified RF change is precisely what
-`RETRACTIONS-AND-METHOD.md` exists to prevent.
+The blocker above (no fixed 5 GHz receiver) is **solved**. `tiny` is a Raspberry Pi 4
+in the same room as the box, on mains power, at a fixed position, reachable over
+`ssh tiny`. It scans 5 GHz fine (its `wlan0` Band 2 lists ch36 at 17 dBm; an early
+"0 channels" reading was a grep artefact, not a capability limit).
 
-To resume, one of these is needed:
-1. A 5 GHz client at a **fixed** position, measured with the ours-minus-reference delta
-   (both APs in the same scan) rather than raw RSSI.
-2. A physical check of the 8822BE's u.FL pigtails and card seating. ★ Both directions are
-   weak -- the AP hears the client poorly *and* the client hears the AP poorly -- which fits
-   a feedline/connector fault better than a PA-only fault, since a PA fault degrades TX
-   alone.
-3. Determining the board's true RFE type from the stock ODM driver and porting the missing
-   `phy_reg_pg` / `txpwr_lmt` tables (types 4/12/15/16/17/18 are absent from rtw88).
+Two rules make its numbers trustworthy, and both are load-bearing:
+
+1. **Average several scans.** Single scans move 2-4 dB.
+2. **Report ours MINUS a fixed reference AP seen in the same scan.** Raw RSSI drifted
+   ~6 dB over one session for an unchanged config, and ~8 dB across a reboot, while
+   the 2.4 GHz control stayed put. `50:4f:3b:32:68:9f` on 5180 is the reference in
+   use; our own 2.4 GHz radio is the cross-band control. ★ That reference is **another
+   BRAVO AP in this house, co-channel with us on 5180** — not a neighbour, as an earlier
+   draft of this section said. It is still a valid fixed reference (that is all the
+   metric needs), but do not read "we beat the reference by N dB" as beating a stranger.
+
+`tools/bench/rf-measure.sh` implements this. **Do not compare raw RSSI across
+reboots** — that is the trap that invalidated the first `rfe_option` sweep.
+
+### ★★ The deficit is TX-ONLY — this corrects the conclusion above
+
+The previous section's remaining hypothesis 2 said *"Both directions are weak (the AP
+hears the client poorly too), which fits a feedline/connector fault."* **That is wrong,
+and the correction matters because it rules out a whole class of causes.**
+
+The box's own 5 GHz receiver is healthy. Scanning from the box (`iw dev wlan1 scan`)
+and from `tiny` in the same room, across six 5 GHz neighbours seen by both, the box
+reads **2-13 dB lower (mean ~7 dB)** — ordinary receiver/antenna variation, not a
+fault. The box hears the house's main router on 5745 at **-53 dBm**, and hears it
+*louder* than that router's 2.4 GHz radio (-58 dBm).
+
+★ **RX and TX share the same antenna, cable and connector, and antenna loss is
+reciprocal.** A feedline, connector, pigtail or antenna fault degrades both directions
+equally. RX is fine, so **the antenna path is proven good and cannot be the cause.**
+The fault lies in the non-reciprocal part of the chain only: the PA, the T/R switch in
+its transmit state, or the transmit baseband.
+
+Measured, same receiver, same room, same instant:
+
+| transmitter | distance | RSSI at `tiny` |
+|---|---|---|
+| our box, **2.4 GHz** (`rtl8192cd`) | same room, ~3 m | **-32 dBm** |
+| our box, **5 GHz** (rtw88 8822BE) | same room, ~3 m | **-62 to -70 dBm** |
+| a **neighbour's** 5 GHz AP, another home | through walls | **-55 dBm** |
+
+★ A neighbour's AP behind walls beats our same-room AP.
+
+★ **Quote the band delta, not a single figure.** Our 2.4 GHz minus our 5 GHz — same box,
+same room, same receiver, same scan — measured **24 to 38 dB** across this session, where
+the frequency ratio alone accounts for ~6.5 dB. The spread is real boot-to-boot variance
+in the 5 GHz radio (the 2.4 GHz control held within 3 dB throughout), so the honest
+statement is **roughly 15-30 dB unexplained, varying by boot**, not a single number. As a
+cross-check against free-space loss (~56 dB at 5.18 GHz over ~3 m), a 17 dBm transmitter
+should read ~-39 dBm: the 2.4 GHz radio lands within ~4 dB of its own such prediction on
+every boot, the 5 GHz radio between ~19 dB (best boot) and ~31 dB (worst) below its own.
+★ The absolute figures assume an estimated distance and a nominal 2.4 GHz TX power, so
+they are supporting evidence; the band delta and the ours-minus-reference delta are the
+measurements that carry the argument.
+
+### ★ Four more explanations refuted, with a working instrument
+
+| hypothesis | test | result |
+|---|---|---|
+| The `write RF mode table fail` WARN skips the RF mode LUT, leaving TX unprogrammed | read RF `0x3e`/`0x3f` back, then write the skipped sequence by hand via `rf_write` | **REFUTED** — the LUT *already* held the correct values (`0x34`, `0x4080c`). The driver probes twice and a later `config_trx_mode` succeeds. Re-writing changed nothing (-60 -> -58, inside noise) |
+| eFEM vs iFEM T/R switch word mis-drives the antenna switch on transmit | poke `REG_TRSW` `0xca0` from `0xa501` (eFEM) to `0xa5a5` (iFEM 5G) live, measure, restore | **REFUTED** — no effect (-64/-65 either way). ★ Unlike `0xcb0`, `0xca0` *is* pokeable with `write_reg` and the value sticks |
+| The PA is over-driven into compression: a blank efuse pins the index at max, ~10 dB above this unit's factory calibration, so output collapses | `txpwr_base_override` swept 63/48/42/36/30, re-applied live with `iw reg set` | **REFUTED, decisively** — response is monotonic and linear, ~0.5 dB per index step (17 dB over 33 steps). 63 is genuinely the loudest setting. ★ See the warning below: this also proves the factory values must NOT be written into rtw88 |
+| A different RFE type is correct for this board | `rfe_option_override` 2/3/5, one reboot each, drift-free metric | **REFUTED** — 2 (the shipped guess) is best by 6-10 dB: ours-minus-ref **+3..+9 (2)**, **-4 (3)**, **-2 (5)**. This *replaces* the earlier single-sample sweep, which was noise; the ranking happens to agree, but only now is it evidence |
+
+### ★★ This unit's factory RF calibration exists — in NOR, not the efuse
+
+The efuse is blank, but the per-unit calibration is **not missing**. It is in the
+read-only `mtd1` "MAC" partition (64 KB), which `sysupgrade` never touches:
+
+```
+0x0d8..0x118   2.4 GHz TX power indices: four 14-entry tables (14 = 2.4 GHz channels)
+               runs 46x9 48x5 | 45x3 46x6 47x5 | 41x9 43x5 | 41x9 43x5   -> values 41-48
+0x11e..0x13e   two 14-byte tables: 35 x14, 68 x14
+0x13e..0x142   39 49 35 24   <- the xcap/thermal bytes (already known)
+0x171..0x200   5 GHz per-channel TX power indices -> values 35-42
+0x235..0x2c8   5 GHz per-channel TX power indices -> values 35-45
+0x2f9..0x366   17 (0x11) x109
+```
+
+★ **This explains why 2.4 GHz is healthy and 5 GHz is not.** The 2.4 GHz radio is the
+vendor `rtl8192cd` driver, which reads this MIB partition, so it transmits at its
+calibrated 41-48. rtw88 reads only the (blank) efuse, so 5 GHz has no per-unit data.
+
+★★★ **Do NOT "fix" this by feeding the NOR values into rtw88's `txpwr_idx_table`.**
+It is the obvious move and it is measurably wrong. The sweep above shows index and
+output are linear with 63 the maximum, so writing 35-45 would cut 5 GHz output by a
+further **10-14 dB**. The two scales are not the same quantity: the vendor MIB indices
+are the ODM driver's units, not rtw88's `max_power_index = 0x3f` scale. Confirmed by
+experiment, not argued from theory.
+
+### ★★ Two-way link budget — the strongest evidence, and it needs no assumptions
+
+Associating a client to our own 5 GHz AP gives both directions across **one reciprocal
+path**, so path loss, distance and antenna gain all cancel. With `tiny` associated:
+
+| direction | measured |
+|---|---|
+| our AP -> tiny (client's view) | **-60 dBm** |
+| tiny -> our AP (`station dump`) | **-52 dBm**, avg -49 |
+
+Path loss is identical both ways, so `TX_ap - TX_tiny = -60 - (-52) = -8 dB`:
+★ **our AP transmits about 8 dB less than a Raspberry Pi 4's onboard Wi-Fi.** A router
+with external antennas should beat an RPi by several dB, so the true shortfall is ~13 dB.
+This is the cleanest statement of the deficit in this document — no estimated distance,
+no free-space model, no cross-receiver calibration.
+
+★ `station dump` also showed `signal: -52 [-64, -52]`, a 12 dB spread between the two RX
+chains. **Do not build on that** — it is one instantaneous sample and the per-chain TX
+test below found the chains equal; treat it as multipath at that instant unless it
+reproduces.
+
+### ★ Per-chain test — no dead chain (and it closes a hole in the reciprocity argument)
+
+The reciprocity argument above proves the *shared passive path* is good, but RX combines
+both chains, so **a single dead TX chain could hide behind the good one on receive.**
+That gap was closed by testing each chain alone. ★ `iw phy1 set antenna` returns
+`-122 Not supported` while the AP is running — it must be done with the radio down
+(`wifi down` -> `iw phy1 set antenna <tx> <rx>` -> `wifi up`); an earlier attempt that
+skipped this silently measured the default config three times.
+
+| config | ours-minus-ref |
+|---|---|
+| TX/RX path A only (`1 1`) | **+11 dB** |
+| TX/RX path B only (`2 2`) | **+11 dB** |
+| both (`3 3`, default) | **+12 dB** |
+
+Both chains are individually healthy and equal, and one chain alone radiates essentially
+what two do. **No dead chain, and no per-chain fault to fix.**
+
+### ★★ Throughput is NOT limited by the 5 GHz link, and NOT by the box's CPU
+
+The complaint that started this ("speedtest tops at 130 Mbit/s") is a separate question
+from the signal deficit, and both obvious explanations are wrong:
+
+| PHY rate | width | TCP throughput |
+|---|---|---|
+| 351 Mbit/s (VHT-MCS8) | 80 MHz, ch36 | 105 Mbit/s |
+| 200 Mbit/s (VHT-MCS9) | 40 MHz, ch48 | 97.5 Mbit/s |
+
+★ **Throughput is flat across a 1.75x change in PHY rate.** Whatever limits it is not the
+radio link. The RPi4's onboard Wi-Fi caps around 100-120 Mbit/s and is the likely ceiling
+*in this test* — note the user's phone reached 130, i.e. more than `tiny` can do, so
+**`tiny` cannot be used to characterise the box's maximum throughput.**
+
+★★★ **The box is not CPU-bound.** Measured with `/proc/stat` deltas over an 8 s window:
+**8 % busy idle, 17 % busy (82 % idle) during a ~98 Mbit/s transfer.** See confound #29 —
+a single `top -bn1` sample during the same transfer read "75 % sys, 25 % idle" and was
+nearly written up here as "the throughput ceiling is the SoC's CPU". It is not.
+
+### ★ `config_trx_mode`'s early return is fully accounted for
+
+The `write RF mode table fail` WARN early-returns from `rtw8822b_config_trx_mode()`. Every
+TX-path register (`REG_AGCTR_A/B`, `REG_CDDTXP`, `REG_TXPSEL`, `REG_TXPSEL1`, `REG_ADCINI`,
+`REG_RXDESC`, `REG_RXPSEL`) is written **before** the poll. The return skips only
+`rtw8822b_toggle_igi()` and `rtw8822b_set_channel_cca()` (both RX-side), the RF mode LUT
+(proven already correct) and `set_channel_rfe()` (proven applied later). ★ **Nothing
+TX-critical is skipped**, so the intermittent WARN cannot explain the deficit or the
+boot-to-boot variance.
+
+### ★★★ The stock firmware, and what it settles
+
+The stock 8 MB NOR backup is in the private gitea repo **`adriel/dir842-firmware`** (full
+dump, per-mtd slices, extracted rootfs, `RESTORE-TO-STOCK.md`). ★ Clone it over **HTTPS**
+-- `ssh://git@gitea.adr:2222` times out.
+
+```
+git clone https://gitea.adr/adriel/dir842-firmware.git
+# kernel is raw LZMA at offset 0x3818 inside mtd3-kernel.bin:
+dd if=mtd3-kernel.bin bs=1 skip=$((0x3818)) of=k.lzma
+python3 -c "import lzma;open('vmlinux.bin','wb').write(
+  lzma.LZMADecompressor(format=lzma.FORMAT_ALONE).decompress(open('k.lzma','rb').read()))"
+```
+
+★ **`mtd1-MAC.bin` in the repo is byte-identical to what this box reports live**
+(`md5 ed88837e88b54d5f160b1a5d12f3c699`), which independently validates the calibration
+decode above.
+
+**Stock carries the complete 8822B ODM in-kernel** -- `odm_read_and_config_mp_8822b_
+{phy_reg_pg,txpwr_lmt}_type{2,3,4,5,12,15,16,17,18}` -- i.e. every RFE type rtw88 lacks.
+It drives the 8822B from the **vendor `rtl8192cd` driver**, not a separate module, and
+hard-codes this board's settings (`hard_code_8822_mibs`, `set_8822_trx_regs` are
+`rtl8192cd` symbols). That is how stock works with a blank efuse.
+
+★★★ **And it settles the previous "leading remaining explanation": porting those tables
+CANNOT fix this.** `phy_reg_pg` (power-by-rate) and `txpwr_lmt` (regulatory limit) are both
+**offsets applied to the base index**, and this board's base saturates at 254 -> clamped to
+`max_power_index` 63 for every rate. Offsets can only bring power **down** from that
+ceiling. No RFE-type table, correct or not, can raise output above index 63 -- which we
+already have. ★ This is the same trap as the NOR calibration values: an obvious,
+plausible "we found the missing data!" fix that measurement shows would only make it
+quieter. **Do not spend a session porting ODM tables to chase this deficit.**
+
+Two further comparisons against stock, both negative:
+
+| checked | result |
+|---|---|
+| Stock's `RFE_Init` vs rtw88's `rtw8822b_phy_rfe_init` | **IDENTICAL** -- disassembly of the stock function shows the same seven writes in the same order: `0x64` mask `0x30000000` = 3, `0x4c` mask `0x06000000` = 0, `0x40` bit2 = 1, `0x1990` mask `0x3f` = `0x30`, `0x1990` bits 11:10 = 3, `0x974` mask `0x3f` = `0x3f`, `0x974` bits 11:10 = 3 |
+| Stock's requested TX power | `"5G_TxPower": "100"` in `/etc/config.default` -- 100 %, exactly what we ask for |
+
+### ★ RFE pad polarity swept — the front-end control is live and already correct
+
+`REG_RFEINV` (`0xcbc`) bits 0-5 invert the six RFE output pads that drive the external
+front end. If a PA-enable pad were the wrong way round, flipping it would switch the PA on.
+Swept live (`write_reg`, baseline `0x100`):
+
+| RFEINV | ours-minus-ref |
+|---|---|
+| `0x100` (baseline, pads as rtw88 sets them) | +4 dB |
+| `0x101` / `0x102` bits 0,1 | +5 / +3 dB |
+| **`0x104` bit 2** | **-10 dB** |
+| `0x108` / `0x110` / `0x120` bits 3,4,5 | +6 / +6 / +8 dB |
+| `0x13f` all six | -9 dB |
+
+★★ **Pad 2 is load-bearing: inverting it costs 14 dB.** That pad carries the PA-enable /
+T-R control, and rtw88's existing polarity is the correct one. So there is no fix here --
+but it is positive evidence that **the RFE pad path is wired, live and correctly driven**,
+which together with the identical `RFE_Init` means the front-end *control* is not the fault.
+
+### ★★★★ ROOT CAUSE: this board is RFE type 10, and rtw88 configures it as type 2
+
+The answer was in this repo the whole time. `files/target/linux/realtek/files-4.14/
+drivers/net/wireless/rtl8192cd/Makefile` records the vendor build flags for this board:
+
+```
+# (G4) CONFIG_SLOT_0_8822BE=y
+# (G4) CONFIG_SLOT_0_RFE_TYPE_10=y      <- the DIR-842's 8822BE is RFE TYPE 10
+```
+
+and the vendor PHYDM defines what type 10 *is*
+(`phydm/rtl8822b/phydm_hal_api8822b.c`, `phydm_init_hw_info_by_rfe_type_8822b()`):
+
+| | **type 10 — what this board IS** | **type 2 — what rtw88 assumes** |
+|---|---|---|
+| comment | `QFN iFEM AP PCIE` | eFEM |
+| BOARD_TYPE | `ODM_BOARD_EXT_TRSW` | `EXT_LNA_5G \| EXT_PA_5G` |
+| `5G_EXT_PA` | **FALSE** | **TRUE** |
+| `5G_EXT_LNA` | **FALSE** | TRUE |
+| PACKAGE_TYPE | 1 | 2 |
+
+★★★ **rtw88 believes there is an external 5 GHz power amplifier on this board. There is
+not.** The only external RF part is a **T/R switch**. That mismatch is a real, documented
+defect in how we configure this board.
+
+★★★★ **But it is NOT, by itself, the 13 dB — correcting it was tried and made things
+worse.** The tempting mechanism ("eFEM mode makes the chip drive low expecting external
+gain") was written here first and then **tested**: a type-10 entry was added to rtw88
+(iFEM CCA/tables + the eFEM external-TRSW pin config, the combination this board actually
+needs), built, flashed and measured. Result: **ours-minus-ref 0 dB, versus +3..+12 for the
+shipped type 2** -- i.e. ~7 dB *worse*, landing alongside the other iFEM options. See
+retraction #44. ★ The reason is that rtw88 **does not model a drive-level difference
+between eFEM and iFEM at all**: in rtw88 the RFE type selects only CCA thresholds, the RFE
+pin pattern, and `bb_pg`/`txpwr_lmt` offsets -- and those offsets cannot raise output past
+the already-saturated `max_power_index`. The ODM behaviour that *would* differ lives in the
+vendor PHYDM's gain/AGC handling, which rtw88 has no equivalent of.
+
+★★ **It also explains the result that made no sense before: why rtw88's iFEM options
+measured WORSE.** rtw88 has exactly two shapes and this board fits neither:
+
+| rtw88 option | ext-PA assumption | ext-TRSW handling | measured |
+|---|---|---|---|
+| **2** (eFEM) — shipped | **wrong** (assumes ext PA) | drives TRSW `0xa501` — works with the real ext TRSW | best available, still ~13 dB low |
+| **3 / 5** (iFEM) | right (no ext PA) | sets TRSW `0xa5a5`, i.e. no ext TRSW — **wrong for this board** | 6-10 dB worse |
+
+★ So the shipped guess is best not because it is right, but because *its* error costs less
+than the other error -- and that ranking held up when the "correct" shape was actually
+built and measured:
+
+| rfe_option | ours-minus-ref |
+|---|---|
+| **2 (eFEM, shipped)** | **+3 .. +12 dB** |
+| 3 (iFEM) | -4 dB |
+| 5 (iFEM ext) | -2 dB |
+| **10 (iFEM + ext TRSW, purpose-built for this board)** | **0 dB** |
+
+★★ **Type 2 remains the right thing to ship**, on measurement, despite being the
+theoretically wrong description of the hardware. The board being type 10 is a true and
+useful fact; "therefore configure rtw88 as type 10" is a false conclusion from it.
+
+★★ This supersedes the earlier note that "the board's true RFE type is unknown, and if it
+is 4/12/15/16/17/18 rtw88 cannot represent it". The type is **10**, it is *also* absent from
+rtw88, and the reason it hurts is **not** the missing power tables (those are offsets and
+cannot raise output past the saturated maximum — retraction #43) but the **eFEM/iFEM
+front-end assumption**.
+
+### ★★★ The vendor's own config for this board measures WORSE — the contradiction that ends the software hunt
+
+Reading the vendor PHYDM's RFE pin function (`phydm_rfe_8822b()`,
+`phydm/rtl8822b/phydm_hal_api8822b.c`) settles what type 10 is *supposed* to write.
+Type 10 shares a branch with types 0/3/5/8/12/13/14, and for 5 GHz (`channel > 35`) it
+writes:
+
+| register | vendor, type-10 group | rtw88 `rtw8822b_set_channel_rfe_ifem` |
+|---|---|---|
+| `0xcb0` RFESEL0 | `0x477547` | `0x477547` ✓ |
+| `0xcb4` RFESEL8 byte1 | `0x75` | `0x75` ✓ |
+| `0xcbc` RFEINV bits 5:0 / 11:10 | `0x0` / `0x0` | `0x0` / `0x0` ✓ |
+| `0xca0` TRSW | **`0xa5a5`** | **`0xa5a5`** ✓ |
+
+★★★★ **rtw88's iFEM path already reproduces the vendor's configuration for this board
+exactly** -- and on this unit that configuration measures **6-10 dB WORSE** than the eFEM
+config rtw88 picks by accident (options 3/5/10: -4/-2/0 dB; option 2: +3..+12 dB).
+
+★★ That is a direct contradiction between *what the vendor says this board is* and *what
+actually performs best on this unit*, and it is not resolvable by reading more source.
+Only two explanations remain, and both are outside rtw88:
+
+1. **The unit does not match its nominal board type** -- a hardware variance or fault in
+   the 5 GHz transmit chain, which would also explain why eFEM (a configuration that
+   assumes an external gain stage) happens to suit it better.
+2. **The type-10 attribution is wrong.** It comes from a commented `# (G4)
+   CONFIG_SLOT_0_RFE_TYPE_10=y` line in the vendor Makefile; it is good evidence but not
+   proof of *this* unit's strap.
+
+★★★ **Both are settled by the same experiment, and only by it: flash stock and measure.**
+Everything needed is now on hand -- `adriel/dir842-firmware` has the verified 8 MB dump
+and per-mtd slices, serial/loader recovery works, and `known-good-images/` restores us.
+★ Note `RESTORE-TO-STOCK.md` in that repo is **stale**: it says the port is "RAM-boot only
+-- it never writes flash", which stopped being true at v1.1. Restoring stock now means
+writing the firmware partition, not just power-cycling.
+
+### ★★★★★ THE STOCK A/B — RUN AT LAST. The hardware is FINE; stock is 17 dB louder
+
+Stock was flashed back onto this unit and measured with the same fixed receiver in the
+same session. **This settles the question the whole hunt was blocked on.**
+
+| firmware | 5 GHz ch | 5 GHz at `tiny` | 2.4 GHz at `tiny` (control) |
+|---|---|---|---|
+| **stock D-Link** | 149 (5745) | **-42 dBm** (-42,-42,-44,-43,-41) | -33..-41 |
+| **our OpenWrt** | 36 (5180) | **-59 dBm** (-59,-60,-60,-60) | -32..-38 |
+
+★★ The **2.4 GHz radio reads the same on both** -- it is the same SoC WMAC driven by the
+same vendor driver in both firmwares -- which validates receiver, position and geometry.
+Against that control, **stock's 5 GHz is ~17 dB stronger on this exact unit.**
+
+★★★★ **Therefore the 8822BE transmit chain is NOT faulty.** Every "maybe it is hardware"
+line of reasoning in the sections above is closed: the same board, same antennas, same
+room produces -42 dBm under stock. The deficit is **software**.
+
+### ★ What stock does differently (measured, not inferred)
+
+* **It uses channel 149, which OpenWrt refuses.** `iw phy1 info` reports
+  `5745 MHz [149] (20.0 dBm) (no IR)` under `country BR` -- **no-IR = may not initiate
+  radiation**, so `wifi reload` on ch149 leaves the radio down and the AP never starts.
+  Stock ignores this and its own ACS actively prefers 149
+  (`d-link channel[36+40+44+48] = 1400` vs `channel[149+153+157+161] = 800`).
+* **It loads `PHY_REG_PG_8822Bmp_Type0`** -- PG **type 0**. rtw88 has `bb_pg` types 2/3/5
+  only; there is no type 0 for 8822b.
+* ★★★ **It transmits at a LOWER power index than we do and is louder.** Stock's live
+  `/proc/wlan0/mib_rf`:
+
+```
+pwrlevel5GHT40_1S_A: ...2a2a2a2a 29292929 28282828...   (42, 41, 40)
+pwrlevel5GHT40_1S_B: ...2d2d2d2d 2c2c2c2c 2b2b2b2b...   (45, 44, 43)
+TXPowerOffset: 2     txpwr_reduction: 0
+```
+
+  These are **exactly the NOR MAC-partition values decoded earlier**. Stock runs index
+  ~40-45 and reaches -42 dBm; rtw88 runs index **63** (its maximum) and reaches -59.
+  ★ The two index scales are therefore **not the same quantity**, which is the measured
+  proof behind retraction #41's warning: copying the NOR numbers into rtw88 lowers output.
+* The board string confirms the front end: `MIPS: machine is 8197F(PA=0) 8812B(PA=0) 8367R`
+  -- **PA=0, no external PA**, matching RFE type 10.
+
+### ★ The honest limit of this A/B
+
+Stock could not be pinned to ch36: a D-Link channel selector re-picks 149 about 9 s after
+every interface restart, and it survives `acs_type=0` and `killall iwcontrol`. So the two
+sides differ by channel, and **part of the 17 dB is regulatory** -- OpenWrt is capped at
+17 dBm on ch36 while ch149 permits more. That cannot account for all of it (the 2.4 GHz
+control is identical, and higher frequency costs slightly *more* path loss), but the split
+between "regulatory band" and "driver deficit" is **not yet separated**. What is settled
+beyond doubt is the part that mattered: **the hardware can do far better than rtw88 gets
+out of it.**
+
+★ Bench notes: `tiny` cannot scan UNII-3 under `country BR`; `sudo iw reg set US` makes
+5745 visible (set it back afterwards). Stock has a **BusyBox shell on the serial console**
+(unlike our OpenWrt, which has no getty), so `/proc/wlanN/*` can be read live. Stock also
+boots as a **router with dnsmasq on 192.168.1.1** -- kill `dnsmasq`/`tinysvcmdns`/`locdns`
+immediately after boot or it serves rogue DHCP on the house LAN.
+
+### ★ Separating "band" from "driver" — ~14 dB is the driver, only ~3 dB is regulatory
+
+Under `country BR` this radio may legally *initiate radiation* on **only** ch36/40/44/48,
+all at **17 dBm**; every other 5 GHz channel is `no IR` (the DFS ones for lack of radar
+support, 149-165 outright):
+
+```
+* 5180/5200/5220/5240 MHz [36/40/44/48]  (17.0 dBm)
+* 5260..5700 MHz                          (20.0 dBm) (no IR, radar detection)
+* 5745..5825 MHz [149..165]               (20.0 dBm) (no IR)
+```
+
+Stock runs ch149 at a 20 dBm ceiling; we run ch36 at 17 dBm. **That is at most a 3 dB
+regulatory advantage** -- and 5745 costs ~1 dB *more* path loss than 5180 -- yet stock
+measured **17 dB** stronger. ★★ So roughly **14 dB is a driver deficit, not a band or
+regulatory one.** Unlocking ch149 (a compliance decision, not a technical one) would buy
+only ~3 dB; it is not the fix.
+
+### ★ Refuted: rtw88's `max_power_index` is NOT an artificial cap
+
+The obvious follow-up: stock reaches -42 dBm at index ~40-45 in vendor units while rtw88
+runs its own maximum 63 and reaches -59, and the earlier base sweep was linear to 63 with
+no visible saturation -- so perhaps `max_power_index = 0x3f` caps us below the hardware.
+A `txpwr_cap_override` was added to raise the clamp, and `tx_pwr_tbl` confirmed indices of
+72/84/96/112/127 really were written.
+
+A first sweep looked spectacular -- ours-minus-ref -2 dB at 63 rising to +8 dB at 84, with
+a decline beyond, exactly the shape of an under-driven PA reaching compression. ★★★ **It
+did not survive an interleaved A/B:**
+
+| round | cap 63 | cap 84 | delta |
+|---|---|---|---|
+| 1 | -2 | +5 | **+7** |
+| 2 | +4 | +4 | 0 |
+| 3 | -10 | -9 | +1 |
+| 4 | -1 | -2 | -1 |
+
+**Mean delta +1.75 dB, spread -1..+7.** Round 3 shows the whole session drifting to -77/-76
+with no configuration change at all. The apparent +10 dB was drift, and the single-direction
+sweep was the wrong experiment. ★ **Always interleave A/B/A/B here; a monotonic-looking
+sweep in one direction is worthless against this noise floor** (confound #28).
+
+### Where this leaves the 5 GHz signal — still unfixed, but the search space is much smaller
+
+Everything rtw88 controls has now been measured rather than reasoned about, and all of
+it is correct: maximum power index (and linear response proving it *is* the maximum),
+correct eFEM registers, correct RF mode LUT, both paths live, best of the three
+available RFE types, right channel and bandwidth. **The 5 GHz deficit is real,
+TX-only, roughly 15-30 dB depending on the boot, and is not fixed.**
+
+What remains is no longer a config change:
+
+0. ★ **Nothing in rtw88 is left to try.** Every knob it exposes has now been *measured*,
+   not reasoned about: power index (maxed, and proven linear so it really is the maximum),
+   RFE type (all three, best one shipped), front-end and T/R switch registers (read back
+   correct), RF mode LUT (correct), both RF chains (equal, neither dead), and the one
+   intermittent init failure (skips nothing TX-critical). The two-way link budget puts the
+   shortfall at ~13 dB against an RPi4. **A software fix in rtw88 is ruled out**, which is
+   a result rather than a gap.
+
+1. ~~**Port the board's true RFE type tables from the stock ODM driver.**~~
+   ★ **REFUTED — see "The stock firmware, and what it settles" above.** The stock driver
+   was obtained and read; its tables are offsets against a base that already saturates at
+   maximum, so they can only reduce output. This was the previous leading explanation and
+   it is now closed.
+2. **A hardware fault in the transmit-only chain** (PA or T/R switch). Now the leading
+   physical candidate, because reciprocity has excluded the antenna and feedline.
+3. ★ **A stock-firmware A/B is still the one experiment that would settle whether this
+   unit's 5 GHz was EVER better.** It remains an untested assumption that it was.
+
+### Bench technique learned here
+
+* **Module parameters survive a reboot via `/etc/modules.d/<pkg>`**, not
+  `/etc/modprobe.d/` — OpenWrt's kmodloader ignores the latter. Append options to the
+  module's own line: `rtw88_8822b rfe_option_override=3`. Verified working.
+* **`iw reg set <cc>` re-applies TX power live.** `rtw_regd_notifier()` calls
+  `rtw_phy_set_tx_power_level()`, so a power-affecting module parameter can be swept
+  at runtime with no reboot and no module reload — which the `rmmod` warning above
+  otherwise rules out.
+* To re-run any of this, re-enable `RTW88_DEBUG`/`RTW88_DEBUGFS` with
+  `config-y += RTW88_DEBUG RTW88_DEBUGFS` in `openwrt/package/kernel/mac80211/realtek.mk`,
+  and re-add the two diagnostic module parameters (`rfe_option_override` in `rtw8822b.c`'s
+  `read_efuse`, `txpwr_base_override` overriding `*base` in `rtw_get_tx_power_params()`).
+  ★ All three were **reverted from the tree after this session** and deliberately never
+  placed in `files/`: `openwrt/` is not scratch space — `cp -a files/. openwrt/` is
+  add-only, so a patch left in `openwrt/` persists and one once shipped in a release
+  (see `RETRACTIONS-AND-METHOD.md`). Rebuild with
+  `make package/kernel/mac80211/{clean,compile}` then `make`; the box takes the image by
+  `scp -O -l 4000` + `sysupgrade -n` (there is no `nohup` on the box — run `sysupgrade`
+  in the foreground and let ssh drop).
