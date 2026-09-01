@@ -1379,22 +1379,37 @@ LOUDER**. Therefore the gap is **not in the power-index path at all** -- which a
 explains why raising `max_power_index` did nothing (#45), why the index sweep was linear
 but simply offset low, and why the RFE pins and RF mode LUT all read back correct.
 
-★ **The remaining candidate is the RF (radio) initialisation itself**, and there is a
-concrete structural difference:
+★ **The remaining candidate is the RF (radio) initialisation itself.**
 
-| | vendor | rtw88 |
-|---|---|---|
-| RF init table | `halhwimg8822b_rf.c`, 15 333 lines, with **per-type variants** (`_Type3`, `_Type5`, `_Type17`, `RadioA_8822B`) | `rtw8822b_table.c`: **one** pair, `rtw8822b_rf_a[]` / `rtw8822b_rf_b[]`, no type variants |
-| BB init table | `halhwimg8822b_bb.c`, 12 051 lines | (in the same 22 204-line table file) |
+★★ **CORRECTION to an earlier draft of this section (committed in `b4bd526`):** it claimed
+the vendor carries *per-RFE-type RF init variants* (`_Type3`, `_Type5`, `_Type17`) that
+rtw88 lacks. **That was wrong.** Those `_TypeN` symbols in `halhwimg8822b_rf.c` are
+**`TxPowerTrack` tables** -- thermal power-tracking delta-swing tables -- not radio init
+variants. The radio init itself is a **single** `Array_MP_8822B_RadioA[]`, structurally the
+same as rtw88's single `rtw8822b_rf_a[]`/`_b[]`. The grep matched a substring and the
+conclusion was written before the symbols were read.
 
-rtw88 loads a single RF table regardless of board type; the vendor selects a variant. If
-this board's type needs different radio-side gain settings, rtw88 has no way to express
-that -- and RF gain is exactly the layer the measurements now point at.
+A naive value diff of the two arrays (vendor 3 747 "real" register writes vs rtw88 3 925)
+reports 178 differing lines, but **that comparison is not sound**: the vendor array embeds
+runtime conditionals (cut-version and RFE-type branches encoded as marker entries), so only
+a subset executes on any given board. Establishing a real difference means emulating that
+branch evaluation for this board's cut and RFE type -- a genuine porting exercise, not a
+diff.
 
-★★ **Next session starts here**: determine which RF variant the vendor selects for RFE
-type 10 and diff it against rtw88's `rtw8822b_rf_a/b[]`. This is a table-porting job with
-a clear acceptance test (the -42 dBm stock reaches on this unit), not another knob to
-sweep. ★ And note the trap that caught two hypotheses already: PG/`txpwr_lmt`/power-index
+★ One concrete, *new* lead did fall out of it: those `TxPowerTrack` tables are what stock
+uses for thermal power tracking, and **rtw88 disables power tracking entirely on this
+board** -- `rtw8822b_phy_pwrtrack()` early-returns when
+`efuse.thermal_meter[RF_PATH_A] == 0xff`, which is exactly our blank-efuse case. Stock
+tracks; we never do. ★ Temper the expectation: power tracking normally trims a few dB for
+temperature, so this is unlikely to be the full 14 dB -- but it is a real behavioural
+difference that has never been tested, and unlike the power-index path it is not an offset
+against a saturated base.
+
+★★ **Next session starts here**, in this order: (1) the untested power-tracking gap above,
+which is cheap to try -- give `thermal_meter` a sane default so `rtw8822b_phy_pwrtrack()`
+stops early-returning, and measure; (2) if that is not enough, emulate the vendor RF
+array's conditional branches for this cut/RFE type and diff the *executed* register set
+against rtw88's. Acceptance test either way is the **-42 dBm stock reaches on this unit**. ★ And note the trap that caught two hypotheses already: PG/`txpwr_lmt`/power-index
 changes are all offsets against a saturated base and **cannot** raise output (#43, #45) --
 only the RF/analog path can.
 
