@@ -1516,9 +1516,30 @@ variance, a bad boot pushes the link below what a DHCP exchange survives. That m
 deficit a **connectivity** bug, not a coverage nicety -- and it raises the value of fixing
 the RF/analog path accordingly.
 
-★ Open question for next session: is the failure purely marginality, or is there a second
-wlan1 data-path bug underneath it? The discriminator is to retest when a boot lands on the
-good end of the variance (client at ~-52 dBm at the AP) and see whether DHCP succeeds.
+★★ **Two further checks narrowed it after that was first written:**
+
+1. **The AP's receive path is NOT degraded.** The box's own `iw dev wlan1 scan` hears the
+   house's main router on 5745 at **-48 dBm**, *better* than the -53 dBm measured earlier
+   in the same session. The receiver is healthy; it is not deaf.
+2. **It is not the client's stale state.** Reproduced with a **freshly cloned** NM profile:
+   same result, no IP.
+
+★★★ **The failure signature is a timeout, not randomness:** `sta ... joined with macid 0`
+followed by `sta ... left` after **exactly 4.03 s**, every single time (322.49->326.53,
+542.04->546.08, 550.17->554.21), with `wlan1 rx_packets` never leaving 0.
+
+★ **Best current reading:** beacons and probe responses are sent at the lowest, most robust
+rate and get through in both directions, which is why association succeeds and `iw scan`
+works; **client data frames are sent at higher rates and do not**, so the AP hears nothing,
+and a 4 s inactivity/EAPOL timer drops the station. The AP heard this client at **-52 dBm**
+earlier today while sustaining 105 Mbit/s and now hears it at **-65 dBm (per-chain
+-78/-65)**, which is consistent with an uplink that has fallen below what data rates need.
+
+★ Open question for next session: is that purely marginality, or a second wlan1 data-path
+bug underneath it? Discriminator: retest on a boot that lands on the good end of the
+8-10 dB variance (client ~-52 dBm at the AP) and see whether DHCP succeeds. ★ Note the
+AP-side receive figure is the one to watch -- the box's scan RSSI is healthy, so a weak
+*client* reading at the AP is the anomaly to explain.
 
 ### Where this leaves the 5 GHz signal — still unfixed, but the search space is much smaller
 
