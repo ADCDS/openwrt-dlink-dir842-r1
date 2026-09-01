@@ -1478,6 +1478,48 @@ path (wired, or a USB adapter). The auto-revert timer was the right instinct but
 armed on the very machine being cut off, so if the arming command itself is what fails,
 there is no safety net at all.
 
+### ★★★★ The deficit now BREAKS connectivity: 5 GHz clients associate but never get an IP
+
+This is the most consequential observation of the session, and it changes the priority of
+the whole 5 GHz question from "weak" to **"unusable"**.
+
+Reproduced repeatedly with a client (`tiny`) whose NM profile was pinned to our 5 GHz
+BSSID:
+
+* the client **associates successfully** -- NetworkManager logs
+  `supplicant interface state: associating -> completed`, and the AP logs
+  `rtw_8822be: sta ... joined with macid 0`;
+* NM proceeds to `dhcp4: activation: beginning transaction (timeout in 45 seconds)`,
+  so the **4-way EAPOL handshake completed** -- data frames flow at that stage;
+* **DHCP never completes.** `wlan1 rx_packets` stays at **0**, the bridge FDB stays
+  **empty**, and ~4 s later the AP logs `sta ... with macid 0 left`. Loop repeats.
+
+★ **The 2.4 GHz radio on the SAME box, same bridge, is fine** -- the same client pinned to
+`00:e0:4c:81:86:86` associated at -38 dBm and got `192.168.100.146` immediately. So this is
+**wlan1-specific**, not a bridge, ASIC or `dir842-l2flush` problem (all of those were
+verified healthy: services enabled, `fabric_autoreset=3`, `fabric_gw_rearm=0`, no
+isolation, 0.6 ms to the gateway).
+
+★★ It is **not** the RX chain being dead: `iw dev wlan1 scan` still finds 17 BSSes, so the
+receiver hears beacons and probe responses normally.
+
+★★★ **What survived without fixing it:** a clean reflash of the shipped build (no
+debugfs), a full `wifi down`/`wifi up`, a **cold** power-cycle, and resetting the TX swing
+register to unity. It was **not** caused by the swing experiment -- that was checked
+explicitly and the failure persists at `0xc1c = 0x200`.
+
+★★★★ **Most likely reading, consistent with everything else in this document:** the link is
+simply too marginal. Earlier the same client on the same AP measured **-52 dBm at the AP**
+and sustained **105 Mbit/s**; tonight it reads **-65 dBm with per-chain -78/-65** and cannot
+complete DHCP. With the ~14 dB driver deficit plus the documented 8-10 dB boot-to-boot
+variance, a bad boot pushes the link below what a DHCP exchange survives. That makes the
+deficit a **connectivity** bug, not a coverage nicety -- and it raises the value of fixing
+the RF/analog path accordingly.
+
+★ Open question for next session: is the failure purely marginality, or is there a second
+wlan1 data-path bug underneath it? The discriminator is to retest when a boot lands on the
+good end of the variance (client at ~-52 dBm at the AP) and see whether DHCP succeeds.
+
 ### Where this leaves the 5 GHz signal — still unfixed, but the search space is much smaller
 
 Everything rtw88 controls has now been measured rather than reasoned about, and all of
