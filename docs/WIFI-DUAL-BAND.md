@@ -1413,6 +1413,71 @@ against rtw88's. Acceptance test either way is the **-42 dBm stock reaches on th
 changes are all offsets against a saturated base and **cannot** raise output (#43, #45) --
 only the RF/analog path can.
 
+### ★★ TX swing (0xc1c/0xe1c): +6.5 dB measured, NOT shipped — and why
+
+`rtw8822b_pwrtrack_set_pwr()` is the only writer of the TX swing register
+(`0xc1c`/`0xe1c` bits 31:21, values from `rtw8822b_txscale_tbl[]`, an 18 dB table).
+Forcing it from its live value `0x200` (the table's unity entry, index 24) to `0x3fe`
+(index 36, table max) and measuring interleaved A/B/A/B:
+
+| round | swing `0x200` | swing `0x3fe` | delta |
+|---|---|---|---|
+| 1 | +2 | +8 | **+6** |
+| 2 | +4 | +11 | **+7** |
+| 3 | +2 | +4 | **+2** |
+| 4 | -6 | +5 | **+11** |
+
+**Mean +6.5 dB, 4/4 rounds positive** -- unlike the `max_power_index` probe (#45), this
+one reproduces. ★ **It was still NOT shipped**, for three reasons, and the reasoning
+matters more than the number:
+
+1. ★★★ **The premise was wrong.** The patch was written believing power tracking never
+   runs here (`thermal_meter == 0xff` early-return). It does: the live RF thermal reads
+   `0x1b` (27), the efuse thermal byte is valid, and the auto-mode guard proved it by
+   never firing -- the register was only programmed when an index was *forced*. So this
+   is not "program a register nobody programs"; it is **overriding a working control
+   loop**, which is a different and much riskier change.
+2. **RSSI is not quality.** Raising swing raises radiated power *and* can degrade EVM;
+   a link can read +6.5 dB stronger and carry less. The throughput test that would settle
+   it could not be run (see below), so the gain is unvalidated where it counts.
+3. **A patch whose comment states a disproven rationale is worse than no patch.** The
+   shipped default was also inert, so it would have been dead code carrying a false
+   explanation.
+
+★ To revisit: force `0xc1c`/`0xe1c` bits 31:21 to `rtw8822b_txscale_tbl[36]` at
+`set_channel()` time and measure **iperf3 throughput and EVM**, not RSSI, at several
+thermal points. If throughput follows the +6.5 dB, it becomes defensible as a
+blank-efuse-board override of the tracking loop's swing floor.
+
+### ★ Bench casualty: `tiny` was left BSSID-locked and offline
+
+The throughput validation needed `tiny` associated to our AP, so its NetworkManager
+profile was BSSID-locked to `E0:1C:FC:51:C9:F0` with a 20-minute `systemd-run` auto-revert
+armed first. The `nmcli con up` call then timed out, and `tiny` ended up **associated but
+with no IP**: the AP shows `connected time: 0 seconds` and only 4 management frames, i.e.
+an association loop that never completes, with an empty bridge FDB and `wlan1 rx=0` over
+25 s.
+
+★ It survived a clean reflash and a **cold** power-cycle of the box, and the box is
+otherwise healthy (beaconing, bridged, 0.58 ms to the gateway, 2.4 GHz fine), so this is
+not a box regression -- most likely `tiny`'s NM is retrying a stale lease (it may have
+renewed against stock's rogue dnsmasq at 192.168.1.1 during the A/B) while the hard BSSID
+lock stops it recovering on another AP. All paths to it are down, including Tailscale
+(`100.64.0.14`), because its only uplink is that wlan0.
+
+★★ **One command on the box itself fixes it:**
+
+```sh
+sudo nmcli con modify BRAVO 802-11-wireless.bssid ""
+sudo nmcli con up BRAVO
+```
+
+★★★ **Lesson for the bench: never BSSID-lock the only remote receiver.** Lock a
+*secondary* profile, or drive the association from a device with a second, independent
+path (wired, or a USB adapter). The auto-revert timer was the right instinct but it is
+armed on the very machine being cut off, so if the arming command itself is what fails,
+there is no safety net at all.
+
 ### Where this leaves the 5 GHz signal — still unfixed, but the search space is much smaller
 
 Everything rtw88 controls has now been measured rather than reasoned about, and all of
