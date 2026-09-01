@@ -1364,6 +1364,40 @@ with no configuration change at all. The apparent +10 dB was drift, and the sing
 sweep was the wrong experiment. ★ **Always interleave A/B/A/B here; a monotonic-looking
 sweep in one direction is worthless against this noise floor** (confound #28).
 
+### ★★★ The deficit is NOT in the TX-power-index path — it is in RF/analog init
+
+The vendor's TXAGC writer (`config_phydm_write_txagc_8822b()`,
+`phydm/rtl8822b/phydm_hal_api8822b.c`) is **functionally identical to rtw88's**
+`rtw8822b_set_tx_power_index_by_rate()`: same registers `offset_txagc[2] = {0x1d00,
+0x1d80}`, same `rate_idx = HwRate & 0xfc`, same 4-byte packed write, **no extra clamp and
+no extra scaling**.
+
+★★★★ That is decisive, because it makes the two measurements contradictory *unless* the
+difference lies elsewhere: if both drivers write the same register with the same meaning,
+stock writing **40-45** should be QUIETER than rtw88 writing **63**. It is **17 dB
+LOUDER**. Therefore the gap is **not in the power-index path at all** -- which also
+explains why raising `max_power_index` did nothing (#45), why the index sweep was linear
+but simply offset low, and why the RFE pins and RF mode LUT all read back correct.
+
+★ **The remaining candidate is the RF (radio) initialisation itself**, and there is a
+concrete structural difference:
+
+| | vendor | rtw88 |
+|---|---|---|
+| RF init table | `halhwimg8822b_rf.c`, 15 333 lines, with **per-type variants** (`_Type3`, `_Type5`, `_Type17`, `RadioA_8822B`) | `rtw8822b_table.c`: **one** pair, `rtw8822b_rf_a[]` / `rtw8822b_rf_b[]`, no type variants |
+| BB init table | `halhwimg8822b_bb.c`, 12 051 lines | (in the same 22 204-line table file) |
+
+rtw88 loads a single RF table regardless of board type; the vendor selects a variant. If
+this board's type needs different radio-side gain settings, rtw88 has no way to express
+that -- and RF gain is exactly the layer the measurements now point at.
+
+★★ **Next session starts here**: determine which RF variant the vendor selects for RFE
+type 10 and diff it against rtw88's `rtw8822b_rf_a/b[]`. This is a table-porting job with
+a clear acceptance test (the -42 dBm stock reaches on this unit), not another knob to
+sweep. ★ And note the trap that caught two hypotheses already: PG/`txpwr_lmt`/power-index
+changes are all offsets against a saturated base and **cannot** raise output (#43, #45) --
+only the RF/analog path can.
+
 ### Where this leaves the 5 GHz signal — still unfixed, but the search space is much smaller
 
 Everything rtw88 controls has now been measured rather than reasoned about, and all of
