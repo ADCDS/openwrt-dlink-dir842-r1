@@ -1478,6 +1478,39 @@ path (wired, or a USB adapter). The auto-revert timer was the right instinct but
 armed on the very machine being cut off, so if the arming command itself is what fails,
 there is no safety net at all.
 
+### ★★★★★ FIX: 5 GHz must run at HT20 on this unit — 80 MHz does not carry data
+
+**The 5 GHz connectivity failure below is FIXED by narrowing the channel to 20 MHz.**
+Measured on the bench client, same position, same session:
+
+| channel width | client DHCP | `wlan1 rx` | client seen at AP | connected time | throughput |
+|---|---|---|---|---|---|
+| **VHT80** (was shipped) | **fails** | **0** | -65 dBm | 4.03 s then dropped | **0 (unusable)** |
+| VHT40 | **fails** | **0** | -- | dropped | 0 |
+| **HT20** | **succeeds** | **583** | **-50 dBm** | stable | **57.7 Mbit/s** |
+
+★★ **Why it works:** narrowing 80 -> 20 MHz concentrates the same transmit power into a
+quarter of the bandwidth and cuts the receiver's noise bandwidth by the same factor -- worth
+~6 dB of link margin each way. On a link already ~14 dB short (see the stock A/B above),
+that is the difference between a link that carries data and one that does not. The AP's
+view of the client improves from **-65 dBm to -50 dBm** purely from the width change.
+
+★ **The cost is real but small in practice:** ~58 Mbit/s at HT20 versus the ~100 Mbit/s
+VHT80 managed *on the boots where it worked at all*. Note the separate finding above that
+throughput on this box was **flat at ~100 Mbit/s across VHT80 and VHT40** (PHY 351 vs 200
+Mbit/s), i.e. width was never buying throughput here -- so trading it for a link that
+actually works is close to free.
+
+★★★ **Applied to the running box** (`uci set wireless.radio0.htmode=HT20`). It persists
+across reboots because it lives in the overlay, **but a `sysupgrade -n` will wipe it** --
+the `htmode` default comes from the private build profile, not from `files/`. ★ **Update
+the profile's `wireless.radio0.htmode` to `HT20`**, or this regresses on the next clean
+flash.
+
+★ VHT40 failing as well is worth noting: the margin here is thin enough that only the full
+6 dB of HT20 rescues it. If a future fix recovers the ~14 dB RF deficit, revisit the width
+-- HT20 is a workaround for a weak transmitter, not a preference.
+
 ### ★★★★ The deficit now BREAKS connectivity: 5 GHz clients associate but never get an IP
 
 This is the most consequential observation of the session, and it changes the priority of
