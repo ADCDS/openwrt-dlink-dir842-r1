@@ -1,17 +1,22 @@
 # Prebuilt images
 
-Built 2026-08-31 from the **v1.3** tree by the exact clean-room path the README
+Built 2026-09-02 from the **v1.4** tree by the exact clean-room path the README
 documents: fresh clone → `./build.sh` inside the Debian 11 (bullseye) container
 from `docs/BENCH.md` §7. Nothing outside this repository went into them — **dual-band**
 (2.4 GHz `DIR842-2G` via the vendor `rtl8192cd` driver + 5 GHz `DIR842-OpenWrt` via
 rtw88, ⚠ both open by default) + wired + hardware-NAT + 802.11r images.
 
-★ **v1.3 fixes a kernel panic that v1.2 users hit in normal use.** A client roaming onto
-the 5 GHz AP triggers `skb_under_panic` on `wlan1` and the box panics and reboots. It also
-fixes the panel LEDs (LAN1–3 were lit regardless of link, Internet and LAN4 dead) and lets
-a bridged AP auto-recover from the RX-stall wedge, which v1.2 could not do at all. If you
-are on v1.1 or v1.2, upgrade. See
-[`../docs/RX-STALL-WEDGE.md`](../docs/RX-STALL-WEDGE.md) and [`../docs/LEDS.md`](../docs/LEDS.md).
+★ **v1.4 makes the 5 GHz AP actually usable, and stops sysupgrade from wiping your
+config.** On this hardware the 5 GHz radio at 80/40 MHz associates clients but never
+completes DHCP — the link is too marginal (a stock-firmware A/B on the same unit shows the
+transmitter ~17 dB short) — so **the image now defaults to HT20**, which carries data on
+every boot, and a migration seed moves an existing VHT80/VHT40 config there. The first-boot
+seed also **no longer re-runs on every sysupgrade**: v1.3 and earlier re-seeded LAN
+192.168.0.1, a DHCP WAN and an *open* `DIR842-OpenWrt` SSID over a preserved config on every
+flash. Both WiFi panel LEDs now light (2.4 GHz via the vendor `led_type`, 5 GHz via a small
+rtw88 patch driving the card's GPIO8), and the RX-stall auto-recovery from v1.3 is verified
+against the original bug report. See [`../docs/WIFI-DUAL-BAND.md`](../docs/WIFI-DUAL-BAND.md)
+and [`../docs/LEDS.md`](../docs/LEDS.md).
 
 > **The `.bin` files are not committed to git** (they are build artifacts). Download them
 > from the repo's **[latest release](https://github.com/ADCDS/openwrt-dlink-dir842-r1/releases/latest)**,

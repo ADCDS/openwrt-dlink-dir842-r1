@@ -59,6 +59,7 @@ drv_rtl8192cd_init_device_config() {
 	config_add_int band            # 1=11b 2=11g 11=b/g/n 4=11a 12=a/n 76=ac/a/n
 	config_add_int beacon_int dtim_period
 	config_add_boolean noscan
+	config_add_int led_type          # panel LED policy, vendor enum led_type (docs/LEDS.md)
 }
 
 drv_rtl8192cd_init_iface_config() {
@@ -233,7 +234,7 @@ drv_rtl8192cd_setup() {
 	local beacon_int dtim_period v
 
 	json_select config
-	json_get_vars channel htmode country band phy macaddr beacon_int dtim_period
+	json_get_vars channel htmode country band phy macaddr beacon_int dtim_period led_type
 	json_select ..
 
 	# 'phy' here is the vendor netdev, not a cfg80211 phy. Resolved by identity

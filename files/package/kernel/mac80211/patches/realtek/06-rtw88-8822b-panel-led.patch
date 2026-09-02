@@ -1,41 +1,62 @@
---- a/drivers/net/wireless/realtek/rtw88/main.c	2026-09-02 04:20:56.190096836 -0300
-+++ b/drivers/net/wireless/realtek/rtw88/main.c	2026-09-02 04:20:56.198097106 -0300
-@@ -32,6 +32,34 @@
+--- a/drivers/net/wireless/realtek/rtw88/main.c	2026-09-02 05:07:19.600146167 -0300
++++ b/drivers/net/wireless/realtek/rtw88/main.c	2026-09-02 05:07:19.608146451 -0300
+@@ -32,6 +32,55 @@
  MODULE_PARM_DESC(support_bf, "Set Y to enable beamformee support");
  MODULE_PARM_DESC(debug_mask, "Debugging mask");
  
 +/* RTL8822BE panel LED (D-Link DIR-842 and other boards that wire the card's
-+ * GPIO8 to a LED). rtw88 has no LED support in this backport; the vendor
-+ * driver's set_sw_LED0() for VERSION_8822B drives REG 0x60 bit 8, active-low
-+ * (set = off, clear = on), touching no other bit -- mirrored here verbatim.
++ * GPIO8 to a LED). rtw88 has no LED support in this backport. Mirrors the
++ * vendor rtl8192cd driver for VERSION_8822B exactly:
++ *   enable_sw_LED():  LEDCFG(0x4c) &= ~LED2EN(BIT21);  0x60 |= BIT16 | BIT24
++ *                     (GPIO8 output-enable + mode, once)
++ *   set_sw_LED0():    0x60 bit 8, active-low (set = off, clear = on)
++ * A first cut toggled only bit 8; review (2026-09-02) caught that the OE byte
++ * read back as 0, i.e. the pin was never driven by that write alone.
 + * Policy: LED follows the radio (on at core start, off at core stop).
-+ * rtw88_led=0 disables it. */
++ * Disable with a `rtw88_core led=0` line in /etc/modules.d/rtw88 (kmodloader
++ * reads options only from there), or `echo 0 > /sys/module/rtw88_core/
++ * parameters/led` then `wifi down; wifi up`: the disabled path writes the OFF
++ * value once so a lit LED does not stay lit. */
 +static bool rtw_led_enable = true;
 +module_param_named(led, rtw_led_enable, bool, 0644);
 +MODULE_PARM_DESC(led, "Drive the RTL8822B panel LED (GPIO8, reg 0x60 bit 8) with radio state (default Y)");
 +
-+#define RTW_8822B_LED_REG	0x0060
-+#define RTW_8822B_LED_BIT	BIT(8)
++#define RTW_8822B_LEDCFG	0x004c
++#define RTW_8822B_LED2EN	BIT(21)
++#define RTW_8822B_GPIO_REG	0x0060
++#define RTW_8822B_GPIO8_OUT	BIT(8)
++#define RTW_8822B_GPIO8_OE	BIT(16)
++#define RTW_8822B_GPIO8_MODE	BIT(24)
 +
 +static void rtw_8822b_led(struct rtw_dev *rtwdev, bool on)
 +{
 +	u32 v;
 +
-+	if (!rtw_led_enable || rtwdev->chip->id != RTW_CHIP_TYPE_8822B)
++	if (rtwdev->chip->id != RTW_CHIP_TYPE_8822B)
 +		return;
-+	v = rtw_read32(rtwdev, RTW_8822B_LED_REG);
++	if (!rtw_led_enable)
++		on = false;	/* disabled: drive it off once, do not leave it lit */
++	if (on) {
++		/* vendor enable_sw_LED() for 8822B: hand GPIO8 to software, output */
++		rtw_write32(rtwdev, RTW_8822B_LEDCFG,
++			    rtw_read32(rtwdev, RTW_8822B_LEDCFG) & ~RTW_8822B_LED2EN);
++		rtw_write32(rtwdev, RTW_8822B_GPIO_REG,
++			    rtw_read32(rtwdev, RTW_8822B_GPIO_REG) |
++			    RTW_8822B_GPIO8_OE | RTW_8822B_GPIO8_MODE);
++	}
++	v = rtw_read32(rtwdev, RTW_8822B_GPIO_REG);
 +	if (on)
-+		v &= ~RTW_8822B_LED_BIT;
++		v &= ~RTW_8822B_GPIO8_OUT;
 +	else
-+		v |= RTW_8822B_LED_BIT;
-+	rtw_write32(rtwdev, RTW_8822B_LED_REG, v);
++		v |= RTW_8822B_GPIO8_OUT;
++	rtw_write32(rtwdev, RTW_8822B_GPIO_REG, v);
 +	rtw_info(rtwdev, "panel LED %s (reg 0x60=0x%08x)\n", on ? "on" : "off", v);
 +}
 +
  /* DIR-842 / blank-efuse boards: crystal load capacitance override.
   *
   * When the efuse is blank rtw88 falls back to crystal_cap = 0, i.e. the MINIMUM
-@@ -939,6 +967,8 @@
+@@ -939,6 +988,8 @@
  
  	set_bit(RTW_FLAG_RUNNING, rtwdev->flags);
  
@@ -44,7 +65,7 @@
  	return 0;
  }
  
-@@ -951,6 +981,7 @@
+@@ -951,6 +1002,7 @@
  void rtw_core_stop(struct rtw_dev *rtwdev)
  {
  	struct rtw_coex *coex = &rtwdev->coex;

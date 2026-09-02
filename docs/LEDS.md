@@ -168,9 +168,10 @@ decode above — there is no WiFi LED GPIO in stock). Both are now lit. Verified
 
 The driver has full LED plumbing (`8192cd_led.c`); it was dark only because the MIB
 `led_type` defaulted to **0 = `LEDTYPE_HW_TX_RX`**, a hardware-indication mode this board does
-not wire. Setting a *software* type makes `enable_sw_LED()` configure the LED on open
-(`LEDCFG` `LED2EN | LED2SV`) and the driver's LED task then blinks it with link/traffic, as
-stock does.
+not wire. Setting a *software* type makes `enable_sw_LED()` configure the LED on open (the SoC-WMAC
+branch sets the LED's enable bit in `LEDCFG` alongside its software value -- the exact
+`LEDxEN` written depends on the type; the `LED2EN|LED2SV` line quoted in an earlier draft is
+the 8188E branch) and the driver's LED task then blinks it with link/traffic, as stock does.
 
 ★ **Diagnosis that found it, worth keeping:** `echo 1 > /proc/wlan0/led` (the proc entry is
 *write-only* — reading it gives `I/O error`) calls `control_wireless_led(priv, 1)`, which
@@ -189,12 +190,19 @@ driver's `.dat` (11 = `LEDTYPE_SW_LED2_GPIO8_LINKTXRX`, the vendor default in on
 rtw88 5.8-rc2 has no LED support. The vendor driver's `set_sw_LED0()` for `VERSION_8822B`
 drives the card's **GPIO8: register `0x60` bit 8, active-low** (set = off, clear = on),
 touching no other bit — rtw88's own writes to `0x62` are SDIO-only, so on PCIe nothing else
-configures that pin. The patch mirrors the vendor write exactly: LED on at the end of
-`rtw_core_start()`, off at the top of `rtw_core_stop()`, i.e. **LED follows the radio**.
-`rtw88_core.led=0` disables it. dmesg confirms it on every bring-up:
+configures that pin. The patch mirrors the vendor: once at start it performs the vendor's
+`enable_sw_LED()` 8822B setup (`LEDCFG &= ~LED2EN`, then `0x60 |= BIT(16)|BIT(24)` -- GPIO8
+output-enable and mode; a first cut omitted these and the review caught that the OE byte read
+back as 0), then LED on at the end of `rtw_core_start()`, off at the top of
+`rtw_core_stop()`, i.e. **LED follows the radio**. To disable: add the line
+`rtw88_core led=0` to `/etc/modules.d/rtw88` (kmodloader reads options only from there; a
+kernel-cmdline `rtw88_core.led=0` is honoured by nothing on this image), or at runtime
+`echo 0 > /sys/module/rtw88_core/parameters/led` followed by `wifi down; wifi up` -- the
+disabled path writes the OFF value once so a lit LED does not stay lit. dmesg on every
+bring-up:
 
 ```
-rtw_8822be 0000:01:00.0: panel LED on (reg 0x60=0x0000000b)
+rtw_8822be 0000:01:00.0: panel LED on (reg 0x60=0x0101000b)
 ```
 
 (You will see `on` → `off` → `on` at boot: mac80211 restarts the radio once during setup.)

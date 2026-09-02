@@ -175,7 +175,7 @@ off-frequency, so the RF registers stop answering.
 sweepable module parameter (`03-…-rfe.patch`, `xtal_cap_override`, `0..63`, `-1` = rtw88
 default) and `99-dir842-m5:130-155` reads **mtd1 + 0x13e** (= 39 on this unit), writes
 `/etc/modprobe.d/10-rtw88-xtal.conf`, and re-probes `rtw88_8822be` so it applies on the
-same boot. Cold-boot verified: no WARN, `wlan1` reaches bridge forwarding, `iw dev wlan1
+same boot. ~~Cold-boot verified: no WARN, `wlan1` reaches bridge forwarding, `iw dev wlan1~~ ★ Retracted (review, 2026-09-02): the crystal-cap seed never applied its value (it wrote to /etc/modprobe.d, which kmodloader ignores, and reloaded the wrong module), so this verification observed rtw88's crystal_cap=0 fallback. See 99-dir842-m5.
 info` = AP on **channel 36, 80 MHz, 17 dBm**.
 
 ⚠ **39 is empirical.** `mtd1+0x13e..0x141` reads `39, 49, 35, 24` — two plausible 6-bit
@@ -1090,10 +1090,17 @@ radio link. The RPi4's onboard Wi-Fi caps around 100-120 Mbit/s and is the likel
 *in this test* — note the user's phone reached 130, i.e. more than `tiny` can do, so
 **`tiny` cannot be used to characterise the box's maximum throughput.**
 
-★★★ **The box is not CPU-bound.** Measured with `/proc/stat` deltas over an 8 s window:
-**8 % busy idle, 17 % busy (82 % idle) during a ~98 Mbit/s transfer.** See confound #29 —
-a single `top -bn1` sample during the same transfer read "75 % sys, 25 % idle" and was
-nearly written up here as "the throughput ceiling is the SoC's CPU". It is not.
+★★ **The box is probably not CPU-bound -- but the number below is a LOWER BOUND.**
+Measured with `/proc/stat` deltas over an 8 s window: **8 % busy idle, 17 % busy (82 %
+idle) during a ~98 Mbit/s transfer.** ★ Review (2026-09-02): the script that produced it
+summed only user+nice+system+idle and **dropped iowait/irq/softirq** -- and softirq is
+where this router's NAPI, bridge and mac80211 work is accounted -- so the true busy figure
+is higher by the softirq share, which was not captured. `tools/bench/cpu-delta.sh` now sums
+all eight fields and takes both samples in one ssh session; the re-measurement could not be
+completed the same day (no 5 GHz client on the bench), so treat "not CPU-bound" as likely
+but not yet re-established. Confound #29 still stands on its own evidence: a `top -bn1`
+sample during the same transfer read "75 % sys, 25 % idle", which reflects `top`'s 100 ms
+window, not the workload.
 
 ### ★ `config_trx_mode`'s early return is fully accounted for
 
@@ -1425,13 +1432,15 @@ temperature, so this is unlikely to be the full 14 dB -- but it is a real behavi
 difference that has never been tested, and unlike the power-index path it is not an offset
 against a saturated base.
 
-★★ **Next session starts here**, in this order: (1) the untested power-tracking gap above,
-which is cheap to try -- give `thermal_meter` a sane default so `rtw8822b_phy_pwrtrack()`
-stops early-returning, and measure; (2) if that is not enough, emulate the vendor RF
-array's conditional branches for this cut/RFE type and diff the *executed* register set
-against rtw88's. Acceptance test either way is the **-42 dBm stock reaches on this unit**. ★ And note the trap that caught two hypotheses already: PG/`txpwr_lmt`/power-index
-changes are all offsets against a saturated base and **cannot** raise output (#43, #45) --
-only the RF/analog path can.
+★★ ~~Next session starts here: (1) the untested power-tracking gap above~~ -- **struck
+(review, 2026-09-02, retraction #46):** the "rtw88 disables power tracking on this board"
+premise this rested on is refuted a few sections below ("The premise was wrong ... live RF
+thermal reads `0x1b`, the efuse thermal byte is valid"). Do not re-patch the
+`thermal_meter == 0xff` guard; it does not fire on this unit. The remaining thread is (2):
+emulate the vendor RF array's conditional branches for this cut/RFE type and diff the
+*executed* register set against rtw88's -- and, ahead of it, the regulatory lead above
+(make the blank-efuse hint follow the configured country), which is cheaper and may be
+worth up to ~13 dB legally.
 
 ### ★★ TX swing (0xc1c/0xe1c): +6.5 dB measured, NOT shipped — and why
 
@@ -1603,33 +1612,32 @@ bug underneath it? Discriminator: retest on a boot that lands on the good end of
 AP-side receive figure is the one to watch -- the box's scan RSSI is healthy, so a weak
 *client* reading at the AP is the anomaly to explain.
 
-### Where this leaves the 5 GHz *signal deficit* — connectivity is fixed (HT20 above); the ~14 dB TX shortfall is not
+### Where this leaves the 5 GHz *signal deficit* — connectivity is fixed (HT20 above); the TX shortfall is not
 
-Everything rtw88 controls has now been measured rather than reasoned about, and all of
-it is correct: maximum power index (and linear response proving it *is* the maximum),
-correct eFEM registers, correct RF mode LUT, both paths live, best of the three
-available RFE types, right channel and bandwidth. **The 5 GHz deficit is real,
-TX-only, roughly 15-30 dB depending on the boot, and is not fixed.**
+★ Rewritten 2026-09-02 (review): the previous body of this section pre-dated the stock A/B
+and still said "a software fix in rtw88 is ruled out", "hardware fault is the leading
+candidate" and "the stock A/B is still untested" -- all three contradicted by the sections
+above it. Current state:
 
-What remains is no longer a config change:
+1. **The hardware is fine.** Stock reaches **-42 dBm** on this unit where OpenWrt reaches
+   ~-59; the 2.4 GHz radio reads the same under both. Every hardware-fault hypothesis is
+   closed.
+2. **The shortfall is ~17 dB, and how much is regulatory is NOT separated.** This build can
+   only initiate on ch36-48 at 17 dBm because rtw88 hints the world domain on a blank
+   efuse; Brazil itself permits 30 dBm on ch149, where stock runs. Up to ~13 dB may be
+   band, the rest driver.
+3. **In rtw88, every knob measured is accounted for** -- power index (maxed and linear),
+   all three RFE types plus a purpose-built type 10, front-end/TRSW/RFEINV pads, the RF
+   mode LUT, both chains, `max_power_index`, TX swing (+6.5 dB, reproducible, not shipped:
+   it overrides the running tracking loop and is unvalidated for EVM) -- and the TXAGC
+   write path is identical to the vendor's. What differs is upstream of the index: the
+   vendor's RF/analog init, which carries runtime conditionals rtw88 flattens.
+4. **Connectivity is fixed by HT20** (a workaround for a weak transmitter, not a fix of it).
 
-0. ★ **Nothing in rtw88 is left to try.** Every knob it exposes has now been *measured*,
-   not reasoned about: power index (maxed, and proven linear so it really is the maximum),
-   RFE type (all three, best one shipped), front-end and T/R switch registers (read back
-   correct), RF mode LUT (correct), both RF chains (equal, neither dead), and the one
-   intermittent init failure (skips nothing TX-critical). The two-way link budget puts the
-   shortfall at ~13 dB against an RPi4. **A software fix in rtw88 is ruled out**, which is
-   a result rather than a gap.
-
-1. ~~**Port the board's true RFE type tables from the stock ODM driver.**~~
-   ★ **REFUTED — see "The stock firmware, and what it settles" above.** The stock driver
-   was obtained and read; its tables are offsets against a base that already saturates at
-   maximum, so they can only reduce output. This was the previous leading explanation and
-   it is now closed.
-2. **A hardware fault in the transmit-only chain** (PA or T/R switch). Now the leading
-   physical candidate, because reciprocity has excluded the antenna and feedline.
-3. ★ **A stock-firmware A/B is still the one experiment that would settle whether this
-   unit's 5 GHz was EVER better.** It remains an untested assumption that it was.
+**Next, in order:** (a) the regulatory lead -- make the blank-efuse hint follow the
+configured country and measure ch149 at BR's ceiling; (b) emulate the vendor RF-array
+branches for this cut/RFE type and diff the executed register set against rtw88's.
+Acceptance test for either: the **-42 dBm stock reaches on this unit**.
 
 ### Bench technique learned here
 

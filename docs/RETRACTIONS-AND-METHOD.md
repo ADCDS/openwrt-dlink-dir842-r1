@@ -123,6 +123,7 @@ every right-hand one. Hashes marked **mirror** are in the publishable repo
 | 43 | ★★ "The board's true RFE type is one rtw88 cannot express; port the missing ODM `phy_reg_pg`/`txpwr_lmt` tables (types 4/12/15/16/17/18)" — this doc's **leading remaining explanation** for the 5 GHz deficit | **REFUTED once the stock firmware was actually read.** Both table families are **offsets applied to the base TX power index**, and this board's blank efuse saturates that base at 254 -> clamped to `max_power_index` 63 for every rate. Offsets can only bring power **down** from the ceiling; no table, correct or not, raises output above the 63 we already have. ★ Stock's `RFE_Init` also disassembles to **exactly** rtw88's `rtw8822b_phy_rfe_init` (same seven writes), and stock merely requests `5G_TxPower: "100"`. A session of table-porting would have produced a quieter radio and a confident wrong writeup | `docs/WIFI-DUAL-BAND.md`; stock kernel `adriel/dir842-firmware` |
 | 44 | ★★ "This board is RFE type 10, rtw88 configures it as type 2 and therefore assumes an external 5 GHz PA that does not exist — **that** is the 13 dB, so implementing type 10 will fix it" | **THE FACT IS RIGHT, THE CONCLUSION WAS WRONG.** The board really is type 10 (`CONFIG_SLOT_0_RFE_TYPE_10=y` in the vendor Makefile; `phydm_init_hw_info_by_rfe_type_8822b()` defines it as `EXT_PA=FALSE`, `BOARD_EXT_TRSW`). A type-10 entry was added to rtw88 — iFEM CCA/tables plus the eFEM external-TRSW pin config, the exact combination this board needs — built, flashed and measured: **0 dB ours-minus-ref vs +3..+12 for the shipped type 2, i.e. ~7 dB WORSE.** ★ rtw88 models no drive-level difference between eFEM and iFEM; the RFE type there selects only CCA thresholds, pin pattern and power *offsets*, and offsets cannot exceed the saturated `max_power_index` (see #43). The mechanism was written up as settled before it was tested — the same error as #39 | `docs/WIFI-DUAL-BAND.md` |
 | 45 | ★★ "rtw88's `max_power_index = 0x3f` is an artificial cap ~16 dB below the hardware; raising it recovers the 5 GHz deficit" | **REFUTED BY INTERLEAVING.** A one-directional sweep looked textbook -- ours-minus-ref -2 dB at cap 63 rising to +8 dB at 84 then declining at 96/112/127, i.e. an under-driven PA hitting compression -- and `tx_pwr_tbl` confirmed the raised indices really were written. An interleaved A/B/A/B gave deltas of **+7, 0, +1, -1 dB (mean +1.75)**, with one round drifting to -77 dBm at an unchanged configuration. ★ The shape was real; the *cause* was session drift sampled in a convenient order. Single-direction RF sweeps on this bench are not evidence -- interleave, always | `docs/WIFI-DUAL-BAND.md`; confound #28 |
+| 46 | "rtw88 disables TX power tracking on this board (`thermal_meter == 0xff`), so program the TX swing it never sets" -- written up as the next session's starting point | **REFUTED IN THE SAME DOCUMENT 26 LINES LATER, AND NEITHER PASSAGE WAS STRUCK** (caught by review). Live RF thermal reads `0x1b`, the efuse thermal byte is valid, and the auto-mode guard proved it by never firing: power tracking runs and *chooses* unity swing. The +6.5 dB from forcing max swing is real but is an override of a working loop, unvalidated for EVM. Same-day reversal, same class as #39 and #44 | `docs/WIFI-DUAL-BAND.md` |
 
 ### The ones that cost the most
 
@@ -410,7 +411,9 @@ scans, and report the *difference* — that cancels receiver drift and band-wide
 ~98 Mbit/s wifi transfer a single `top -bn1` sample reported **75 % sys / 25 % idle**, which
 was one step from being written up as "the 130 Mbit/s ceiling is the SoC's CPU doing software
 wifi bridging" — a tidy, plausible, and completely wrong conclusion. `/proc/stat` deltas over
-an 8 s window on the same transfer: **17 % busy, 82 % idle** (8 % busy with no traffic).
+an 8 s window on the same transfer: **17 % busy, 82 % idle** (8 % busy with no traffic). ★ Itself a lower bound: that first version of
+the script omitted softirq/irq/iowait from the busy sum (review, 2026-09-02); `cpu-delta.sh`
+now counts all eight fields and samples in one ssh session.
 ★ Corrected mechanism (review, 2026-09-02): the box's `top` is BusyBox 1.31 with
 `FEATURE_TOP_CPU_USAGE_PERCENTAGE`, whose first pass *does* take a real delta -- over a
 **~100 ms** window (`do_stats(); usleep(100000)`). The inflation is that on a single-core
@@ -428,6 +431,11 @@ anywhere else in the same command. Bind a fixed port and let the old listener be
 a PID file.
 
 **#32 — SERIAL TX TO THE BOX IS DEAD, AND THIS TIME IT IS NOT THE DAEMON (cf. #24).**
+★ **Resolution (2026-09-02, review):** this was a **physical** fault -- the USB-TTL adapter's
+TX wire -- and it was fixed the same day by reseating it, after which `loader.py catch`
+succeeded (`catch: OK`), stock was flashed and OpenWrt restored through the monitor. So
+`docs/WIFI-DUAL-BAND.md`'s "serial/loader recovery works" and this entry are both true, at
+different times; the diagnosis below is what to do when it recurs.
 Confound #24 says an apparent "serial TX dead" was really a silently stalled `uart_daemon.py`,
 three times. That explanation does **not** cover the current state, and the distinguishing
 evidence is a single reboot in which BOTH facts appear in the same log window:
