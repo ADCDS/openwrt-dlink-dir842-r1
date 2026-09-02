@@ -196,7 +196,15 @@
 };
 
 /*
+ * Root complex 0 carries the RTL8822BE 5 GHz radio. pcie1 stays disabled: that
+ * silicon is unverified on this board and shares its interrupt output with the
+ * on-SoC WMAC.
+ */
+&pcie0 {
+	status = "okay";
+};
+
+/*
  * Enabled per bring-up milestone as each driver lands:
- *   &pcie0 -> the RTL8822BE 5 GHz radio
- *   &wmac  -> the on-SoC 2.4 GHz radio
+ *   &wmac -> the on-SoC 2.4 GHz radio
  */

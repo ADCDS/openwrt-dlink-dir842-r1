@@ -2,6 +2,18 @@
 . /lib/functions.sh
 . /lib/netifd/netifd-wireless.sh
 
+# ★ THIS FILE MUST ONLY BE INSTALLED ALONGSIDE THE DRIVER IT DRIVES.
+#
+# It lives outside base-files/ deliberately, so nothing installs it yet; the M7
+# kmod-rtl8192cd package will. netifd probes every handler in
+# /lib/netifd/wireless at startup, and one that describes a driver whose device
+# never appears sends netifd into a 100%-CPU spin in which it applies no
+# configuration at all: no br-lan, no addresses, not even on lo, and every
+# `ubus call network...` hangs. Measured on an image that had the 5 GHz radio
+# but not this driver. Making the script exit early and silently does NOT help
+# -- netifd spins on the empty reply just the same -- so absence is the only
+# safe state.
+
 # ★ MANDATORY, and its absence is silent. netifd-wireless.sh ships a NO-OP stub
 #   `add_driver() { return; }` (netifd-wireless.sh:12). The real implementation is
 #   installed only by init_wireless_driver() (netifd-wireless.sh:367), which each

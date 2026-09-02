@@ -4,15 +4,22 @@
 #
 # Boot chain: the D-Link v3.4.11B loader finds a cvimg header with signature 'cr6b' at
 # flash offset 0x40000, verifies the keyed-MD5 trailer, copies the payload to
-# CVIMG_LOADER_START_ADDR (0x81000000) and jumps there. The payload is our lzma-loader
-# (linked at LZMA_TEXT_START = 0x81000000) which decompresses vmlinux.bin+dtb to
+# CVIMG_LOADER_START_ADDR and jumps there. The payload is our lzma-loader (linked at
+# LZMA_TEXT_START, the same address) which decompresses vmlinux.bin+dtb to
 # KERNEL_LOADADDR and jumps to it. The MIPS generic kernel links at 0x80100000.
+#
+# The loader must sit above the DECOMPRESSED kernel, because it is still executing
+# while it writes: at 0x81000000 the budget was 15 MB, and adding the 5 GHz radio
+# pushed the uncompressed image past it -- decompression then overwrote the loader
+# mid-run and the board died with "Decompressing kernel... Undefined Exception
+# happen." 0x82000000 gives 31 MB, with the board's 64 MB of DRAM ending at
+# 0x84000000 and the stock bootloader living near the top of it.
 
 include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/image.mk
 
 KERNEL_LOADADDR := 0x80100000
-LZMA_TEXT_START := 0x81000000
+LZMA_TEXT_START := 0x82000000
 
 DEVICE_VARS += CVIMG_KERNEL_BURN_ADDR CVIMG_LOADER_START_ADDR CMDLINE
 
@@ -93,15 +100,15 @@ define Device/dlink_dir-842-r1
 	# stock flash map: firmware region at 0x40000, 7872k, booted via the cr6b signature
 	IMAGE_SIZE := 7872k
 	CVIMG_KERNEL_BURN_ADDR := 0x40000
-	CVIMG_LOADER_START_ADDR := 0x81000000
+	CVIMG_LOADER_START_ADDR := 0x82000000
 	# v1.x images of this port identified as the Greatek GWR1200AC-V1 profile
 	SUPPORTED_DEVICES += gwr1200ac-v1
 	DEVICE_COMPAT_VERSION := 2.0
 	DEVICE_COMPAT_MESSAGE := Config cannot be migrated from swconfig to DSA \
 		(eth0.1/eth0.2 became wan/lan1..lan4); sysupgrade with -n
-	# Radio packages are added back when PCIe and the 2.4 GHz WMAC are enabled;
-	# rtw88 cannot even link without PCI in the kernel.
-	DEVICE_PACKAGES := kmod-leds-gpio kmod-gpio-button-hotplug iperf3
+	# The 2.4 GHz vendor radio (kmod-rtl8192cd) joins this list at M7.
+	DEVICE_PACKAGES := kmod-leds-gpio kmod-gpio-button-hotplug iperf3 \
+		kmod-rtw88-8822be rtl8822be-firmware wpad-basic-mbedtls iw
 	IMAGE/factory.bin := append-kernel | append-fake-rootfs | append-rootfs | \
 		cvimg-kernel-cr6b | cvimg-pad-rootfs | dlink-md5-sign | check-size
 	# sysupgrade MUST sign BEFORE pad-rootfs: pad-rootfs appends the jffs2 'deadc0de'

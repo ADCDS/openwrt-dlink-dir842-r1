@@ -9,7 +9,7 @@
   ew <ADDR> <VAL>       write one 32-bit register (hex, no 0x)
   j <ADDR>              jump into a RAM image
   flash <FILE>          AUTOBURN 1 + TFTP-upload FILE, box auto-reboots
-  ramload <FILE>        AUTOBURN 0 + TFTP-upload FILE to 0x81000000 (then use j)
+  ramload <FILE>        AUTOBURN 0 + TFTP-upload FILE to 0x82000000 (then use j)
   cmd "<STR>"           send an arbitrary monitor command
 
 Notes learned the hard way (see HANDOFF-5.md §4):
@@ -127,8 +127,8 @@ def tftp_put(img, autoburn):
     print(f"autoburn{autoburn}:",
           "OK" if waitfor(rf"AutoBurning={autoburn}", off, 8) else "FAIL")
     if not autoburn:
-        off = size(); send("LOADADDR 81000000\r")
-        print("loadaddr:", "OK" if waitfor(r"81000000", off, 8) else "FAIL")
+        off = size(); send("LOADADDR 82000000\r")
+        print("loadaddr:", "OK" if waitfor(r"82000000", off, 8) else "FAIL")
     off = size(); send("TFTP +\r")
     print("tftp+:", "OK" if waitfor(r"tftp_boot", off, 8) else "FAIL")
     off = size()

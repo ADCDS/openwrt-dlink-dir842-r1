@@ -19,4 +19,19 @@ uci -q batch <<-EOT
 	commit system
 EOT
 
+
+# --- 5 GHz radio (RTL8822BE on PCIe) ---
+# Seed the band/width only. No SSID and no key: a shipped default passphrase is
+# worse than no radio, so the AP stays disabled exactly as OpenWrt generates it
+# and the user turns it on. HT20 rather than the auto-detected VHT80, matching
+# what this board shipped with in v1.x.
+[ -e /etc/config/wireless ] || wifi config
+for _dev in $(uci -q show wireless | sed -n 's/^wireless\.\([A-Za-z0-9_-]*\)=wifi-device$/\1/p'); do
+	[ "$(uci -q get wireless.$_dev.type)" = "mac80211" ] || continue
+	[ "$(uci -q get wireless.$_dev.band)" = "5g" ] || continue
+	uci -q set wireless.$_dev.htmode='HT20'
+	uci -q set wireless.$_dev.channel='36'
+done
+uci -q commit wireless
+
 exit 0

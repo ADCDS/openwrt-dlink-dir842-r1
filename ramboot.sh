@@ -70,14 +70,14 @@ for round in 1 2 3; do
     MARK=$(wc -c < "$LOG")
     printf '\r' > "$PORT"; sleep 0.5
     printf 'AUTOBURN 0\r' > "$PORT"; sleep 1
-    printf 'LOADADDR 81000000\r' > "$PORT"; sleep 1
+    printf 'LOADADDR 82000000\r' > "$PORT"; sleep 1
     printf 'TFTP +\r' > "$PORT"; sleep 3
     if curl -s --connect-timeout 8 --max-time 90 -T "$IMG" tftp://192.168.0.1/img; then tftp_ok=1; echo "    TFTP ok (try $t)"; break; fi
     echo "    curl failed (retry $t)"; sleep 2; sr
   done
   [ $tftp_ok -eq 1 ] || { echo "  TFTP failed 4x"; continue; }
 
-  sleep 1; sr; printf 'J 81000000\r' > "$PORT"
+  sleep 1; sr; printf 'J 82000000\r' > "$PORT"
   echo "  jumped; waiting for shell"
   DL2=$((SECONDS+90))
   while [ $SECONDS -lt $DL2 ]; do

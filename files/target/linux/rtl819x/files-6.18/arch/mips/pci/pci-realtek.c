@@ -19,7 +19,7 @@
 #include <linux/platform_device.h>
 #include <linux/clk.h>
 
-#include <asm/mach-realtek/realtek_mem.h>
+#include <rtl819x-sysc.h>
 
 struct realtek_pci_controller {
 	void __iomem *rc_cfg_base;
@@ -341,7 +341,6 @@ static int realtek_pci_probe(struct platform_device *pdev)
 	struct realtek_pci_controller *rpc;
 	struct resource *res;
 	int id;
-	u32 val;
 	u16 cmd;
 	u8 v8;
 
@@ -376,7 +375,9 @@ static int realtek_pci_probe(struct platform_device *pdev)
 		return PTR_ERR(rpc->dev_cfg1_base);
 
 	rpc->clk = devm_clk_get(&pdev->dev, NULL);
-	if(!rpc->clk)
+	/* devm_clk_get() returns an ERR_PTR, never NULL, so the old !rpc->clk
+	 * test never fired and a missing clock reached clk_get_rate() below. */
+	if (IS_ERR(rpc->clk))
 		return PTR_ERR(rpc->clk);
 
 	iomem_resource.start = 0;
@@ -438,14 +439,24 @@ int pcibios_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
 	struct realtek_pci_controller *rpc;
 	u16 cmd;
-	int irq = 5;
+	int irq;
 
 	rpc = pci_bus_to_realtek_pci_controller(dev->bus);
 	if(!rpc)
 		return 0;
 
-	//TODO: Implement second pcie (get irq from dt)
-	// Bus:1 Slot:0 Pin:1 -> first wireless card
+	/*
+	 * Take the interrupt from the root complex's own DT node rather than
+	 * hardcoding the MIPS IP number. The SoC line reaches the CPU through
+	 * the Realtek interrupt controller now, so what a driver must request
+	 * is the intc-domain virq (input 21 on the IP5 output), not 5 -- and
+	 * hardcoding it also had no way to describe the second root complex.
+	 */
+	irq = of_irq_get(rpc->np, 0);
+	if (irq <= 0) {
+		dev_err(&dev->dev, "no interrupt in %pOF: %d\n", rpc->np, irq);
+		return 0;
+	}
 
 	/* setup the slot */
 	cmd = PCI_COMMAND_MASTER | PCI_COMMAND_IO | PCI_COMMAND_MEMORY;
