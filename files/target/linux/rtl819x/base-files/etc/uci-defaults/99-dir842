@@ -2,13 +2,18 @@
 # First-boot defaults for the DIR-842 R1.
 #
 # Guarded so it only ever runs once: a re-run after the user has changed things
-# would silently overwrite them.
+# would silently overwrite them. Also skipped entirely if the network config has
+# not been generated yet, so this can never create a half-formed lan section.
 [ "$(uci -q get system.@system[0].dir842_seeded)" = "1" ] && exit 0
+uci -q get network.lan >/dev/null || exit 0
 
 # 192.168.0.1 rather than OpenWrt's usual 192.168.1.1, to match the address the
-# bootloader's recovery TFTP server uses, so one host setup serves both.
+# bootloader's recovery TFTP server uses, so one host setup serves both. The
+# netmask is set explicitly rather than inherited: setting only the address
+# leaves the interface on a /32, which reaches nothing.
 uci -q batch <<-EOT
 	set network.lan.ipaddr='192.168.0.1'
+	set network.lan.netmask='255.255.255.0'
 	set system.@system[0].dir842_seeded='1'
 	commit network
 	commit system
