@@ -1674,8 +1674,12 @@ static int rtl819x_eth_probe(struct platform_device *pdev)
 	 * re-attached as a ctag (poll loop) and TX reads the ctag for the
 	 * egress VID (xmit) — this drives the eth0.9 (LAN) / eth0.8 (WAN) split.
 	 */
-	dev->features |= NETIF_F_HW_VLAN_CTAG_RX | NETIF_F_HW_VLAN_CTAG_TX;
-	dev->hw_features |= NETIF_F_HW_VLAN_CTAG_RX | NETIF_F_HW_VLAN_CTAG_TX;
+	/*
+	 * Room for the DSA tag on top of a normal frame. Without it the core
+	 * cannot raise the conduit to 1508, and every user port is then capped
+	 * below 1500 and refuses the standard MTU.
+	 */
+	dev->max_mtu = ETH_DATA_LEN + RTL819X_DSA_TAG_LEN;
 	netif_napi_add(dev, &priv->napi, rtl819x_eth_poll);
 
 	/* MAC address: DT if present, else random (userspace sets the real one). */

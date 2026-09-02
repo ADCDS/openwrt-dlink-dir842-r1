@@ -5,77 +5,35 @@
 . /lib/functions/system.sh
 
 board_config_update
-board=$(cat /tmp/sysinfo/board_name)
-
-# R3: this used to say "eth0" "eth1". There IS no eth1 on the DIR-842 R1 — the SoC has a
-# single CPU-port netdev and Linux splits it into eth0.2 (LAN, VID2) / eth0.1 (WAN, VID1).
-# The phantom eth1 had a real consequence: config_generate emitted a wan_eth1_dev device
-# section and hung the per-unit WAN MAC off a device that never appears, so eth0.1 silently
-# inherited eth0's (LAN) MAC. The ASIC programs its WAN netif from eth0.1's live MAC and
-# rewrites HW-routed egress src to it, so LAN==WAN MAC breaks the LAN=WAN+1 invariant and
-# blackholes CPU<->WAN traffic while HW-routed frames still work. Name the real devices.
-ucidef_set_interfaces_lan_wan "eth0.2" "eth0.1"
-
-lan_mac=""
-wan_mac=""
+board=$(board_name)
 
 case $board in
-  dir-815-d1)
-    offset=$(strings -t x "$(find_mtd_part boot)" | grep llconfig | head -n 1 | awk '{ print "0x"$1 }')
-    offset=$((offset+53))
-    wan_mac=$(mtd_get_mac_binary boot $offset)
-    lan_mac=$(macaddr_add "$wan_mac" 1)
-    ;;
-  re708-v1)
-    wan_mac=$(mtd_get_mac_binary boot 131079)
-    lan_mac=$(macaddr_add "$wan_mac" 1)
-    ;;
-  gwr1200ac-v1)
-    # DIR-842 R1: the mtd1 "MAC" partition carries TWO overlaid schemas.
-    #   0x00: D-Link per-unit base MAC as a 17-byte ASCII string ("e0:1c:fc:51:c9:ee")
-    #         = the WAN MAC; LAN = WAN + 1. This is what stock uses (libhwdata.so).
-    #   0x13: the Realtek vendor DEFAULT binary macAddr[] block (00:e0:4c:81:96:c1..c8),
-    #         identical on every unit.
-    # Reading offset 19 (=0x13) gives every board the same MAC, so read the ASCII
-    # field and fall back only if it is missing/garbage.
-    #
-    # ★ THIS IS THE SINGLE SOURCE OF TRUTH FOR THE MAC — do not add a second one.
-    # An earlier attempt ALSO pinned network.lan/wan.macaddr from uci-defaults. Two
-    # independent sources is what made the MAC non-deterministic: some boots came up
-    # on the per-unit MAC and identical later boots on the fallback, depending on
-    # which writer won. board.d is the right place because it runs before netifd
-    # configures the interfaces, and this read is proven to work here (a boot with
-    # this code brought eth0.2 up as e0:1c:fc:51:c9:ef).
-    # The driver side follows automatically: gw_netif_mac() programs the ASIC netif
-    # from the interface's LIVE MAC, so Linux and the ASIC cannot disagree.
-    wan_mac=$(dd if=/dev/mtd1 bs=1 count=17 2>/dev/null)
-    case "$wan_mac" in
-      [0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]) ;;
-      *) wan_mac=$(mtd_get_mac_binary MAC 19) ;;
-    esac
-    lan_mac=$(macaddr_add "$wan_mac" 1)
-    ;;
-  gwr1200ac-v2)
-    wan_mac=$(mtd_get_mac_binary boot 131091)
-    lan_mac=$(macaddr_add "$wan_mac" 1)
-    ;;
-  actionrg1200-v1 | \
-  actionrf1200-v1)
-    wan_mac=$(mtd_get_mac_ascii boot HW_NIC0_ADDR)
-    lan_mac=$(macaddr_add "$wan_mac" 1)
-    ;;
-  gwr-300n-v1)
-    wan_mac=$(mtd_get_mac_binary boot 24595)
-    lan_mac=$(mtd_get_mac_binary boot 24583)
-    ;;
-  re172-v1)
-    wan_mac=$(mtd_get_mac_binary boot 24583)
-    lan_mac=$(mtd_get_mac_binary boot 24595)
+dlink,dir-842-r1)
+	ucidef_set_interfaces_lan_wan "lan1 lan2 lan3 lan4" "wan"
+
+	# The mtd1 "MAC" partition carries TWO overlaid schemas:
+	#   0x00: the D-Link per-unit base MAC as a 17-byte ASCII string
+	#         ("e0:1c:fc:51:c9:ee") = the WAN MAC; LAN = WAN + 1. This is
+	#         what the stock firmware uses.
+	#   0x13: the Realtek vendor DEFAULT binary block, identical on every unit.
+	# Reading the binary field gives every board the same MAC, so read the
+	# ASCII field and fall back only if it is missing or malformed.
+	#
+	# ★ THIS IS THE SINGLE SOURCE OF TRUTH FOR THE MAC — do not add a second
+	# one. An earlier revision also pinned the addresses from uci-defaults, and
+	# two independent writers is what made the MAC non-deterministic across
+	# otherwise identical boots. board.d runs before netifd configures the
+	# interfaces, which is why it belongs here.
+	wan_mac=$(dd if=/dev/mtd1 bs=1 count=17 2>/dev/null)
+	case "$wan_mac" in
+	[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]) ;;
+	*) wan_mac=$(mtd_get_mac_binary MAC 19) ;;
+	esac
+	lan_mac=$(macaddr_add "$wan_mac" 1)
+
+	[ -n "$lan_mac" ] && ucidef_set_interface_macaddr "lan" "$lan_mac"
+	[ -n "$wan_mac" ] && ucidef_set_interface_macaddr "wan" "$wan_mac"
+	;;
 esac
 
-[ -n "$lan_mac" ] && ucidef_set_interface_macaddr "lan" $lan_mac
-[ -n "$wan_mac" ] && ucidef_set_interface_macaddr "wan" $wan_mac
-
 board_config_flush
-
-exit 0
