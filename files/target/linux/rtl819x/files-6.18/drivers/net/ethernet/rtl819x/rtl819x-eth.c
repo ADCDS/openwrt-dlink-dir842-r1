@@ -154,6 +154,17 @@ struct rtl819x_eth_priv {
 #define RTL819X_WATCHDOG_INTERVAL	DIV_ROUND_UP(HZ, 100)	/* ~10ms fast RX poll */
 
 /*
+ * Datapath console diagnostics: the interrupt trace, the descriptor-pool
+ * pressure warning and the liveness heartbeat. Off by default -- at 38400 baud
+ * these cost more than they reveal, because printk to a serial console is
+ * synchronous and so the tracing itself stalls the datapath under load.
+ */
+static bool datapath_debug;
+module_param(datapath_debug, bool, 0644);
+MODULE_PARM_DESC(datapath_debug, "trace interrupts, descriptor-pool pressure and liveness on the console");
+
+
+/*
  * rtl865x_start() / rtl865x_down(): faithful replication of the vendor
  * AsicDriver rtl865x_start()/rtl865x_down() CPU-port + DMA + interrupt
  * bring-up.  These touch registers spread across the CPU-interface
@@ -834,7 +845,12 @@ static irqreturn_t rtl819x_eth_isr(int irq, void *dev_id)
 	u32 status;
 
 	status = readl(priv->base + R_CPUIISR);
-	{ static u32 isr_n; if (!(isr_n++ & 0x7ff)) pr_info("rtl819x isr#%u st=%08x\n", isr_n, status); }
+	if (datapath_debug) {
+		static u32 isr_n;
+
+		if (!(isr_n++ & 0x7ff))
+			pr_info("rtl819x isr#%u st=%08x\n", isr_n, status);
+	}
 
 	/*
 	 * Mask at BOTH the CPU-iface (CPUIIMR) AND the global controller
@@ -1266,24 +1282,22 @@ static void rtl819x_rx_timer(struct timer_list *t)
  * the VLAN table's untag rule never gets to strip it and it reaches the host.
  * 0 means do not stamp one.
  */
-/*
- * Datapath console diagnostics: the descriptor-pool pressure warning and the
- * liveness heartbeat. Off by default; see the note in the poll routine.
- */
-static bool datapath_debug;
-module_param(datapath_debug, bool, 0644);
-MODULE_PARM_DESC(datapath_debug, "log descriptor-pool pressure and a liveness heartbeat to the console");
-
 static int dsa_tx_vid;
 module_param(dsa_tx_vid, int, 0644);
 MODULE_PARM_DESC(dsa_tx_vid, "802.1Q id for CPU-originated frames under DSA (0 = none)");
 
 /*
- * Measured on hardware: this MAC does honour the single port the tagger names,
- * at the same throughput as flooding, so send only there. Setting this restores
- * the old flood-every-jack behaviour, kept as a fallback.
+ * ★ Frames the CPU originates go to every jack, not to the single port the
+ * tagger named. Measured: with the narrow mask the switch transmits nothing at
+ * all on the target port -- its own MIB counter stays at zero and nothing
+ * reaches the wire -- while flooding works. This matches what the vendor-era
+ * driver recorded, that the switch egresses CPU frames by VLAN membership and
+ * ignores the requested port list.
+ *
+ * An intermediate measurement suggested otherwise; it was taken on an already
+ * established link and was wrong. Clear this only with a cold-boot test.
  */
-static int dsa_tx_flood;
+static int dsa_tx_flood = 1;
 module_param(dsa_tx_flood, int, 0644);
 MODULE_PARM_DESC(dsa_tx_flood, "CPU-originated frames flood all jacks (1) or go only to the port DSA named (0)");
 
