@@ -1501,11 +1501,14 @@ throughput on this box was **flat at ~100 Mbit/s across VHT80 and VHT40** (PHY 3
 Mbit/s), i.e. width was never buying throughput here -- so trading it for a link that
 actually works is close to free.
 
-★★★ **Applied to the running box** (`uci set wireless.radio0.htmode=HT20`). It persists
-across reboots because it lives in the overlay, **but a `sysupgrade -n` will wipe it** --
-the `htmode` default comes from the private build profile, not from `files/`. ★ **Update
-the profile's `wireless.radio0.htmode` to `HT20`**, or this regresses on the next clean
-flash.
+★★★ **Shipped as the default** in `files/.../uci-defaults/99-dir842-m5`
+(`htmode='HT20'`, commit `3b5a56f`). ★★ **Precedence trap, found the hard way:** the private
+build profile ships `99-zzz-dir842-ap`, which sorts *after* `99-dir842-m5` and **restores
+whole files from `/etc/ap-profile/`** on the first boot after every flash -- so its saved
+`wireless` file silently re-applied `VHT80` over the uci-default, and the box came up on the
+broken width after a clean `sysupgrade -n`. Any profile that restores `/etc/config/wireless`
+must itself carry `HT20` for radio0. Both profile variants were patched (`wireless`,
+`wireless.BRAVO-production`) and HT20 was then verified to survive a clean `-n` flash.
 
 ★ VHT40 failing as well is worth noting: the margin here is thin enough that only the full
 6 dB of HT20 rescues it. If a future fix recovers the ~14 dB RF deficit, revisit the width

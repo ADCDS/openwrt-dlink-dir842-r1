@@ -192,7 +192,9 @@ CPU ~99.7 % idle. As far as we know this is the first working mainline OpenWrt
   ★ **Practical consequence, and the fix shipped here:** at 80 MHz the link is marginal
   enough that 5 GHz clients associate but never complete DHCP. **The image defaults to
   HT20**, which carries data (~58 Mbit/s) where VHT80/VHT40 carry none. If you set your own
-  `htmode`, keep it at 20 MHz until the RF deficit is recovered.
+  `htmode`, keep it at 20 MHz until the RF deficit is recovered — and if your build profile
+  restores `/etc/config/wireless` from a saved copy (as the reference profile does, *after* the
+  uci-defaults run), that saved copy must carry `HT20` too.
 - **Download throughput is variable** (**681–906 Mbit** across runs) with 1200–2500 TCP retransmits per
   10 s run. The router is not the bottleneck (CPU 0.3 %, zero interface errors), but the
   loss source is not yet identified. Take a range, not a single run.

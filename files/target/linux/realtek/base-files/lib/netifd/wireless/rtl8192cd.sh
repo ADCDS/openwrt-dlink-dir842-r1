@@ -263,6 +263,13 @@ drv_rtl8192cd_setup() {
 		echo "${phy_ifname}_band=${band:-11}"
 		[ -n "$country" ] && echo "${phy_ifname}_regdomain=$country"
 		echo "${phy_ifname}_channel=${channel:-0}"
+		# ★ Panel LED (issue #3). led_type 0 = LEDTYPE_HW_TX_RX leaves the 2.4 GHz LED
+		# dark on this board; a software type makes enable_sw_LED() set LED2EN|LED2SV on
+		# open and the driver's LED task blink it with link/traffic, as stock does.
+		# 11 = LEDTYPE_SW_LED2_GPIO8_LINKTXRX (8192cd.h enum led_type; the vendor default
+		# in one of the two set_mib tables, 8192cd_ioctl.c:1429). Verified on hardware:
+		# `echo 1 > /proc/wlan0/led` alone gave only a faint glow (SV without EN).
+		echo "${phy_ifname}_led_type=${led_type:-11}"
 		echo "${phy_ifname}_use40M=$(rtl_htmode_to_use40m "$htmode")"
 		echo "${phy_ifname}_2ndchoffset=$(rtl_htmode_to_offset "$htmode")"
 		[ -n "$beacon_int" ]  && echo "${phy_ifname}_bcnint=$beacon_int"

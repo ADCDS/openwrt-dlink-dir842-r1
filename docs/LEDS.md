@@ -156,3 +156,50 @@ Sanity-check the interface with `rd 0x1300` → `0x6367` and `rd 0x1301` → `0x
   Wiring it to a trigger in `board.d/01_leds` is a one-liner whenever it is wanted.
 - **Power.** Nothing to do; it has no GPIO in stock either (its `libdhal.so` entry points
   are stubs) and it is lit.
+
+
+## ★ WiFi panel LEDs — FIXED (issue #3)
+
+Both WiFi LEDs are driven by the respective WiFi MAC, not by SoC GPIOs (see the `gpiom.ko`
+decode above — there is no WiFi LED GPIO in stock). Both are now lit. Verified on the panel
+2026-09-02.
+
+### 2.4 GHz — vendor `rtl8192cd`: a MIB knob, no driver change
+
+The driver has full LED plumbing (`8192cd_led.c`); it was dark only because the MIB
+`led_type` defaulted to **0 = `LEDTYPE_HW_TX_RX`**, a hardware-indication mode this board does
+not wire. Setting a *software* type makes `enable_sw_LED()` configure the LED on open
+(`LEDCFG` `LED2EN | LED2SV`) and the driver's LED task then blinks it with link/traffic, as
+stock does.
+
+★ **Diagnosis that found it, worth keeping:** `echo 1 > /proc/wlan0/led` (the proc entry is
+*write-only* — reading it gives `I/O error`) calls `control_wireless_led(priv, 1)`, which
+forces the three LED **software values** on and produced only a **faint glow**. The proper path
+also sets the **enable** bit; the difference between "faint" and "strong" is `LED2EN`. So: a
+faint LED means SV without EN.
+
+Shipped in `lib/netifd/wireless/rtl8192cd.sh`: `${phy_ifname}_led_type=${led_type:-11}` in the
+driver's `.dat` (11 = `LEDTYPE_SW_LED2_GPIO8_LINKTXRX`, the vendor default in one of its two
+`set_mib` tables, `8192cd_ioctl.c:1429`). The `RTLWIFINIC_GPIO_CONTROL` bit-bang path is
+`#undef`'d in `8192cd_cfg.h`, so this is the `LEDCFG` register path. Override with uci
+`option led_type N` on the radio if a different blink policy is wanted.
+
+### 5 GHz — rtw88 patch `06-rtw88-8822b-panel-led.patch`
+
+rtw88 5.8-rc2 has no LED support. The vendor driver's `set_sw_LED0()` for `VERSION_8822B`
+drives the card's **GPIO8: register `0x60` bit 8, active-low** (set = off, clear = on),
+touching no other bit — rtw88's own writes to `0x62` are SDIO-only, so on PCIe nothing else
+configures that pin. The patch mirrors the vendor write exactly: LED on at the end of
+`rtw_core_start()`, off at the top of `rtw_core_stop()`, i.e. **LED follows the radio**.
+`rtw88_core.led=0` disables it. dmesg confirms it on every bring-up:
+
+```
+rtw_8822be 0000:01:00.0: panel LED on (reg 0x60=0x0000000b)
+```
+
+(You will see `on` → `off` → `on` at boot: mac80211 restarts the radio once during setup.)
+
+### Still unwired
+
+* **WPS** (`dir842:green:wps`, GPIO 22) — the LED device exists at brightness 0 and is not
+  bound to any trigger. One line in `board.d/01_leds` if anyone wants it.
