@@ -169,7 +169,7 @@ case "$DIR842_XCAP" in
 	;;
 esac
 
-# --- 5 GHz AP on the PCIe RTL8822BE (rtw88); 2x2 VHT80. hwmode 11a = 5 GHz on
+# --- 5 GHz AP on the PCIe RTL8822BE (rtw88); 2x2, HT20 (see below). hwmode 11a = 5 GHz on
 #     this 4.14-era netifd. country BR unlocks the UNII-1 channels for beaconing
 #     (world/'00' marks them no-IR). macaddr set because the efuse is blank. ---
 # ⚠ The batch below opens with `delete wireless` — KEEP AS-IS, it is a NO-OP and
@@ -186,7 +186,15 @@ set wireless.radio0='wifi-device'
 set wireless.radio0.type='mac80211'
 set wireless.radio0.hwmode='11a'
 set wireless.radio0.channel='36'
-set wireless.radio0.htmode='VHT80'
+# ★ HT20, NOT VHT80/VHT40 — measured on this unit 2026-09-01: at 80 MHz (and 40 MHz)
+#   5 GHz clients associate and complete EAPOL but DHCP never finishes; wlan1 rx stays 0
+#   and the station is dropped after exactly 4.03 s. At 20 MHz the same client gets an
+#   IP and sustains ~58 Mbit/s. The ~14 dB driver-side TX deficit (docs/WIFI-DUAL-BAND.md,
+#   stock A/B) leaves the link marginal; narrowing to 20 MHz is worth ~6 dB each way and
+#   is what tips it over. Throughput was already flat across 80/40 MHz here, so the cost
+#   is small. Revisit if the RF deficit is ever recovered. HT20 is a workaround, not a
+#   preference.
+set wireless.radio0.htmode='HT20'
 set wireless.radio0.country='BR'
 # ★ R3 RESOLVED — the radio is ENABLED. It used to be forced off because bringing it up
 # hung the box: rtw88 logged `write RF mode table fail` and the console went silent, which

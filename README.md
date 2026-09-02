@@ -180,17 +180,19 @@ CPU ~99.7 % idle. As far as we know this is the first working mainline OpenWrt
 - **WAN ships as a DHCP client.** If your ISP needs PPPoE (or a static address), set it in
   LuCI — *Network → Interfaces → WAN*. Hardware offload follows a dynamic address: the
   ASIC's masquerade IP is reprogrammed from the live WAN IP per flow.
-- **Blank WiFi efuse** — this board keeps no RTL8822BE calibration on-chip, so TX power
-  is uncalibrated (works, but not "loud"); handled in software (default RFE + pinned MAC).
-  ★ **Now quantified (v1.3):** measuring both of our own radios with one client at the same
-  instant gives 2.4 GHz **−60 dBm** vs 5 GHz **−81 dBm**. 5 GHz costs ~6–8 dB of extra path
-  loss, so **~13–15 dB is unexplained** and specific to the 8822BE path — the 2.4 GHz radio
-  is the control proving board, placement and antennas are fine. That caps a *same-room*
-  client at `VHT-MCS 7 / NSS 1` and ~130 Mbit/s of TCP, which is normal efficiency for that
-  PHY rate: the signal is the limit, not the throughput or any offload setting. Crystal cap,
-  RF front-end type, channel/regulatory band, and CPU were each tested and **refuted** —
-  see [`docs/WIFI-DUAL-BAND.md`](docs/WIFI-DUAL-BAND.md). Not fixable in software without
-  recovering real calibration data from the stock kernel.
+- **Blank WiFi efuse, and a 5 GHz transmitter that is ~14 dB short** — this board keeps no
+  RTL8822BE calibration on-chip. ★ **Settled by a stock-firmware A/B on this unit (2026-09-01):**
+  the hardware is fine — stock D-Link reaches **−42 dBm** at a fixed receiver where our
+  OpenWrt reaches **−59 dBm**, and the 2.4 GHz radio reads identically under both. Only ~3 dB
+  of that is regulatory (BR permits 17 dBm on the only channels rtw88 may use); **~14 dB is
+  the driver**, in the RF/analog init path rather than the power index. Not fixable by
+  copying the NOR calibration values into rtw88 — that was measured to make it *worse* —
+  nor by porting RFE-type tables (offsets against an already-saturated base). Full record,
+  including four built-and-rejected fixes, in [`docs/WIFI-DUAL-BAND.md`](docs/WIFI-DUAL-BAND.md).
+  ★ **Practical consequence, and the fix shipped here:** at 80 MHz the link is marginal
+  enough that 5 GHz clients associate but never complete DHCP. **The image defaults to
+  HT20**, which carries data (~58 Mbit/s) where VHT80/VHT40 carry none. If you set your own
+  `htmode`, keep it at 20 MHz until the RF deficit is recovered.
 - **Download throughput is variable** (**681–906 Mbit** across runs) with 1200–2500 TCP retransmits per
   10 s run. The router is not the bottleneck (CPU 0.3 %, zero interface errors), but the
   loss source is not yet identified. Take a range, not a single run.

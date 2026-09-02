@@ -423,7 +423,7 @@ text* differs from the *target text* — here the same command line also contain
 anywhere else in the same command. Bind a fixed port and let the old listener be, or match on
 a PID file.
 
-**#31 — SERIAL TX TO THE BOX IS DEAD, AND THIS TIME IT IS NOT THE DAEMON (cf. #24).**
+**#32 — SERIAL TX TO THE BOX IS DEAD, AND THIS TIME IT IS NOT THE DAEMON (cf. #24).**
 Confound #24 says an apparent "serial TX dead" was really a silently stalled `uart_daemon.py`,
 three times. That explanation does **not** cover the current state, and the distinguishing
 evidence is a single reboot in which BOTH facts appear in the same log window:

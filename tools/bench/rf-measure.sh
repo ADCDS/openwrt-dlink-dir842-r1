@@ -7,7 +7,8 @@
 # over one session for an unchanged config.
 N=${1:-4}
 G5=e0:1c:fc:51:c9:f0   # DIR-842 wlan1 (5 GHz, ch36)
-R5=50:4f:3b:32:68:9f   # reference: neighbour AP also on 5180, fixed
+R5=50:4f:3b:32:68:9f   # reference: another BRAVO AP in the house, co-channel on 5180, fixed
+# ★ Site-specific: G5/G2/R5 MACs, the `tiny` ssh host and the box IP are this bench's.
 G2=00:e0:4c:81:86:86   # DIR-842 wlan0 (2.4 GHz) -- healthy control
 s5=0;c5=0; sr=0;cr=0; s2=0;c2=0
 for i in $(seq 1 "$N"); do

@@ -1574,7 +1574,7 @@ bug underneath it? Discriminator: retest on a boot that lands on the good end of
 AP-side receive figure is the one to watch -- the box's scan RSSI is healthy, so a weak
 *client* reading at the AP is the anomaly to explain.
 
-### Where this leaves the 5 GHz signal — still unfixed, but the search space is much smaller
+### Where this leaves the 5 GHz *signal deficit* — connectivity is fixed (HT20 above); the ~14 dB TX shortfall is not
 
 Everything rtw88 controls has now been measured rather than reasoned about, and all of
 it is correct: maximum power index (and linear response proving it *is* the maximum),
