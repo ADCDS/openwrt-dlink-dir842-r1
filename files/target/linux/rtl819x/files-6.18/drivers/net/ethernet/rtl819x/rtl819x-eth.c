@@ -1252,6 +1252,17 @@ static void rtl819x_rx_timer(struct timer_list *t)
 /* highest switch port that can appear in the descriptor's source field */
 #define RTL819X_DSA_MAX_PORT		6
 
+/*
+ * Egress port mask for frames the CPU originates. The tagger names a single
+ * port, but it is not yet established that this MAC honours a narrow mask in
+ * CPU-tag mode -- the older driver always flooded and noted that narrowing had
+ * no effect. 1 = flood every jack (proven), 0 = use the port the tagger asked
+ * for. Settable at runtime so both can be measured on one boot.
+ */
+static int dsa_tx_flood = 1;
+module_param(dsa_tx_flood, int, 0644);
+MODULE_PARM_DESC(dsa_tx_flood, "CPU-originated frames flood all jacks (1) or go only to the port DSA named (0)");
+
 static bool rtl819x_dsa_tag_rx(struct sk_buff *skb, unsigned int port)
 {
 	__be16 *tag;
@@ -1502,7 +1513,8 @@ static netdev_tx_t rtl819x_eth_xmit(struct sk_buff *skb, struct net_device *dev)
 	 * to flooding the physical ports (bit 6, the CPU port, stays clear so a
 	 * frame cannot loop back).
 	 */
-	nicTx.portlist = (dsa_ports >= 0) ? (dsa_ports & 0x3F) : 0x3F;
+	nicTx.portlist = (dsa_ports >= 0 && !dsa_tx_flood) ? (dsa_ports & 0x3F)
+							  : 0x3F;
 	/*
 	 * VID from the netdev's hwaccel VLAN tag — eth0.2 (LAN) -> VID 2,
 	 * eth0.1 (WAN) -> VID 1 (the M6.6 Fork A VLAN plan); an untagged frame
