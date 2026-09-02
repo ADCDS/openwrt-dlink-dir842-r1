@@ -15,6 +15,7 @@
 #include <linux/sizes.h>
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/partitions.h>
+#include <linux/of.h>
 #include <linux/byteorder/generic.h>
 
 #include "mtdsplit.h"
@@ -201,18 +202,17 @@ static int mtdsplit_parse_cvimg(struct mtd_info *master,
 	return CVIMG_NR_PARTS;
 }
 
+static const struct of_device_id mtdsplit_cvimg_of_match_table[] = {
+	{ .compatible = "realtek,cvimg" },
+	{},
+};
+
 static struct mtd_part_parser mtdsplit_cvimg_parser = {
 	.owner = THIS_MODULE,
 	.name = "cvimg-fw",
+	.of_match_table = mtdsplit_cvimg_of_match_table,
 	.parse_fn = mtdsplit_parse_cvimg,
 	.type = MTD_PARSER_TYPE_FIRMWARE,
 };
 
-static int __init mtdsplit_cvimg_init(void)
-{
-	register_mtd_parser(&mtdsplit_cvimg_parser);
-
-	return 0;
-}
-
-subsys_initcall(mtdsplit_cvimg_init);
+module_mtd_part_parser(mtdsplit_cvimg_parser);

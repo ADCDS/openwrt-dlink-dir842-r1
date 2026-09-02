@@ -1,0 +1,130 @@
+// SPDX-License-Identifier: GPL-2.0
+/dts-v1/;
+
+#include "rtl8197f.dtsi"
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
+
+/ {
+	compatible = "dlink,dir-842-r1", "realtek,rtl8197f-soc";
+	model = "D-Link DIR-842 R1";
+
+	memory@0 {
+		device_type = "memory";
+		reg = <0x0 0x4000000>;
+	};
+
+	/*
+	 * Do NOT add a pstore/ramoops carve-out here. An attached ramoops wedges
+	 * CPU-originated TX on this board: RX stays healthy while every frame the
+	 * box originates is dropped, so it looks alive and is unreachable over
+	 * wired LAN. The mechanism is not understood — four correct-looking ways
+	 * of doing it were each measured and each still wedged TX — so there is
+	 * no "just do it properly" version. See docs/COLD-BOOT-TX-WEDGE.md.
+	 */
+
+	chosen {
+		bootargs = "console=ttyS0,38400";
+		stdout-path = "serial0:38400n8";
+	};
+
+	keys {
+		compatible = "gpio-keys-polled";
+		poll-interval = <20>;
+
+		/* decoded from the stock gpiom.ko dev_buttons table */
+		button-reset {
+			label = "reset";
+			gpios = <&gpio1 22 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_RESTART>;
+		};
+
+		button-wps {
+			label = "wps";
+			gpios = <&gpio1 24 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_WPS_BUTTON>;
+		};
+
+		/*
+		 * Stock declares a third button "wifi" at gpio1 4. Left out: if
+		 * this unit has no such button the pin may float and emit
+		 * spurious KEY_RFKILL, toggling the radio at random.
+		 */
+	};
+
+	/*
+	 * The only software-controllable LED on this board. LAN/WAN/Internet are
+	 * driven by the switch's own link/activity indication, and the power LED
+	 * has no GPIO at all.
+	 *
+	 * gpio0 22, not gpio1 25: the latter sits one pin from gpio1 26, the
+	 * RTL8367S hardware reset, and writing it held the switch in reset —
+	 * which is what "LEDs break the switch" used to mean here.
+	 */
+	leds {
+		compatible = "gpio-leds";
+
+		led-0 {
+			function = LED_FUNCTION_WPS;
+			color = <LED_COLOR_ID_GREEN>;
+			gpios = <&gpio0 22 GPIO_ACTIVE_LOW>;
+		};
+	};
+};
+
+&gpio0 {
+	status = "okay";
+};
+
+&gpio1 {
+	status = "okay";
+};
+
+&spi0 {
+	status = "okay";
+
+	flash@0 {
+		compatible = "jedec,spi-nor";
+		reg = <0>;
+		spi-max-frequency = <41000000>;
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			partition@0 {
+				label = "boot";
+				reg = <0x0 0x20000>;
+				read-only;
+			};
+
+			/* per-unit MAC (ASCII at offset 0) and RF calibration */
+			partition@20000 {
+				label = "MAC";
+				reg = <0x20000 0x10000>;
+				read-only;
+			};
+
+			partition@30000 {
+				label = "config";
+				reg = <0x30000 0x10000>;
+			};
+
+			partition@40000 {
+				compatible = "realtek,cvimg";
+				label = "firmware";
+				reg = <0x40000 0x7b0000>;
+			};
+		};
+	};
+};
+
+/*
+ * Enabled per bring-up milestone as each driver lands:
+ *   &ethernet -> the DSA conduit (with the switch node)
+ *   &pcie0    -> the RTL8822BE 5 GHz radio
+ *   &wmac     -> the on-SoC 2.4 GHz radio
+ */

@@ -1,0 +1,29 @@
+From: DIR-842 R1 port
+Subject: [PATCH] net: wireless: add the RTL8197F WMAC drivers
+
+Wires up the on-SoC 2.4 GHz WMAC bring-up driver and the vendor rtl8192cd
+driver. The target Makefile stubs both directories when the (redistributed)
+vendor source is absent, so this source line is always resolvable.
+
+--- a/drivers/net/wireless/Kconfig	2026-09-02 12:33:45.143479832 -0300
++++ b/drivers/net/wireless/Kconfig	2026-09-02 12:33:45.163480969 -0300
+@@ -30,6 +30,8 @@
+ source "drivers/net/wireless/purelifi/Kconfig"
+ source "drivers/net/wireless/ralink/Kconfig"
+ source "drivers/net/wireless/realtek/Kconfig"
++source "drivers/net/wireless/rtl8197f/Kconfig"
++source "drivers/net/wireless/rtl8192cd/Kconfig"
+ source "drivers/net/wireless/rsi/Kconfig"
+ source "drivers/net/wireless/silabs/Kconfig"
+ source "drivers/net/wireless/st/Kconfig"
+--- a/drivers/net/wireless/Makefile	2026-09-02 12:33:45.143479832 -0300
++++ b/drivers/net/wireless/Makefile	2026-09-02 12:33:45.163480969 -0300
+@@ -16,6 +16,8 @@
+ obj-$(CONFIG_WLAN_VENDOR_QUANTENNA) += quantenna/
+ obj-$(CONFIG_WLAN_VENDOR_RALINK) += ralink/
+ obj-$(CONFIG_WLAN_VENDOR_REALTEK) += realtek/
++obj-$(CONFIG_RTL8197F_WMAC) += rtl8197f/
++obj-$(CONFIG_RTL8192CD) += rtl8192cd/
+ obj-$(CONFIG_WLAN_VENDOR_RSI) += rsi/
+ obj-$(CONFIG_WLAN_VENDOR_SILABS) += silabs/
+ obj-$(CONFIG_WLAN_VENDOR_ST) += st/

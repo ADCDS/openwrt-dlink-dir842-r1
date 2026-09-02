@@ -1,0 +1,83 @@
+From: DIR-842 R1 port
+Subject: [PATCH] irqchip/irq-realtek-rtl: add the RTL819x router variant
+
+The RTL819x (RTL8197F) router SoCs use the same interrupt controller block as
+the RTL83xx switch SoCs but differ in two details, both verified against a
+working vendor/fork driver on hardware:
+
+ - the IRR registers are numbered the other way round: input 0 lives in the
+   first four bits of IRR0 rather than IRR3;
+ - the routing field holds the MIPS interrupt-pending number itself (IP4 is
+   written as 4), not (parent hwirq - 1).
+
+Select the behaviour per compatible. "realtek,rtl8197f-intc" deliberately has no
+"realtek,rtl-intc" fallback so an unpatched kernel cannot bind with the wrong
+semantics.
+
+--- a/drivers/irqchip/irq-realtek-rtl.c	2026-09-02 12:35:34.085382938 -0300
++++ b/drivers/irqchip/irq-realtek-rtl.c	2026-09-02 12:35:34.093383351 -0300
+@@ -38,12 +38,36 @@
+ static void __iomem *realtek_ictl_base[NR_CPUS];
+ 
+ /*
+- * IRR0-IRR3 store 4 bits per interrupt, but Realtek uses inverted numbering,
+- * placing IRQ 31 in the first four bits. A routing value of '0' means the
+- * interrupt is left disconnected. Routing values {1..15} connect to output
+- * lines {0..14}.
++ * IRR0-IRR3 store 4 bits per interrupt. A routing value of '0' means the
++ * interrupt is left disconnected.
++ *
++ * The RTL83xx/RTL93xx switch SoCs use inverted register numbering, placing IRQ
++ * 31 in the first four bits of IRR0, and encode the destination as
++ * (parent hwirq - 1), i.e. routing values {1..15} select output lines {0..14}.
++ *
++ * The RTL819x router SoCs number the registers the other way round (IRQ 0 in
++ * the first four bits of IRR0) and encode the destination as the MIPS
++ * interrupt-pending number itself, so IP4 is written as 4.
+  */
+-#define IRR_OFFSET(idx)		(4 * (3 - (idx * 4) / 32))
++struct realtek_ictl_variant {
++	bool irr_inverted;
++	unsigned int route_bias;
++};
++
++static const struct realtek_ictl_variant realtek_ictl_rtl83xx = {
++	.irr_inverted	= true,
++	.route_bias	= 1,
++};
++
++static const struct realtek_ictl_variant realtek_ictl_rtl819x = {
++	.irr_inverted	= false,
++	.route_bias	= 0,
++};
++
++static const struct realtek_ictl_variant *realtek_ictl_variant = &realtek_ictl_rtl83xx;
++
++#define IRR_OFFSET(idx)		(realtek_ictl_variant->irr_inverted ? \
++				 (4 * (3 - (idx * 4) / 32)) : (4 * ((idx * 4) / 32)))
+ #define IRR_SHIFT(idx)		((idx * 4) % 32)
+ 
+ static inline void enable_gimr(unsigned int cpu, unsigned int hw_irq)
+@@ -124,7 +148,8 @@
+ 	guard(raw_spinlock_irqsave)(&irq_lock);
+ 	output->mask |= BIT(hw_irq);
+ 	for_each_present_cpu(cpu)
+-		write_irr(cpu, hw_irq, output->parent_hwirq - 1);
++		write_irr(cpu, hw_irq,
++			  output->parent_hwirq - realtek_ictl_variant->route_bias);
+ 
+ 	return 0;
+ }
+@@ -265,4 +290,12 @@
+ 	return realtek_setup_parents(node);
+ }
+ 
++static int __init realtek_rtl819x_of_init(struct device_node *node, struct device_node *parent)
++{
++	realtek_ictl_variant = &realtek_ictl_rtl819x;
++
++	return realtek_rtl_of_init(node, parent);
++}
++
+ IRQCHIP_DECLARE(realtek_rtl_intc, "realtek,rtl-intc", realtek_rtl_of_init);
++IRQCHIP_DECLARE(realtek_rtl819x_intc, "realtek,rtl8197f-intc", realtek_rtl819x_of_init);

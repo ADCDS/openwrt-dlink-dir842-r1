@@ -1,0 +1,99 @@
+From: DIR-842 R1 port
+Subject: [PATCH] mips: add MACH_REALTEK_RTL819X (RTL8197F) generic-platform machine
+
+RTL819x home-router SoCs are little-endian MIPS32r2 and unrelated to the
+big-endian RTL838x/RTL930x switch family that MACH_REALTEK_RTL covers, so they
+need their own machine symbol. Wire up the generic board file, the include path
+for the SoC header, the (shared) Realtek interrupt controller, the Otto GPIO
+driver and the PCIe host driver.
+
+--- a/arch/mips/Kconfig	2026-09-02 12:33:45.103477556 -0300
++++ b/arch/mips/Kconfig	2026-09-02 12:33:45.159480742 -0300
+@@ -714,6 +714,37 @@
+ 	select USE_OF
+ 	select REALTEK_OTTO_TIMER
+ 
++config MACH_REALTEK_RTL819X
++	bool "Realtek RTL819x based routers"
++	select MIPS_GENERIC
++	select MACH_GENERIC_CORE
++	select DMA_NONCOHERENT
++	select IRQ_MIPS_CPU
++	select CSRC_R4K
++	select CEVT_R4K
++	select COMMON_CLK
++	select GPIOLIB
++	select HW_HAS_PCI
++	select SYS_HAS_CPU_MIPS32_R2
++	select SYS_SUPPORTS_LITTLE_ENDIAN
++	select SYS_SUPPORTS_32BIT_KERNEL
++	select SYS_SUPPORTS_MIPS16
++	select SYS_HAS_EARLY_PRINTK
++	select BOOT_RAW
++	select NO_EXCEPT_FILL
++	select USE_OF
++	help
++	  Realtek RTL819x home-router SoCs (RTL8197F). Unlike the RTL838x/RTL839x
++	  managed-switch family above these are little-endian MIPS32r2 cores.
++
++config SOC_RTL8197F
++	bool "RTL8197F"
++	depends on MACH_REALTEK_RTL819X
++	default y
++	help
++	  Realtek RTL8197F: MIPS 24Kc, on-SoC 2.4 GHz WMAC, five-port switch
++	  core behind an RGMII trunk, one PCIe root complex.
++
+ config SGI_IP22
+ 	bool "SGI IP22 (Indy/Indigo2)"
+ 	select ARC_MEMORY
+--- a/arch/mips/generic/Platform	2026-09-02 12:33:45.107477784 -0300
++++ b/arch/mips/generic/Platform	2026-09-02 12:33:45.159480742 -0300
+@@ -10,6 +10,7 @@
+ 
+ # Note: order matters, keep the asm/mach-generic include last.
+ cflags-$(CONFIG_MACH_INGENIC_SOC)	+= -I$(srctree)/arch/mips/include/asm/mach-ingenic
++cflags-$(CONFIG_MACH_REALTEK_RTL819X)	+= -I$(srctree)/arch/mips/include/asm/mach-rtl819x
+ cflags-$(CONFIG_MIPS_GENERIC)	+= -I$(srctree)/arch/mips/include/asm/mach-generic
+ 
+ load-$(CONFIG_MIPS_GENERIC)	+= 0xffffffff80100000
+--- a/arch/mips/generic/Makefile	2026-09-02 12:33:45.115478239 -0300
++++ b/arch/mips/generic/Makefile	2026-09-02 12:33:45.159480742 -0300
+@@ -14,3 +14,4 @@
+ obj-$(CONFIG_MACH_INGENIC)			+= board-ingenic.o
+ obj-$(CONFIG_VIRT_BOARD_RANCHU)		+= board-ranchu.o
+ obj-$(CONFIG_MACH_REALTEK_RTL)		+= board-realtek.o
++obj-$(CONFIG_MACH_REALTEK_RTL819X)	+= board-rtl819x.o
+--- a/arch/mips/pci/Makefile	2026-09-02 12:33:45.119478467 -0300
++++ b/arch/mips/pci/Makefile	2026-09-02 12:33:45.159480742 -0300
+@@ -21,6 +21,7 @@
+ obj-$(CONFIG_PCI_AR2315)	+= pci-ar2315.o
+ obj-$(CONFIG_SOC_AR71XX)	+= pci-ar71xx.o
+ obj-$(CONFIG_PCI_AR724X)	+= pci-ar724x.o
++obj-$(CONFIG_MACH_REALTEK_RTL819X)	+= pci-realtek.o
+ obj-$(CONFIG_PCI_XTALK_BRIDGE)	+= pci-xtalk-bridge.o
+ #
+ # These are still pretty much in the old state, watch, go blind.
+--- a/drivers/irqchip/Makefile	2026-09-02 12:33:45.123478695 -0300
++++ b/drivers/irqchip/Makefile	2026-09-02 12:33:45.159480742 -0300
+@@ -130,6 +130,7 @@
+ obj-$(CONFIG_MST_IRQ)			+= irq-mst-intc.o
+ obj-$(CONFIG_SL28CPLD_INTC)		+= irq-sl28cpld.o
+ obj-$(CONFIG_MACH_REALTEK_RTL)		+= irq-realtek-rtl.o
++obj-$(CONFIG_MACH_REALTEK_RTL819X)	+= irq-realtek-rtl.o
+ obj-$(CONFIG_WPCM450_AIC)		+= irq-wpcm450-aic.o
+ obj-$(CONFIG_IRQ_IDT3243X)		+= irq-idt3243x.o
+ obj-$(CONFIG_APPLE_AIC)			+= irq-apple-aic.o
+--- a/drivers/gpio/Kconfig	2026-09-02 12:33:45.127478922 -0300
++++ b/drivers/gpio/Kconfig	2026-09-02 12:33:45.159480742 -0300
+@@ -601,8 +601,8 @@
+ 
+ config GPIO_REALTEK_OTTO
+ 	tristate "Realtek Otto GPIO support"
+-	depends on MACH_REALTEK_RTL
+-	default MACH_REALTEK_RTL
++	depends on MACH_REALTEK_RTL || MACH_REALTEK_RTL819X
++	default MACH_REALTEK_RTL || MACH_REALTEK_RTL819X
+ 	select GPIO_GENERIC
+ 	select GPIOLIB_IRQCHIP
+ 	help

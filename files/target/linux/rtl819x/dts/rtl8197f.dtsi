@@ -1,0 +1,235 @@
+// SPDX-License-Identifier: GPL-2.0
+/dts-v1/;
+
+/ {
+	#address-cells = <1>;
+	#size-cells = <1>;
+	compatible = "realtek,rtl8197f-soc";
+
+	aliases {
+		serial0 = &uart0;
+	};
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		cpu@0 {
+			device_type = "cpu";
+			compatible = "mips,mips24KEc";
+			reg = <0>;
+			clocks = <&cpu_clk>;
+		};
+	};
+
+	/*
+	 * plat_time_init() reads this and halves it for the 24K's CP0 counter,
+	 * giving the 500 MHz the fork hardcoded and the running box reports.
+	 */
+	cpu_clk: cpu-clock {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <1000000000>;
+	};
+
+	bus_clk: bus-clock {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <100000000>;
+	};
+
+	/*
+	 * PCIe/WMAC reference. The SoC bootstrap register proves this board's
+	 * crystal is 25 MHz (BOOTSTRAP bit 24 clear); driving the PCIe PHY with
+	 * 40 MHz coefficients leaves the link permanently untrained.
+	 */
+	xtal_clk: xtal-clock {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <25000000>;
+	};
+
+	cpuintc: interrupt-controller {
+		compatible = "mti,cpu-interrupt-controller";
+		#address-cells = <0>;
+		#interrupt-cells = <1>;
+		interrupt-controller;
+	};
+
+	soc {
+		compatible = "simple-bus";
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges = <0x0 0x18000000 0x10000>;
+
+		sysc: syscon@0 {
+			compatible = "realtek,rtl8197f-sysc", "syscon";
+			reg = <0x0 0x1000>;
+		};
+
+		memc: memory-controller@1000 {
+			compatible = "realtek,rtl8197f-memc";
+			reg = <0x1000 0x100>;
+		};
+
+		/*
+		 * Second interrupt cell selects which parent output the line is
+		 * routed to: 0 = IP2, 1 = IP4, 2 = IP5, 3 = IP6. No
+		 * "realtek,rtl-intc" fallback on purpose: this SoC numbers the
+		 * IRR registers the other way round and encodes the route as the
+		 * IP number itself, so a driver without the rtl819x variant must
+		 * not bind.
+		 */
+		intc: interrupt-controller@3000 {
+			compatible = "realtek,rtl8197f-intc";
+			reg = <0x3000 0x20>;
+
+			interrupt-controller;
+			#interrupt-cells = <2>;
+
+			interrupt-parent = <&cpuintc>;
+			interrupts = <2>, <4>, <5>, <6>;
+		};
+
+		/*
+		 * Register layout matches realtek,otto-gpio. rtl9607 is the
+		 * variant with native (non byte-swapped) port order, which is
+		 * what this little-endian SoC needs.
+		 */
+		gpio0: gpio@3500 {
+			compatible = "realtek,rtl8197f-gpio", "realtek,rtl9607-gpio";
+			reg = <0x3500 0x1c>;
+
+			gpio-controller;
+			#gpio-cells = <2>;
+			ngpios = <32>;
+
+			status = "disabled";
+		};
+
+		gpio1: gpio@351c {
+			compatible = "realtek,rtl8197f-gpio", "realtek,rtl9607-gpio";
+			reg = <0x351c 0x1c>;
+
+			gpio-controller;
+			#gpio-cells = <2>;
+			ngpios = <32>;
+
+			status = "disabled";
+		};
+	};
+
+	/*
+	 * DW-APB UART with RBR/THR at register index 9; see the 8250_dw quirk.
+	 */
+	uart0: serial@18147000 {
+		compatible = "realtek,rtl8197f-uart";
+		reg = <0x18147000 0x100>;
+
+		interrupt-parent = <&intc>;
+		interrupts = <9 0>;
+
+		reg-io-width = <4>;
+		reg-shift = <2>;
+		clock-frequency = <100000000>;
+	};
+
+	spi0: spi@18143000 {
+		compatible = "realtek,sheipa-spi";
+		reg = <0x18143000 0x1000>,	/* controller */
+		      <0x10000000 0x2000000>;	/* memory-mapped read window */
+
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		clocks = <&bus_clk>;
+		clock-frequency = <100000000>;
+
+		status = "disabled";
+	};
+
+	/*
+	 * Switch-core CPU port. Under DSA this is the conduit; the external
+	 * RTL8367S hangs off the RGMII trunk behind it.
+	 */
+	ethernet: ethernet@18010000 {
+		compatible = "realtek,rtl8197f-eth", "realtek,rtl819x-eth";
+		reg = <0x18010000 0x100>;
+
+		/* GISR bit 15 (switch-core NIC) routed to MIPS IP4 */
+		interrupt-parent = <&intc>;
+		interrupts = <15 1>;
+
+		status = "disabled";
+	};
+
+	pcie0: pcie@18b00000 {
+		compatible = "realtek,rtl8196b-pci";
+		#address-cells = <3>;
+		#size-cells = <2>;
+		bus-range = <0 255>;
+
+		reg = <0x18b00000 0x1000>,	/* RC CFG */
+		      <0x18b01000 0x1000>,	/* RC CFG EXT */
+		      <0x18b10000 0x1000>,	/* DEV CFG0 (EP) */
+		      <0x18b11000 0x1000>;	/* DEV CFG1 (EP) */
+		reg-names = "rc_cfg_base", "rc_ext_base",
+			    "dev_cfg0_base", "dev_cfg1_base";
+
+		ranges = <0x02000000 0 0x00000000 0x19000000 0 0x01000000>,	/* memory */
+			 <0x01000000 0 0x00000000 0x18c00000 0 0x00200000>;	/* io */
+
+		interrupt-parent = <&intc>;
+		interrupts = <21 2>;
+		clocks = <&xtal_clk>;
+
+		status = "disabled";
+	};
+
+	/*
+	 * Second root complex. Unverified silicon: the reference design has one
+	 * RC and one radio, and a config read into a dead region hard-stalls the
+	 * CPU bus on this fabric (no bus-error exception). It also claims the
+	 * same interrupt input as the WMAC below, so it must stay disabled.
+	 */
+	pcie1: pcie@18b20000 {
+		compatible = "realtek,rtl8196b-pci";
+		#address-cells = <3>;
+		#size-cells = <2>;
+		bus-range = <0 255>;
+
+		reg = <0x18b20000 0x1000>,
+		      <0x18b21000 0x1000>,
+		      <0x18b30000 0x1000>,
+		      <0x18b31000 0x1000>;
+		reg-names = "rc_cfg_base", "rc_ext_base",
+			    "dev_cfg0_base", "dev_cfg1_base";
+
+		ranges = <0x02000000 0 0x00000000 0x1a000000 0 0x01000000>,
+			 <0x01000000 0 0x00000000 0x18e00000 0 0x00200000>;
+
+		interrupt-parent = <&intc>;
+		interrupts = <29 3>;
+		clocks = <&xtal_clk>;
+
+		status = "disabled";
+	};
+
+	/*
+	 * On-SoC 2.4 GHz WMAC. Base and interrupt decoded from the stock vendor
+	 * kernel's wlan device table. Register access is gated by SR+0x64 (see
+	 * rtl819x-sysc.h): without lifting that gate every read returns garbage.
+	 * Per-unit RF calibration is not in an efuse; it lives in the read-only
+	 * "MAC" flash partition and has to be pushed in from userspace.
+	 */
+	wmac: wmac@18640000 {
+		compatible = "realtek,rtl8197f-wmac";
+		reg = <0x18640000 0x10000>;
+
+		interrupt-parent = <&intc>;
+		interrupts = <29 3>;
+		clocks = <&xtal_clk>;
+
+		status = "disabled";
+	};
+};

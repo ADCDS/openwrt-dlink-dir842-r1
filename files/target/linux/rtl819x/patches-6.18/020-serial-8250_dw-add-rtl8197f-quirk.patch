@@ -1,0 +1,107 @@
+From: DIR-842 R1 port
+Subject: [PATCH] serial: 8250_dw: support the Realtek RTL8197F register layout
+
+The DW-APB UART on the RTL8197F deviates from the standard block in two ways:
+the receive/transmit holding registers sit at register index 9 (byte offset
+0x24) rather than 0, and the line control register reads back a word length two
+less than what was written, which makes the generic LCR readback check spin.
+
+Add a quirk covering both and match it on "realtek,rtl8197f-uart".
+
+--- a/drivers/tty/serial/8250/8250_dw.c	2026-09-02 12:36:45.604971649 -0300
++++ b/drivers/tty/serial/8250/8250_dw.c	2026-09-02 12:36:45.612972038 -0300
+@@ -56,6 +56,10 @@
+ #define DW_UART_QUIRK_IS_DMA_FC		BIT(3)
+ #define DW_UART_QUIRK_APMC0D08		BIT(4)
+ #define DW_UART_QUIRK_CPR_VALUE		BIT(5)
++#define DW_UART_QUIRK_RTL8197F		BIT(6)
++
++/* Realtek RTL8197F: RBR/THR live at register index 9, not 0 */
++#define DW_UART_RTL8197F_RBR_THR	9
+ 
+ struct dw8250_platform_data {
+ 	u8 usr_reg;
+@@ -154,6 +158,14 @@
+ 	if (offset != UART_LCR || d->uart_16550_compatible)
+ 		return;
+ 
++	/*
++	 * The RTL8197F reads back a word length two less than what was written,
++	 * so compare against the value the hardware will actually report.
++	 */
++	if ((d->pdata->quirks & DW_UART_QUIRK_RTL8197F) &&
++	    (value == UART_LCR_WLEN7 || value == UART_LCR_WLEN8))
++		value -= 2;
++
+ 	/* Make sure LCR write wasn't ignored */
+ 	while (tries--) {
+ 		u32 lcr = serial_port_in(p, offset);
+@@ -259,6 +271,33 @@
+ 	return dw8250_modify_msr(p, offset, value);
+ }
+ 
++/*
++ * The RTL8197F variant of this block puts the receive and transmit holding
++ * registers at index 9 (byte offset 0x24 with the usual regshift of 2) instead
++ * of index 0. Everything else is a stock DW-APB UART.
++ */
++static void dw8250_serial_out32_rtl8197f(struct uart_port *p, unsigned int offset, u32 value)
++{
++	if (offset == UART_TX)
++		offset = DW_UART_RTL8197F_RBR_THR;
++
++	writel(value, p->membase + (offset << p->regshift));
++	dw8250_check_lcr(p, offset, value);
++}
++
++static u32 dw8250_serial_in32_rtl8197f(struct uart_port *p, unsigned int offset)
++{
++	unsigned int reg = offset;
++	u32 value;
++
++	if (offset == UART_RX)
++		reg = DW_UART_RTL8197F_RBR_THR;
++
++	value = readl(p->membase + (reg << p->regshift));
++
++	return dw8250_modify_msr(p, offset, value);
++}
++
+ static void dw8250_serial_out32be(struct uart_port *p, unsigned int offset, u32 value)
+ {
+ 	iowrite32be(value, p->membase + (offset << p->regshift));
+@@ -514,6 +553,14 @@
+ 		data->data.dma.prepare_tx_dma = dw8250_prepare_tx_dma;
+ 		data->data.dma.prepare_rx_dma = dw8250_prepare_rx_dma;
+ 	}
++	if (quirks & DW_UART_QUIRK_RTL8197F) {
++		p->iotype = UPIO_MEM32;
++		p->serial_in = dw8250_serial_in32_rtl8197f;
++		p->serial_out = dw8250_serial_out32_rtl8197f;
++		p->type = PORT_16550A;
++		p->flags |= UPF_SKIP_TEST | UPF_FIXED_TYPE;
++		data->skip_autocfg = true;
++	}
+ 	if (quirks & DW_UART_QUIRK_APMC0D08) {
+ 		p->iotype = UPIO_MEM32;
+ 		p->regshift = 2;
+@@ -759,6 +806,11 @@
+ 	.usr_reg = DW_UART_USR,
+ };
+ 
++static const struct dw8250_platform_data dw8250_rtl8197f_data = {
++	.usr_reg = DW_UART_USR,
++	.quirks = DW_UART_QUIRK_RTL8197F,
++};
++
+ static const struct dw8250_platform_data dw8250_octeon_3860_data = {
+ 	.usr_reg = OCTEON_UART_USR,
+ 	.quirks = DW_UART_QUIRK_OCTEON,
+@@ -784,6 +836,7 @@
+ 	{ .compatible = "snps,dw-apb-uart", .data = &dw8250_dw_apb },
+ 	{ .compatible = "cavium,octeon-3860-uart", .data = &dw8250_octeon_3860_data },
+ 	{ .compatible = "marvell,armada-38x-uart", .data = &dw8250_armada_38x_data },
++	{ .compatible = "realtek,rtl8197f-uart", .data = &dw8250_rtl8197f_data },
+ 	{ .compatible = "renesas,rzn1-uart", .data = &dw8250_renesas_rzn1_data },
+ 	{ .compatible = "sophgo,sg2044-uart", .data = &dw8250_skip_set_rate_data },
+ 	{ .compatible = "starfive,jh7100-uart", .data = &dw8250_skip_set_rate_data },

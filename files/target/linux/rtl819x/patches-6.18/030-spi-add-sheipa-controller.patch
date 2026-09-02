@@ -1,0 +1,33 @@
+From: DIR-842 R1 port
+Subject: [PATCH] spi: add the RTL819x (Sheipa) SPI-NOR controller
+
+Kconfig/Makefile wiring; the driver itself is added as a file.
+
+--- a/drivers/spi/Kconfig	2026-09-02 12:33:45.127478922 -0300
++++ b/drivers/spi/Kconfig	2026-09-02 12:33:45.159480742 -0300
+@@ -1037,6 +1037,15 @@
+ 	help
+ 	  SPI driver for SuperH HSPI blocks.
+ 
++config SPI_SHEIPA
++	tristate "Realtek RTL819x (Sheipa) SPI-NOR controller"
++	depends on MACH_REALTEK_RTL819X || COMPILE_TEST
++	select SPI_MEM
++	help
++	  Flash controller found on Realtek RTL819x SoCs. It drives the boot
++	  SPI-NOR both through a command interface and a memory-mapped read
++	  window.
++
+ config SPI_SIFIVE
+ 	tristate "SiFive SPI controller"
+ 	depends on HAS_IOMEM
+--- a/drivers/spi/Makefile	2026-09-02 12:33:45.131479149 -0300
++++ b/drivers/spi/Makefile	2026-09-02 12:33:45.159480742 -0300
+@@ -136,6 +136,7 @@
+ obj-$(CONFIG_SPI_SH_HSPI)		+= spi-sh-hspi.o
+ obj-$(CONFIG_SPI_SH_MSIOF)		+= spi-sh-msiof.o
+ obj-$(CONFIG_SPI_SH_SCI)		+= spi-sh-sci.o
++obj-$(CONFIG_SPI_SHEIPA)		+= spi-sheipa.o
+ obj-$(CONFIG_SPI_SIFIVE)		+= spi-sifive.o
+ obj-$(CONFIG_SPI_SLAVE_MT27XX)          += spi-slave-mt27xx.o
+ obj-$(CONFIG_SPI_SN_F_OSPI)		+= spi-sn-f-ospi.o

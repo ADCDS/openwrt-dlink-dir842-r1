@@ -16,3 +16,5 @@ uart-cmd.pending
 esc-spam.flag
 # local flash-back images; large binaries, ship as releases
 known-good-images/
+# old ggbruno 4.14 checkout kept as reference during the 6.18 port
+/openwrt-4.14/
