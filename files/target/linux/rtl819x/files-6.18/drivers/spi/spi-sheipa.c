@@ -304,7 +304,7 @@ static uint32_t spi_flash_getdr(struct sheipa_spi *dev,
 /*
  * This function is used to wait the spi_flash is not at busy state.
  */
-void spi_flash_wait_busy(struct sheipa_spi *dev)
+static void spi_flash_wait_busy(struct sheipa_spi *dev)
 {
 	struct spi_flash_portmap *spi_flash_map;
 

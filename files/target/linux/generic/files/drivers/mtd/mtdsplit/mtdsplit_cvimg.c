@@ -47,7 +47,7 @@ struct signature {
 	const char	*sig;
 };
 
-const static struct signature sig_known[] = {
+static const struct signature sig_known[] = {
 	{
 		.type	= DATA_KERNEL,
 		.sig	= "cs6b"
