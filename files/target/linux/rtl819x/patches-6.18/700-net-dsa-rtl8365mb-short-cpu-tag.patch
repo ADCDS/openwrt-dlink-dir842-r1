@@ -1,0 +1,57 @@
+From: DIR-842 R1 port
+Subject: [PATCH] net: dsa: rtl8365mb: allow the short CPU tag format
+
+The switch can insert its CPU tag in a 4-byte form as well as the 8-byte one
+the tagger implements. The short form is undocumented and unusable in general,
+but where the attached MAC inserts and strips the tag in hardware -- as the
+RTL8197F does -- it is the only format that MAC understands.
+
+Select it from a device tree property so nothing changes for boards that do not
+ask for it.
+
+--- a/drivers/net/dsa/realtek/rtl8365mb_main.c	2026-09-02 13:48:01.502405464 -0300
++++ b/drivers/net/dsa/realtek/rtl8365mb_main.c	2026-09-02 13:48:21.871151644 -0300
+@@ -807,6 +807,7 @@
+  */
+ struct rtl8365mb_cpu {
+ 	bool enable;
++	bool short_format;
+ 	u32 mask;
+ 	u32 trap_port;
+ 	enum rtl8365mb_cpu_insert insert;
+@@ -2929,18 +2930,20 @@
+ 
+ 	switch (proto) {
+ 	case DSA_TAG_PROTO_RTL8_4:
+-		cpu->format = RTL8365MB_CPU_FORMAT_8BYTES;
++		/* The switch also supports a 4-byte form of this tag, similar to
++		 * rtl4a but with the same 0x04 8-bit version. It is undocumented
++		 * and the tagger does not implement it, so it is only usable
++		 * where the attached MAC inserts and strips the tag itself --
++		 * which is what "realtek,cpu-tag-4byte" declares.
++		 */
++		cpu->format = cpu->short_format ? RTL8365MB_CPU_FORMAT_4BYTES
++						: RTL8365MB_CPU_FORMAT_8BYTES;
+ 		cpu->position = RTL8365MB_CPU_POS_AFTER_SA;
+ 		break;
+ 	case DSA_TAG_PROTO_RTL8_4T:
+ 		cpu->format = RTL8365MB_CPU_FORMAT_8BYTES;
+ 		cpu->position = RTL8365MB_CPU_POS_BEFORE_CRC;
+ 		break;
+-	/* The switch also supports a 4-byte format, similar to rtl4a but with
+-	 * the same 0x04 8-bit version and probably 8-bit port source/dest.
+-	 * There is no public doc about it. Not supported yet and it will probably
+-	 * never be.
+-	 */
+ 	default:
+ 		return -EPROTONOSUPPORT;
+ 	}
+@@ -3267,6 +3270,8 @@
+ 	priv->num_ports = RTL8365MB_MAX_NUM_PORTS;
+ 	mb->priv = priv;
+ 	mb->cpu.trap_port = RTL8365MB_MAX_NUM_PORTS;
++	mb->cpu.short_format = of_property_read_bool(priv->dev->of_node,
++						     "realtek,cpu-tag-4byte");
+ 	mb->cpu.insert = RTL8365MB_CPU_INSERT_TO_ALL;
+ 	mb->cpu.position = RTL8365MB_CPU_POS_AFTER_SA;
+ 	mb->cpu.rx_length = RTL8365MB_CPU_RXLEN_64BYTES;

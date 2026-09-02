@@ -72,6 +72,67 @@
 			gpios = <&gpio0 22 GPIO_ACTIVE_LOW>;
 		};
 	};
+
+	/*
+	 * External RTL8367S, managed over bit-banged SMI. The chip identifies as
+	 * 0x6367/0x0020, which the driver knows as RTL8367RB-VB.
+	 *
+	 * No reset-gpios: the bootloader has already trained the RGMII trunk and
+	 * the driver performs its own register-triggered reset at probe, so
+	 * pulsing the reset line as well only adds a way to lose that training.
+	 */
+	switch {
+		compatible = "realtek,rtl8365mb";
+
+		mdc-gpios = <&gpio0 18 GPIO_ACTIVE_HIGH>;
+		mdio-gpios = <&gpio0 19 GPIO_ACTIVE_HIGH>;
+
+		/* the SoC MAC inserts and strips the short form of the CPU tag */
+		realtek,cpu-tag-4byte;
+
+		mdio {
+			compatible = "realtek,smi-mdio";
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			ethphy0: ethernet-phy@0 { reg = <0>; };
+			ethphy1: ethernet-phy@1 { reg = <1>; };
+			ethphy2: ethernet-phy@2 { reg = <2>; };
+			ethphy3: ethernet-phy@3 { reg = <3>; };
+			ethphy4: ethernet-phy@4 { reg = <4>; };
+		};
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			/* panel order runs the other way: LAN1 is the highest port */
+			port@0 { reg = <0>; label = "lan4"; phy-handle = <&ethphy0>; };
+			port@1 { reg = <1>; label = "lan3"; phy-handle = <&ethphy1>; };
+			port@2 { reg = <2>; label = "lan2"; phy-handle = <&ethphy2>; };
+			port@3 { reg = <3>; label = "lan1"; phy-handle = <&ethphy3>; };
+			port@4 { reg = <4>; label = "wan";  phy-handle = <&ethphy4>; };
+
+			port@6 {
+				reg = <6>;
+				label = "cpu";
+				ethernet = <&ethernet>;
+				phy-mode = "rgmii";
+				/* loader-trained values, read back from reg 0x1307 */
+				tx-internal-delay-ps = <0>;
+				rx-internal-delay-ps = <600>;
+
+				/*
+				 * No "pause": 802.3x on this trunk feeds back into the
+				 * descriptor pool and stalls the datapath under load.
+				 */
+				fixed-link {
+					speed = <1000>;
+					full-duplex;
+				};
+			};
+		};
+	};
 };
 
 &gpio0 {
@@ -122,9 +183,12 @@
 	};
 };
 
+&ethernet {
+	status = "okay";
+};
+
 /*
  * Enabled per bring-up milestone as each driver lands:
- *   &ethernet -> the DSA conduit (with the switch node)
- *   &pcie0    -> the RTL8822BE 5 GHz radio
- *   &wmac     -> the on-SoC 2.4 GHz radio
+ *   &pcie0 -> the RTL8822BE 5 GHz radio
+ *   &wmac  -> the on-SoC 2.4 GHz radio
  */

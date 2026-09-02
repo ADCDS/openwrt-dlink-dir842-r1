@@ -433,7 +433,7 @@ static void gw_netif_mac(const char *ifname, const u8 *fallback, u8 *shadow,
 		dev_put(dev);
 }
 
-static void gw_set_pvid(u32 port, u32 pvid)
+static __maybe_unused void gw_set_pvid(u32 port, u32 pvid)
 {
 	u32 off = (port & 1) ? 16 : 0;
 	u32 v = REG32(PVCR(port));
@@ -889,7 +889,6 @@ int rtl865x_wan_netif_mac_sync(void)
  * index (gw_prog dumps it). Caller holds rtl865x_hal_lock. */
 static u32 gw_lan_nexthop_prog_locked(void)
 {
-	struct asic_l3route_l2 hr;
 	u32 lan_nh;
 
 	lan_nh = gw_write_l2(gw_lan_client_mac, l2_mask_lan, 0);	/* -> trunk (LAN vid2), fid0 */

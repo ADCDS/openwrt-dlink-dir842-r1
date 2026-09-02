@@ -24,6 +24,7 @@
 #include <linux/if_vlan.h>	/* __vlan_hwaccel_put_tag / skb_vlan_tag_* (M6.2) */
 #include <linux/delay.h>	/* msleep/udelay: M7 fabric-reset sequencing */
 #include <asm/mipsregs.h>	/* clear_c0_status / set_c0_status / STATUSF_IP4 */
+#include <net/dsa.h>		/* netdev_uses_dsa: this netdev is the DSA conduit */
 
 #include "rtl819x_regs.h"
 #include "rtl819x_swnic.h"
@@ -205,7 +206,7 @@ static void sw_add_vlan_fid(uint32 vid, uint32 member_mask, uint32 untag_mask, u
  * signature: the L4 NAPT row matches and reloads its age, yet every packet is delivered
  * to the CPU. Fork A never noticed because it never resolved a per-port egress anyway.
  * (The vendor keeps the same split: eFID on the 8367S, FID on the SoC.) */
-static void sw_add_vlan(uint32 vid, uint32 member_mask, uint32 untag_mask)
+static __maybe_unused void sw_add_vlan(uint32 vid, uint32 member_mask, uint32 untag_mask)
 {
 	sw_add_vlan_fid(vid, member_mask, untag_mask, 0);
 }
@@ -386,7 +387,10 @@ static void rtl819x_fabric_full_reset(void)
  * the knob has been dead since then. rtl865x_start() also re-runs it after
  * fabric_reset=3 (see the New_swNic_init + rtl865x_start pair), so there is nothing
  * left to re-arm by hand. */
-int rtl8367s_cpu_tag_enable(void);	/* drivers/net/phy/rtl8367b.c */
+/*
+ * The 8367S half of the CPU-tag arrangement is programmed by the DSA driver
+ * (drivers/net/dsa/realtek/rtl8365mb.c) now, not from here.
+ */
 
 /* ---- CPU-tag ("port0 router") mode: the vendor's 8197F + 8367R arrangement ----
  * This is now the ONLY model. It replicates what the vendor SDK does for exactly this
@@ -395,8 +399,8 @@ int rtl8367s_cpu_tag_enable(void);	/* drivers/net/phy/rtl8367b.c */
  * the source and destination port. The jacks appear to the SoC as its own ports 0-4
  * with the CPU on port 8, exactly as the stock firmware's netif/L2 tables show.
  *
- * The 8367S end must agree (reg 0x121a = 0x2b1, armed by rtl8367s_cpu_tag_enable()
- * below) or the link goes deaf — measured, 100% loss at every frame size. Both ends
+ * The 8367S end must agree (reg 0x121a = 0x2b1, programmed by the DSA driver) or
+ * the link goes deaf — measured, 100% loss at every frame size. Both ends
  * together or neither; either alone breaks the datapath.
  *
  * ---- HISTORICAL: what "Fork A" was, and why it is gone -----------------------------
@@ -440,9 +444,11 @@ static int trunk_pause = 2;
 module_param(trunk_pause, int, 0644);
 MODULE_PARM_DESC(trunk_pause, "RGMII-trunk 802.3x pause: 2=force OFF (default, A-2 residual fix), 1=force on (bench A/B collapse), 0=leave loader value");
 
-/* 8367S half of the trunk-pause fix (rtl8367b.c; CONFIG_RTL8367B_PHY=y, so
- * this built-in <-> built-in reference links into vmlinux). */
-extern int rtl8367s_trunk_pause_set(int on);
+/*
+ * The 8367S half of the trunk-pause fix comes from the DSA driver, which takes
+ * it from the CPU port's fixed-link: omitting "pause" there leaves the switch's
+ * force-mode register without the pause bits, which is what this side wants.
+ */
 
 static void rtl865x_start(void)
 {
@@ -611,8 +617,15 @@ static void rtl865x_start(void)
 		 * instead sends untagged and derives the VID from the ingress port's
 		 * PVID; both are coherent, ours is already proven.)
 		 */
-		sw_add_vlan_fid(RTL865X_VID_LAN, 0x10F, 0x00, 0); /* jacks 0-3 + CPU8, fid0 */
-		sw_add_vlan_fid(RTL865X_VID_WAN, 0x110, 0x00, 1); /* jack 4    + CPU8, fid1 */
+		/*
+		 * ★ Untagged egress, the vendor's model. Under DSA the switch no
+		 * longer adds an 802.1Q tag on the trunk -- it carries the Realtek CPU
+		 * tag and nothing else -- so the VID has to come from the ingress
+		 * port's PVID below rather than from a tag, and frames leaving toward
+		 * the trunk must go out untagged.
+		 */
+		sw_add_vlan_fid(RTL865X_VID_LAN, 0x10F, 0x10F, 0); /* jacks 0-3 + CPU8, fid0 */
+		sw_add_vlan_fid(RTL865X_VID_WAN, 0x110, 0x110, 1); /* jack 4    + CPU8, fid1 */
 		/* Per-jack PVID now that ports are distinct: the WAN jack must default
 		 * to the WAN VID, not LAN. Only matters for untagged ingress, but
 		 * leaving every port on LAN would mis-zone the WAN jack the moment
@@ -659,15 +672,12 @@ static void rtl865x_start(void)
 		 * MACCR is a MAC-level reg (not an RGMII-pair timing reg), so writing
 		 * it over the loader's config is safe, unlike the gated PHY regs. */
 		REG32(RTL819X_SWCORE_BASE + 0x4000) |= (1u << 12) | SW_MACCR_LONG_TXE;
-		/* ★ Both ends of the RGMII trunk must agree, so arm the 8367S CPU-tag
-		 * insertion here, next to the SoC-side P0GMIICR bits below. The switch
-		 * ships with 0x121a=0x00b5 (tag ENABLED but INSERTMODE="to NONE"), so
-		 * without this the SoC decodes a tag the switch never inserts and the
-		 * datapath drops everything -- measured: 100%% loss at every frame size.
-		 * rtl8367s_cpu_tag_enable() is EXPORT_SYMBOL'd for exactly this and had
-		 * no callers; the value was previously poked in by hand via debugfs on
-		 * every boot. */
-		rtl8367s_cpu_tag_enable();
+		/*
+		 * ★ Both ends of the RGMII trunk must agree on the CPU tag. The switch
+		 * end (reg 0x121a) is the DSA driver's job; this side programs the
+		 * P0GMIICR tag bits below. If the two ever disagree the datapath drops
+		 * everything -- measured: 100%% loss at every frame size.
+		 */
 
 		/* CPU-tag mode REQUIRES the P0GMIICR tag bits, which only this block
 		 * programs, so it runs UNCONDITIONALLY -- including on a loader boot
@@ -783,8 +793,6 @@ static void rtl865x_start(void)
 				pr_err("rtl819x trunk-pause: PCRP0 %08x -> %08x\n",
 				       v, want);
 			}
-			if (rtl8367s_trunk_pause_set(trunk_pause == 1) < 0)
-				pr_err("rtl819x trunk-pause: 8367S SMI not probed — SoC side only (re-apply: eth0 down/up)\n");
 		}
 		pr_err("rtl819x trunk-post: PITCR=%08x P0GMIICR=%08x MACCR=%08x PCRP0=%08x\n",
 		       REG32(RTL819X_SWCORE_BASE + 0x4100),
@@ -1223,6 +1231,85 @@ static void rtl819x_rx_timer(struct timer_list *t)
 	mod_timer(&priv->rx_timer, jiffies + RTL819X_WATCHDOG_INTERVAL);
 }
 
+/*
+ * DSA conduit tag shim.
+ *
+ * The switch and this MAC exchange Realtek's 4-byte CPU tag, which the MAC
+ * inserts and strips in hardware: the frames this driver sees carry no tag at
+ * all, and the source jack arrives out of band in the receive descriptor.
+ * Hardware NAT depends on that arrangement, because the ASIC has to classify
+ * by ingress jack, so it stays exactly as it is.
+ *
+ * The DSA core and the rtl8_4 tagger, however, speak the 8-byte on-wire form.
+ * Rather than fork the tagger, translate at this boundary: synthesise the
+ * 8-byte tag on receive from the descriptor's port field, and consume it on
+ * transmit into the descriptor's port mask. Everything above this line is then
+ * stock DSA.
+ */
+#define RTL819X_DSA_TAG_LEN		8
+/* protocol id the rtl8_4 tagger expects for this switch family */
+#define RTL819X_DSA_PROTO_RTL8365MB	0x04
+/* highest switch port that can appear in the descriptor's source field */
+#define RTL819X_DSA_MAX_PORT		6
+
+static bool rtl819x_dsa_tag_rx(struct sk_buff *skb, unsigned int port)
+{
+	__be16 *tag;
+
+	if (unlikely(port > RTL819X_DSA_MAX_PORT))
+		return false;
+
+	if (unlikely(skb_headroom(skb) < RTL819X_DSA_TAG_LEN) &&
+	    pskb_expand_head(skb, RTL819X_DSA_TAG_LEN, 0, GFP_ATOMIC))
+		return false;
+
+	/* [DA][SA][payload] -> [DA][SA][tag][payload] */
+	skb_push(skb, RTL819X_DSA_TAG_LEN);
+	memmove(skb->data, skb->data + RTL819X_DSA_TAG_LEN, 2 * ETH_ALEN);
+
+	tag = (__be16 *)(skb->data + 2 * ETH_ALEN);
+	tag[0] = htons(ETH_P_REALTEK);
+	/* protocol, and REASON 0 so the tagger marks the frame as forwarded */
+	tag[1] = htons(RTL819X_DSA_PROTO_RTL8365MB << 8);
+	tag[2] = 0;
+	tag[3] = htons(port & 0xf);
+
+	return true;
+}
+
+/*
+ * Strip the tag the tagger wrote and return the egress port mask it asked for,
+ * or a negative value if this frame is not tagged (something sent straight
+ * through the conduit rather than a DSA user port).
+ */
+static int rtl819x_dsa_tag_tx(struct sk_buff *skb)
+{
+	__be16 *tag;
+
+	if (unlikely(skb->len < ETH_HLEN + RTL819X_DSA_TAG_LEN))
+		return -EINVAL;
+
+	tag = (__be16 *)(skb->data + 2 * ETH_ALEN);
+	if (unlikely(tag[0] != htons(ETH_P_REALTEK)))
+		return -EINVAL;
+	if (unlikely((ntohs(tag[1]) >> 8) != RTL819X_DSA_PROTO_RTL8365MB))
+		return -EINVAL;
+
+	if (unlikely(skb_cow_head(skb, 0)))
+		return -ENOMEM;
+
+	/* re-read: skb_cow_head() may have moved the data */
+	tag = (__be16 *)(skb->data + 2 * ETH_ALEN);
+	{
+		int mask = ntohs(tag[3]) & 0x7ff;
+
+		memmove(skb->data + RTL819X_DSA_TAG_LEN, skb->data, 2 * ETH_ALEN);
+		skb_pull(skb, RTL819X_DSA_TAG_LEN);
+
+		return mask;
+	}
+}
+
 static int rtl819x_eth_poll(struct napi_struct *napi, int budget)
 {
 	struct rtl819x_eth_priv *priv =
@@ -1253,6 +1340,28 @@ static int rtl819x_eth_poll(struct napi_struct *napi, int budget)
 			break;
 
 		skb_put(skb, info.len);
+
+		if (netdev_uses_dsa(dev)) {
+			/*
+			 * Under DSA the jack identity comes from the receive
+			 * descriptor and is handed to the tagger as an 8-byte
+			 * header; no VLAN demux happens here at all.
+			 */
+			if (unlikely(!rtl819x_dsa_tag_rx(skb, info.pid))) {
+				dev->stats.rx_dropped++;
+				dev_kfree_skb_any(skb);
+				continue;
+			}
+
+			skb->protocol = eth_type_trans(skb, dev);
+			napi_gro_receive(napi, skb);
+
+			dev->stats.rx_packets++;
+			dev->stats.rx_bytes += info.len;
+			rx_done++;
+			continue;
+		}
+
 		skb->protocol = eth_type_trans(skb, dev);
 		/*
 		 * M6.6 cascade: frames arrive UNTAGGED (8367S untags the trunk) with
@@ -1351,7 +1460,19 @@ static netdev_tx_t rtl819x_eth_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	rtl_nicTx_info nicTx;
 	dma_addr_t dma;
-	unsigned int len = skb->len;
+	unsigned int len;
+	int dsa_ports = -1;
+
+	if (netdev_uses_dsa(dev)) {
+		dsa_ports = rtl819x_dsa_tag_tx(skb);
+		if (unlikely(dsa_ports < 0)) {
+			dev_kfree_skb_any(skb);
+			dev->stats.tx_dropped++;
+			return NETDEV_TX_OK;
+		}
+	}
+
+	len = skb->len;
 
 	pr_err_once("rtl819x DP: first TX (len=%u)\n", len);
 
@@ -1376,7 +1497,12 @@ static netdev_tx_t rtl819x_eth_xmit(struct sk_buff *skb, struct net_device *dev)
 	 * (M6.5 note: narrowing this is INEFFECTIVE - the switch floods CPU frames
 	 * by VLAN *membership*, ignoring this portlist; see auto-memory.)
 	 */
-	nicTx.portlist = 0x3F;
+	/*
+	 * Under DSA the tagger already named the egress jack; otherwise fall back
+	 * to flooding the physical ports (bit 6, the CPU port, stays clear so a
+	 * frame cannot loop back).
+	 */
+	nicTx.portlist = (dsa_ports >= 0) ? (dsa_ports & 0x3F) : 0x3F;
 	/*
 	 * VID from the netdev's hwaccel VLAN tag — eth0.2 (LAN) -> VID 2,
 	 * eth0.1 (WAN) -> VID 1 (the M6.6 Fork A VLAN plan); an untagged frame
@@ -1391,10 +1517,13 @@ static netdev_tx_t rtl819x_eth_xmit(struct sk_buff *skb, struct net_device *dev)
 	 * Fork A, so untagged bare-eth0 TX rode a VID with a 0/garbage member
 	 * mask and an unknown tag downstream.
 	 */
-	if (skb_vlan_tag_present(skb))
+	if (dsa_ports >= 0)
+		/* jack 4 is the WAN zone, jacks 0-3 the LAN zone */
+		nicTx.vid = (dsa_ports & BIT(4)) ? RTL865X_VID_WAN : RTL865X_VID_LAN;
+	else if (skb_vlan_tag_present(skb))
 		nicTx.vid = skb_vlan_tag_get(skb) & 0xfff;
 	else
-		nicTx.vid = 2;
+		nicTx.vid = RTL865X_VID_LAN;
 	nicTx.flags = 0;	/* direct-TX: swnic adds PKTHDR_USED_8197F|PKT_OUTGOING */
 
 	if (New_swNic_send(skb, (void *)(uintptr_t)dma, len, &nicTx) != 0) {
