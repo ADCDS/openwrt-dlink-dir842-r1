@@ -22,7 +22,11 @@ sr() { stty -F "$PORT" 38400 cs8 -parenb -cstopb -crtscts -ixon clocal raw -echo
 spam_stop() { rm -f "$FLAG"; sleep 0.3; }
 trap 'spam_stop' EXIT
 sr
-pgrep -f "cat $PORT" >/dev/null || { setsid bash -c "cat $PORT >> $LOG" </dev/null >/dev/null 2>&1 & sleep 1; }
+touch "$LOG"
+# ★ match the logger process only: a plain `cat $PORT` pattern also matches any
+# shell whose command line merely mentions the device node, and the guard then
+# skips starting the logger, leaving every later `wc -c < $LOG` to fail.
+pgrep -f "^cat $PORT" >/dev/null || { setsid bash -c "exec cat $PORT >> $LOG" </dev/null >/dev/null 2>&1 & sleep 1; }
 
 echo "[ramboot] IMG=$IMG"
 for round in 1 2 3; do
