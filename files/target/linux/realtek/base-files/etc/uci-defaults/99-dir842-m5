@@ -1,4 +1,16 @@
 #!/bin/sh
+# ★ Run ONCE per virgin overlay. Every sysupgrade rewrites the firmware partition,
+# which holds rootfs_data, so the overlay whiteout that marked this seed "done" is
+# erased and uci_apply_defaults sources it again on the next boot -- even on a
+# config-PRESERVING sysupgrade, where the preserved config is restored in preinit
+# and this seed then ran on top of it: LAN back to 192.168.0.1, WAN back to DHCP
+# (killing a PPPoE WAN), duplicate `switch`/`switch_vlan` sections appended, and an
+# OPEN `DIR842-OpenWrt` 5 GHz AP re-seeded over the user's SSID/PSK. (Found by
+# review, 2026-09-02.) 09_ and 10_ already gate themselves; this marker does the
+# same here. It lives in `system`, which `sysupgrade` preserves and a `-n` flash
+# regenerates, so: preserved config -> skip; clean flash -> seed.
+# (Cannot key on wireless.radio0: 10_wireless-5g-ifname runs `wifi config` first.)
+[ "$(uci -q get system.@system[0].dir842_m5_seeded)" = "1" ] && exit 0
 # DIR-842 R1 (RTL8197F) — default first-boot bring-up for the OpenWrt port.
 #
 # Brings up a LAN bridge on eth0 and a working 5 GHz AP on the on-board
@@ -189,17 +201,18 @@ set wireless.radio0.channel='36'
 # ★ HT20, NOT VHT80/VHT40 — measured on this unit 2026-09-01: at 80 MHz (and 40 MHz)
 #   5 GHz clients associate and complete EAPOL but DHCP never finishes; wlan1 rx stays 0
 #   and the station is dropped after exactly 4.03 s. At 20 MHz the same client gets an
-#   IP and sustains ~58 Mbit/s. The ~14 dB driver-side TX deficit (docs/WIFI-DUAL-BAND.md,
-#   stock A/B) leaves the link marginal; narrowing to 20 MHz is worth ~6 dB each way and
-#   is what tips it over. Throughput was already flat across 80/40 MHz here, so the cost
-#   is small. Revisit if the RF deficit is ever recovered. HT20 is a workaround, not a
-#   preference.
+#   IP and sustains data. The 5 GHz TX shortfall vs stock (~17 dB measured, split between
+#   driver and regulatory NOT yet separated -- see docs/WIFI-DUAL-BAND.md) leaves the
+#   link marginal; a 4x narrower channel is ~6 dB more SNR each way and is what tips it
+#   over. ★ The cost is real: 2x2 HT20 tops out at 144 Mbit/s PHY, below what VHT80
+#   managed on the boots where it worked at all. A working link beats a faster dead one.
+#   Revisit if the RF shortfall is ever recovered. HT20 is a workaround, not a preference.
 set wireless.radio0.htmode='HT20'
 set wireless.radio0.country='BR'
 # ★ R3 RESOLVED — the radio is ENABLED. It used to be forced off because bringing it up
 # hung the box: rtw88 logged `write RF mode table fail` and the console went silent, which
 # looked exactly like a switch/ASIC regression. That WARN comes from
-# rtw8822b_set_channel_bb(), which writes RF path A and then polls RF reg 0x33 for 0x00001
+# rtw8822b_config_trx_mode() (rtw8822b.c:811; NOT set_channel_bb as earlier notes said), which polls RF reg 0x33 for 0x00001
 # a hundred times and never gets it — i.e. RF REGISTER ACCESS failing, NOT a missing power
 # table as previously assumed.
 # Root cause: this board's RTL8822BE efuse is blank, so rtw88 fell back to crystal_cap = 0
@@ -207,7 +220,7 @@ set wireless.radio0.country='BR'
 # crystal puts the RF synthesiser off-frequency, so the RF registers never answer.
 # Fix: feed the per-unit crystal cap from the "MAC" mtd partition (see the modprobe.d
 # stanza written below). Measured with it applied: no WARN, wlan1 reaches forwarding
-# state, and `iw dev wlan1 info` reports an AP on channel 36 @ 80 MHz, 17 dBm.
+# state, and `iw dev wlan1 info` reports an AP on channel 36 (width per htmode; HT20 since 3b5a56f), 17 dBm.
 set wireless.radio0.disabled='0'
 set wireless.default_radio0='wifi-iface'
 set wireless.default_radio0.device='radio0'
@@ -244,6 +257,9 @@ EOF
 #     host or fix the L2 path — do NOT bring the blanket option back, it re-breaks
 #     5 GHz DHCP. Ref: docs/M7-LARGE-FRAME-RX-WEDGE.md (history), README (5 GHz).
 
+# Mark this overlay as seeded (see the guard at the top).
+uci -q set system.@system[0].dir842_m5_seeded='1'
+uci -q commit system
 exit 0
 
 # (R4 note: no `enable` for dir842-asic here — it would be dead code below `exit 0`

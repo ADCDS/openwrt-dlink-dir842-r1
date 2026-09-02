@@ -3,8 +3,10 @@
 #
 # ★ Use this, NOT `top -bn1`. On this single-core MIPS box a single top sample
 # read 75% sys during a transfer that /proc/stat deltas showed as 17% busy --
-# see RETRACTIONS-AND-METHOD.md confound #29. top's first sample has no prior
-# sample to difference against, and ssh+top land inside that one reading.
+# see RETRACTIONS-AND-METHOD.md confound #29. BusyBox top's first pass is a real
+# delta but over only ~100 ms, and on one MIPS core top's own /proc walk plus the
+# ssh session dominate such a short window: it measures the observer. Use a
+# window of several seconds, as this script does.
 #
 #   ./cpu-delta.sh [seconds]     (default 6)
 BOX=${BOX:-"ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \

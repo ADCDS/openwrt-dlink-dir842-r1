@@ -183,16 +183,20 @@ CPU ~99.7 % idle. As far as we know this is the first working mainline OpenWrt
 - **Blank WiFi efuse, and a 5 GHz transmitter that is ~14 dB short** — this board keeps no
   RTL8822BE calibration on-chip. ★ **Settled by a stock-firmware A/B on this unit (2026-09-01):**
   the hardware is fine — stock D-Link reaches **−42 dBm** at a fixed receiver where our
-  OpenWrt reaches **−59 dBm**, and the 2.4 GHz radio reads identically under both. Only ~3 dB
-  of that is regulatory (BR permits 17 dBm on the only channels rtw88 may use); **~14 dB is
-  the driver**, in the RF/analog init path rather than the power index. Not fixable by
+  OpenWrt reaches **−59 dBm**, and the 2.4 GHz radio reads identically under both. How much of that is regulatory
+  is **not yet separated**: stock uses ch149, where Brazil permits 30 dBm, while this build
+  can only initiate on ch36-48 at 17 dBm -- not because BR forbids 149 but because rtw88
+  hints the *world* domain when the efuse country code is blank. The remainder is the
+  driver, in the RF/analog init path rather than the power index. Not fixable by
   copying the NOR calibration values into rtw88 — that was measured to make it *worse* —
   nor by porting RFE-type tables (offsets against an already-saturated base). Full record,
   including four built-and-rejected fixes, in [`docs/WIFI-DUAL-BAND.md`](docs/WIFI-DUAL-BAND.md).
   ★ **Practical consequence, and the fix shipped here:** at 80 MHz the link is marginal
   enough that 5 GHz clients associate but never complete DHCP. **The image defaults to
   HT20**, which carries data (~58 Mbit/s) where VHT80/VHT40 carry none. If you set your own
-  `htmode`, keep it at 20 MHz until the RF deficit is recovered — and if your build profile
+  `htmode`, keep it at 20 MHz until the RF deficit is recovered (★ the cost is real: 2x2 HT20
+  caps at 144 Mbit/s PHY, below what VHT80 delivered on the boots where it worked — a link
+  that works on every boot is the better trade for an AP) — and if your build profile
   restores `/etc/config/wireless` from a saved copy (as the reference profile does, *after* the
   uci-defaults run), that saved copy must carry `HT20` too.
 - **Download throughput is variable** (**681–906 Mbit** across runs) with 1200–2500 TCP retransmits per

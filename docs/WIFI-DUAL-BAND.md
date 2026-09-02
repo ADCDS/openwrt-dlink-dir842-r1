@@ -163,7 +163,7 @@ stock pushes them in **from userspace** via `iwpriv set_mib`
 ### ★ The crystal cap — and the theory it replaced
 
 **✗ RETRACTED:** that 5 GHz was blocked by *missing RF power tables*. The `write RF mode
-table fail` WARN comes from `rtw8822b_set_channel_bb()`, which writes RF path A and then
+table fail` WARN comes from `rtw8822b_config_trx_mode() (rtw8822b.c:811; not set_channel_bb as first written) writes RF path A and then
 polls **RF register 0x33** for `0x00001` a hundred times and never gets it. That is **RF
 register access failing**, not a missing power table.
 
@@ -776,7 +776,7 @@ cold-boot cost above does not apply to you.
 
 ---
 
-## ★ 5 GHz is much quieter than it should be — measured, and nine explanations refuted
+## ★ 5 GHz is much quieter than it should be — measured, and every software explanation tried has been refuted
 
 > ★ **Read the later subsections first.** Everything down to "A measurement warning" was
 > measured with a hand-held phone before a fixed receiver existed. The "13-15 dB" figure
@@ -980,7 +980,7 @@ Measured, same receiver, same room, same instant:
 | transmitter | distance | RSSI at `tiny` |
 |---|---|---|
 | our box, **2.4 GHz** (`rtl8192cd`) | same room, ~3 m | **-32 dBm** |
-| our box, **5 GHz** (rtw88 8822BE) | same room, ~3 m | **-62 to -70 dBm** |
+| our box, **5 GHz** (rtw88 8822BE) | same room, ~3 m | **-58 to -70 dBm** |
 | a **neighbour's** 5 GHz AP, another home | through walls | **-55 dBm** |
 
 ★ A neighbour's AP behind walls beats our same-room AP.
@@ -1042,11 +1042,15 @@ path**, so path loss, distance and antenna gain all cancel. With `tiny` associat
 | our AP -> tiny (client's view) | **-60 dBm** |
 | tiny -> our AP (`station dump`) | **-52 dBm**, avg -49 |
 
-Path loss is identical both ways, so `TX_ap - TX_tiny = -60 - (-52) = -8 dB`:
-★ **our AP transmits about 8 dB less than a Raspberry Pi 4's onboard Wi-Fi.** A router
-with external antennas should beat an RPi by several dB, so the true shortfall is ~13 dB.
-This is the cleanest statement of the deficit in this document — no estimated distance,
-no free-space model, no cross-receiver calibration.
+Path loss is identical both ways, so `TX_ap - TX_tiny = -60 - (-52) = -8 dB` **on the
+two receivers' own scales** -- and those scales differ: the cross-calibration above found
+the box reads **2-13 dB (mean ~7 dB) lower** than `tiny` for the same transmitters, and a
+blank-efuse rtw88 RSSI (AGC/LNA tables chosen by a guessed RFE type) is the least
+calibrated number on this bench. Correcting by that mean offset gives ~-15 dB, i.e. **our
+AP transmits roughly 8-15 dB less than an RPi4's onboard Wi-Fi**; add the few dB a router
+with external antennas should have over an RPi and the shortfall is ~13-20 dB. It still
+needs no distance estimate or free-space model, but it is *not* free of receiver
+calibration -- an earlier draft claimed it was. (Review, 2026-09-02.)
 
 ★ `station dump` also showed `signal: -52 [-64, -52]`, a 12 dB spread between the two RX
 chains. **Do not build on that** — it is one instantaneous sample and the per-chain TX
@@ -1282,10 +1286,16 @@ room produces -42 dBm under stock. The deficit is **software**.
 
 ### ★ What stock does differently (measured, not inferred)
 
-* **It uses channel 149, which OpenWrt refuses.** `iw phy1 info` reports
-  `5745 MHz [149] (20.0 dBm) (no IR)` under `country BR` -- **no-IR = may not initiate
-  radiation**, so `wifi reload` on ch149 leaves the radio down and the AP never starts.
-  Stock ignores this and its own ACS actively prefers 149
+* **It uses channel 149, which this build cannot -- but NOT because Brazil forbids it.**
+  ★★ Correction (review, 2026-09-02): `iw phy1 info` reports `5745 MHz [149] (20.0 dBm)
+  (no IR)` and hostapd refuses the channel (`Frequency 5745 (primary) not allowed for AP
+  mode, flags: 0x853 NO-IR`) **even though `iw reg get` shows the user domain as
+  `country BR: (5735 - 5835 @ 80), (N/A, 30)`** -- 30 dBm, IR permitted. The 20 dBm/NO-IR
+  values are the **world domain**: with a blank efuse `rtw88/regd.c` hints country `00`
+  ("If country code is not correctly defined in efuse, use worldwide") and the wiphy
+  keeps that plan's NO-IR on 149-165 regardless of the user setting. The repo's own #23
+  recorded ch149 beaconing at 30 dBm under an earlier build; why that hint path differed
+  is not established. Stock's own ACS actively prefers 149
   (`d-link channel[36+40+44+48] = 1400` vs `channel[149+153+157+161] = 800`).
 * **It loads `PHY_REG_PG_8822Bmp_Type0`** -- PG **type 0**. rtw88 has `bb_pg` types 2/3/5
   only; there is no type 0 for 8822b.
@@ -1318,15 +1328,23 @@ out of it.**
 
 ★ Bench notes: `tiny` cannot scan UNII-3 under `country BR`; `sudo iw reg set US` makes
 5745 visible (set it back afterwards). Stock has a **BusyBox shell on the serial console**
-(unlike our OpenWrt, which has no getty), so `/proc/wlanN/*` can be read live. Stock also
+(our OpenWrt has one too -- `askconsole` in `/etc/inittab` runs `askfirst` on `ttyS0`; press Enter first, see confound #32), so `/proc/wlanN/*` can be read live. Stock also
 boots as a **router with dnsmasq on 192.168.1.1** -- kill `dnsmasq`/`tinysvcmdns`/`locdns`
 immediately after boot or it serves rogue DHCP on the house LAN.
 
 ### ★ Separating "band" from "driver" — ~14 dB is the driver, only ~3 dB is regulatory
 
-Under `country BR` this radio may legally *initiate radiation* on **only** ch36/40/44/48,
-all at **17 dBm**; every other 5 GHz channel is `no IR` (the DFS ones for lack of radar
-support, 149-165 outright):
+★★ **Retracted (review, 2026-09-02) -- this section's conclusion was built on the wrong
+table.** The channel list below is what `iw phy1 info` prints on this build, and it is the
+**world-domain plan from rtw88's blank-efuse hint, not Brazil's regulation**. BR's regdb
+entry (`wireless-regdb-2020.04.29/db.txt`, `country BR`) permits **30 dBm on 5735-5835 with
+no NO-IR** and 24 dBm on the DFS bands. So the "at most 3 dB regulatory" arithmetic is
+unsupported: if stock runs ch149 near BR's 30 dBm ceiling against our 17 dBm on ch36, the
+regulatory share could be **up to ~13 dB**, and **the driver-vs-band split is NOT
+separated** -- exactly what the honest paragraph further up said before this one overrode
+it. What stands: the hardware is fine (stock reaches -42 dBm on this unit), and *this
+build* can only initiate on ch36-48 at 17 dBm because of the driver's world hint. As
+printed by this build:
 
 ```
 * 5180/5200/5220/5240 MHz [36/40/44/48]  (17.0 dBm)
@@ -1334,11 +1352,13 @@ support, 149-165 outright):
 * 5745..5825 MHz [149..165]               (20.0 dBm) (no IR)
 ```
 
-Stock runs ch149 at a 20 dBm ceiling; we run ch36 at 17 dBm. **That is at most a 3 dB
-regulatory advantage** -- and 5745 costs ~1 dB *more* path loss than 5180 -- yet stock
-measured **17 dB** stronger. ★★ So roughly **14 dB is a driver deficit, not a band or
-regulatory one.** Unlocking ch149 (a compliance decision, not a technical one) would buy
-only ~3 dB; it is not the fix.
+★ **New lead, and probably the largest *legal* gain available:** make rtw88's regulatory
+hint follow the configured country instead of `00` when the efuse country code is blank
+(patch 03 handles rfe/xtal/MAC fallbacks but not `country_code`). That would let BR users
+run ch149 at BR's own 30 dBm ceiling -- a compliance-clean change, since it applies the
+domain the operator already set. Whether it recovers 3 dB or 13 dB is the unseparated
+question above; measure it with `tools/bench/rf-measure.sh` against the 5745 reference
+(`tiny` needs `iw reg set US` to scan UNII-3).
 
 ### ★ Refuted: rtw88's `max_power_index` is NOT an artificial cap
 
@@ -1465,7 +1485,7 @@ renewed against stock's rogue dnsmasq at 192.168.1.1 during the A/B) while the h
 lock stops it recovering on another AP. All paths to it are down, including Tailscale
 (`100.64.0.14`), because its only uplink is that wlan0.
 
-★★ **One command on the box itself fixes it:**
+★★ **Two commands at `tiny`'s own console fix it** (NetworkManager commands on the Pi, not anything on the router; with every network path to the Pi down it has to be its keyboard/HDMI or a local serial console):
 
 ```sh
 sudo nmcli con modify BRAVO 802-11-wireless.bssid ""
@@ -1489,17 +1509,23 @@ Measured on the bench client, same position, same session:
 | VHT40 | **fails** | **0** | -- | dropped | 0 |
 | **HT20** | **succeeds** | **583** | **-50 dBm** | stable | **57.7 Mbit/s** |
 
-★★ **Why it works:** narrowing 80 -> 20 MHz concentrates the same transmit power into a
-quarter of the bandwidth and cuts the receiver's noise bandwidth by the same factor -- worth
-~6 dB of link margin each way. On a link already ~14 dB short (see the stock A/B above),
-that is the difference between a link that carries data and one that does not. The AP's
-view of the client improves from **-65 dBm to -50 dBm** purely from the width change.
+★★ **Why it works:** a 4x narrower channel cuts the receiver's noise bandwidth 4x, i.e.
+**~6 dB more SNR** for the same received power, each way. On a link ~17 dB short of stock
+(see the A/B above), that is the difference between a link that carries data and one that
+does not. ★ Do NOT read the AP-side change (-65 -> -50 dBm) as "the width bought 15 dB":
+rtw88's reported RSSI is pure received power with no bandwidth term (`rtw8822b.c:867`), so
+a width change cannot move it by more than the client's own 80-vs-20 MHz TX back-off (a
+few dB at most). The rest is the same 8-10 dB boot-to-boot variance documented above,
+resampled across the radio re-init that `wifi reload` performs. (Review, 2026-09-02.)
 
-★ **The cost is real but small in practice:** ~58 Mbit/s at HT20 versus the ~100 Mbit/s
-VHT80 managed *on the boots where it worked at all*. Note the separate finding above that
-throughput on this box was **flat at ~100 Mbit/s across VHT80 and VHT40** (PHY 351 vs 200
-Mbit/s), i.e. width was never buying throughput here -- so trading it for a link that
-actually works is close to free.
+★ **The cost is real, and the two numbers in the table do not measure it.** Both are
+client-limited: the 57.7 Mbit/s HT20 figure is a 1x1 RPi4 at its own 72.2 Mbit/s HT20 PHY
+ceiling, and the earlier ~100 Mbit/s "flat across VHT80/VHT40" result was the same RPi4 at
+its ~100-120 Mbit/s cap (the section above says so itself). What the AP can do: 2x2 HT20
+tops out at **144 Mbit/s PHY** (MCS15+SGI), i.e. ~100-110 Mbit/s TCP at best, **below the
+130 Mbit/s the phone reached at VHT80** on a boot where VHT80 worked. So HT20 gives up peak
+throughput for a link that works on every boot. That is the right trade for an AP, and it
+is why this is a workaround rather than a fix. (Review, 2026-09-02.)
 
 ★★★ **Shipped as the default** in `files/.../uci-defaults/99-dir842-m5`
 (`htmode='HT20'`, commit `3b5a56f`). ★★ **Precedence trap, found the hard way:** the private
@@ -1608,12 +1634,17 @@ What remains is no longer a config change:
 ### Bench technique learned here
 
 * **Module parameters survive a reboot via `/etc/modules.d/<pkg>`**, not
-  `/etc/modprobe.d/` — OpenWrt's kmodloader ignores the latter. Append options to the
-  module's own line: `rtw88_8822b rfe_option_override=3`. Verified working.
-* **`iw reg set <cc>` re-applies TX power live.** `rtw_regd_notifier()` calls
-  `rtw_phy_set_tx_power_level()`, so a power-affecting module parameter can be swept
-  at runtime with no reboot and no module reload — which the `rmmod` warning above
-  otherwise rules out.
+  `/etc/modprobe.d/` — OpenWrt's kmodloader ignores the latter. ★ `rtw88_8822b` has **no
+  line of its own** in `/etc/modules.d/rtw88` (only `rtw88_8723de`/`rtw88_8822be`/
+  `rtw88_8822ce`; it loads as a dependency), so **add a new line** `rtw88_8822b
+  rfe_option_override=3` *above* the `rtw88_8822be` line. Appending the option to the
+  `8822be` line instead is a silent no-op (`unknown parameter ... ignored`). Verified
+  working as a new line.
+* **`iw reg set` re-applies TX power live -- but only if the domain actually changes.**
+  `rtw_regd_notifier()` calls `rtw_phy_set_tx_power_level()`, but cfg80211 drops a user
+  hint for the domain already in force (`REG_REQ_ALREADY_SET`, `reg.c:2435`) and the
+  notifier never runs. Use a round trip: `iw reg set US; sleep 2; iw reg set BR`. That is
+  what every sweep in this document actually did.
 * To re-run any of this, re-enable `RTW88_DEBUG`/`RTW88_DEBUGFS` with
   `config-y += RTW88_DEBUG RTW88_DEBUGFS` in `openwrt/package/kernel/mac80211/realtek.mk`,
   and re-add the two diagnostic module parameters (`rfe_option_override` in `rtw8822b.c`'s

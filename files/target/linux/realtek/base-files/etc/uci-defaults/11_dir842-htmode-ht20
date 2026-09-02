@@ -1,0 +1,13 @@
+#!/bin/sh
+# ★ Migration, idempotent, runs on every flash (no guard by design): a config-
+# preserving sysupgrade from v1.3 or earlier keeps the user's radio0 at VHT80/VHT40,
+# and on this unit those widths associate clients but never complete DHCP
+# (docs/WIFI-DUAL-BAND.md, 4c358a2). Only HT20 carries data. Bump it; touch nothing
+# else. Sorts after 10_ (which may create radio0 via `wifi config`) and before 99_.
+case "$(uci -q get wireless.radio0.htmode)" in
+	VHT80|VHT40|HT40)
+		uci -q set wireless.radio0.htmode='HT20'
+		uci -q commit wireless
+		;;
+esac
+exit 0

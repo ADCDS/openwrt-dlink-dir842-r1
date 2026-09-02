@@ -411,8 +411,12 @@ scans, and report the *difference* — that cancels receiver drift and band-wide
 was one step from being written up as "the 130 Mbit/s ceiling is the SoC's CPU doing software
 wifi bridging" — a tidy, plausible, and completely wrong conclusion. `/proc/stat` deltas over
 an 8 s window on the same transfer: **17 % busy, 82 % idle** (8 % busy with no traffic).
-`top`'s first sample has no previous sample to difference against, and the ssh + `top`
-processes themselves land inside a single instantaneous reading on a single-core MIPS box.
+★ Corrected mechanism (review, 2026-09-02): the box's `top` is BusyBox 1.31 with
+`FEATURE_TOP_CPU_USAGE_PERCENTAGE`, whose first pass *does* take a real delta -- over a
+**~100 ms** window (`do_stats(); usleep(100000)`). The inflation is that on a single-core
+MIPS box the `top` process's own `/proc` walk plus the ssh session dominate any 100 ms
+window. So the rule is about window length, not "first sample": any short-window sampler
+(`top -bn1`, a 100 ms `/proc/stat` delta) reads the observer, not the workload.
 ★ **Measure CPU on this box with `/proc/stat` deltas over several seconds, never `top -bn1`.**
 Use `tools/bench/cpu-delta.sh`.
 
@@ -436,9 +440,14 @@ The daemon also logs `[[daemon sent b'\x1b'...]]` for every ESC, so the bytes le
 ★ Diagnosis order that gets here fast, without power-cycling anything:
 1. `BAUD = 38400`, not 115200 (`console=ttyS0,38400`). At 115200 the log is pure garbage and
    looks like a dead link.
-2. There is **no shell on the serial console** -- no tty line in `/etc/inittab` -- so a typed
-   `echo MARKER` will never echo back even when TX is perfectly healthy. **Do not use echo as
-   a TX test.** The only valid TX test is whether the *bootloader* escapes.
+2. ★ **Correction (review, 2026-09-02):** there IS a shell on the serial console. There is
+   no `ttyS0::askfirst:` line, but `/etc/inittab` carries `::askconsole:/usr/libexec/login.sh`,
+   and procd's `askconsole` runs `askfirst` on the kernel `console=` tty (`ttyS0,38400`):
+   it prints `Please press Enter to activate this console.` -- the very prompt
+   `docs/BENCH.md` polls for -- and execs `/bin/ash --login` on Enter. So the cheap TX test
+   is valid and non-destructive: **press Enter, then type `echo MARKER`**; it echoes back
+   iff TX works. The earlier rule ("only the bootloader escape is a valid TX test") stands
+   as the *sufficient* test but was justified by a false premise.
 3. Grep the log for `boot code at` vs `Escape booting by user` around one reboot. Banner
    present + escape absent = TX dead. Both present = TX fine.
 ★ Consequence: `loader.py catch` cannot work, so there is **no bootloader recovery path**, and
