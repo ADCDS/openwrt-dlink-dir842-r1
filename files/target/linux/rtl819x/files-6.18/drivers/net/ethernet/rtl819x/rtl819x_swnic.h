@@ -395,6 +395,7 @@ int32 New_swNic_send(void *skb, void *output, uint32 len, rtl_nicTx_info *nicTx)
 int32 New_swNic_receive(rtl_nicRx_info *info, int retryCount);
 int32 New_swNic_rxPending(void);
 int32 New_swNic_txDone(int idx);
+uint32 New_swNic_txPending(uint32 *done_idx);
 void New_swNic_freeRxBuf(void);
 void New_swNic_freeRings(void);
 

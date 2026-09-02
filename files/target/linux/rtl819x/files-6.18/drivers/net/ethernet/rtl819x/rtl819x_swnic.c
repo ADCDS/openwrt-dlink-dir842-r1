@@ -643,6 +643,23 @@ static int32 _New_swNic_send(void *skb, void *output, uint32 len,
 		ph->ph_flags |= PKTHDR_BRIDGING;
 	}
 
+	/*
+	 * First few CPU-originated frames only: the descriptor as the switch core
+	 * will see it. Cheap, bounded, and the one place that shows whether a
+	 * frame that Linux counted as sent was actually handed over with a sane
+	 * port list, VLAN id and flags.
+	 */
+	{
+		static unsigned int txlog;
+
+		if (txlog < 3) {
+			txlog++;
+			pr_info("rtl819x tx#%u len=%u portlist=%02x vid=%u flags=%04x asic0=%04x\n",
+				txlog, ph->ph_len, ph->ph_portlist,
+				ph->ph_vlanId & 0xfff, ph->ph_flags, ph->ph_asic0);
+		}
+	}
+
 	tx_ri[idx].skb = (uintptr_t)skb;
 	tx_ri[idx].dma = (dma_addr_t)(uintptr_t)output;
 
@@ -656,6 +673,44 @@ static int32 _New_swNic_send(void *skb, void *output, uint32 len,
 	REG32(CPUICR) |= TXFD;
 	return SUCCESS;
 }
+
+/*
+ * On-demand transmit-engine dump: `echo 1 > /sys/module/rtl819x/parameters/txdiag`.
+ *
+ * The question this exists to answer is the one the netdev counters cannot: the
+ * driver counts a frame as sent the moment it hands the descriptor over, so
+ * tx_packets rises even when the switch core never fetches a single one. If
+ * swcore_owned is large and txDoneIdx is frozen behind txCurr, the descriptors
+ * were queued and the engine never ran -- which looks from outside exactly like
+ * a cable fault, and is what "the box receives but transmits nothing" turned
+ * out to be.
+ */
+static int txdiag_set(const char *val, const struct kernel_param *kp)
+{
+	volatile uint32 *tr = TXR();
+	unsigned int owned = 0, i;
+
+	if (!tr || !txCnt) {
+		pr_err("swnic txdiag: tx ring not allocated\n");
+		return 0;
+	}
+	for (i = 0; i < txCnt; i++)
+		if ((tr[i] & DESC_OWNED_BIT) == DESC_SWCORE_OWNED)
+			owned++;
+
+	pr_err("swnic txdiag: txCurr=%u txDoneIdx=%u txCnt=%u swcore_owned=%u\n",
+	       txCurr, txDoneIdx, txCnt, owned);
+	pr_err("swnic txdiag: CPUICR=%08x CPUIISR=%08x CPUTPDCR0=%08x tr[0..3]=%08x %08x %08x %08x\n",
+	       REG32(CPUICR), REG32(CPUIISR), REG32(CPUTPDCR0),
+	       tr[0], tr[1], tr[2], tr[3]);
+	return 0;
+}
+
+static const struct kernel_param_ops txdiag_ops = {
+	.set = txdiag_set,
+};
+module_param_cb(txdiag, &txdiag_ops, NULL, 0200);
+MODULE_PARM_DESC(txdiag, "write anything to dump tx ring/engine state to the log");
 
 int32 New_swNic_send(void *skb, void *output, uint32 len, rtl_nicTx_info *nicTx)
 {
@@ -673,6 +728,31 @@ int32 New_swNic_send(void *skb, void *output, uint32 len, rtl_nicTx_info *nicTx)
  * handed back CPU-owned (own bit cleared).  Walk from txDoneIdx toward txCurr,
  * freeing the stashed sk_buffs, stopping at the first still-pending slot.
  */
+/*
+ * Outstanding Tx descriptors (handed to the switch core, not yet returned) and
+ * the current reclaim index. The watchdog uses the pair to tell a busy engine
+ * from a dead one: a working engine keeps moving txDoneIdx, a wedged one holds
+ * it still while the ring fills behind it.
+ */
+uint32 New_swNic_txPending(uint32 *done_idx)
+{
+	unsigned long flags = 0;
+	uint32 pending;
+
+	SMP_LOCK_ETH_XMIT(flags);
+	if (!txCnt)
+		pending = 0;
+	else if (txCurr >= txDoneIdx)
+		pending = txCurr - txDoneIdx;
+	else
+		pending = txCnt - txDoneIdx + txCurr;
+	if (done_idx)
+		*done_idx = txDoneIdx;
+	SMP_UNLOCK_ETH_XMIT(flags);
+
+	return pending;
+}
+
 int32 New_swNic_txDone(int idx)
 {
 	unsigned long flags = 0;

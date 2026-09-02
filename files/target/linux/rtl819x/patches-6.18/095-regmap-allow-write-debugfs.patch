@@ -1,0 +1,22 @@
+From: DIR-842 R1 port
+Subject: [PATCH] regmap: debugfs: allow register writes on this target
+
+Upstream deliberately offers no Kconfig for writable regmap debugfs and tells
+you to edit the source, because writing PMIC registers from userspace can
+destroy hardware.  This target has one regmap: the RTL8367S switch on the
+bit-banged SMI bus.  Bring-up and datapath debugging need to poke its CPU-tag,
+VLAN, isolation and MIB registers by hand, and it is the only instrument that
+can read the CPU port's MIB counters (which the DSA core never exposes,
+because the CPU port has no netdev).
+
+--- a/drivers/base/regmap/regmap-debugfs.c
++++ b/drivers/base/regmap/regmap-debugfs.c
+@@ -290,7 +290,7 @@ static ssize_t regmap_map_read_file(stru
+ 			   count, ppos);
+ }
+ 
+-#undef REGMAP_ALLOW_WRITE_DEBUGFS
++#define REGMAP_ALLOW_WRITE_DEBUGFS 1
+ #ifdef REGMAP_ALLOW_WRITE_DEBUGFS
+ /*
+  * This can be dangerous especially when we have clients such as
