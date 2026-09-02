@@ -10,7 +10,7 @@ Select it from a device tree property so nothing changes for boards that do not
 ask for it.
 
 --- a/drivers/net/dsa/realtek/rtl8365mb_main.c	2026-09-02 13:48:01.502405464 -0300
-+++ b/drivers/net/dsa/realtek/rtl8365mb_main.c	2026-09-02 13:48:21.871151644 -0300
++++ b/drivers/net/dsa/realtek/rtl8365mb_main.c	2026-09-02 14:18:17.447420700 -0300
 @@ -807,6 +807,7 @@
   */
  struct rtl8365mb_cpu {
@@ -46,7 +46,7 @@ ask for it.
  	default:
  		return -EPROTONOSUPPORT;
  	}
-@@ -3267,6 +3270,8 @@
+@@ -3267,10 +3270,13 @@
  	priv->num_ports = RTL8365MB_MAX_NUM_PORTS;
  	mb->priv = priv;
  	mb->cpu.trap_port = RTL8365MB_MAX_NUM_PORTS;
@@ -55,3 +55,9 @@ ask for it.
  	mb->cpu.insert = RTL8365MB_CPU_INSERT_TO_ALL;
  	mb->cpu.position = RTL8365MB_CPU_POS_AFTER_SA;
  	mb->cpu.rx_length = RTL8365MB_CPU_RXLEN_64BYTES;
+-	mb->cpu.format = RTL8365MB_CPU_FORMAT_8BYTES;
++	mb->cpu.format = mb->cpu.short_format ? RTL8365MB_CPU_FORMAT_4BYTES
++					      : RTL8365MB_CPU_FORMAT_8BYTES;
+ 
+ 	return 0;
+ }
