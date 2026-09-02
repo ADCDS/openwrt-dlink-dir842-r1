@@ -1473,7 +1473,8 @@ static int rtl819x_eth_poll(struct napi_struct *napi, int budget)
 		 * which reads as "the napi loop has hung" when in fact only the
 		 * counter had stopped. It cost real diagnostic time; don't put side
 		 * effects back into this condition. */
-		beat = datapath_debug && !(++pc & 0x3ff);
+		pc++;
+		beat = datapath_debug && !(pc & 0x3ff);
 
 		/* Descriptor-pool watch: log if the shared pool is filling (USEDDSC)
 		 * or has latched a run-out (DSCRUNOUT) - the large-frame drop
