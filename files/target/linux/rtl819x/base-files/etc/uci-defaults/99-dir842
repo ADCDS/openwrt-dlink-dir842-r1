@@ -1,0 +1,17 @@
+#!/bin/sh
+# First-boot defaults for the DIR-842 R1.
+#
+# Guarded so it only ever runs once: a re-run after the user has changed things
+# would silently overwrite them.
+[ "$(uci -q get system.@system[0].dir842_seeded)" = "1" ] && exit 0
+
+# 192.168.0.1 rather than OpenWrt's usual 192.168.1.1, to match the address the
+# bootloader's recovery TFTP server uses, so one host setup serves both.
+uci -q batch <<-EOT
+	set network.lan.ipaddr='192.168.0.1'
+	set system.@system[0].dir842_seeded='1'
+	commit network
+	commit system
+EOT
+
+exit 0

@@ -1,4 +1,0 @@
-#!/bin/sh
-# base-files init scripts are not auto-enabled; create the rc.d symlink once.
-/etc/init.d/dir842-l2flush enable
-exit 0
