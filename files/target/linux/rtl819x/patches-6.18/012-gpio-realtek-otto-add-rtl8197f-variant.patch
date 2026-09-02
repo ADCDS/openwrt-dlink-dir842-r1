@@ -1,0 +1,27 @@
+From: DIR-842 R1 port
+Subject: [PATCH] gpio: realtek-otto: add the RTL819x (RTL8197F) variant
+
+Same controller block as the switch SoCs, but these router parts are
+little-endian, so the registers are accessed in native port order -- the same
+layout the driver already calls "reversed". Line interrupts are not wired on
+these boards, so declare them unavailable rather than registering an irqchip
+that can never fire.
+
+--- a/drivers/gpio/gpio-realtek-otto.c	2026-09-02 13:27:21.149243274 -0300
++++ b/drivers/gpio/gpio-realtek-otto.c	2026-09-02 13:27:21.157243558 -0300
+@@ -345,6 +345,15 @@
+ 		.compatible = "realtek,rtl8390-gpio",
+ 	},
+ 	{
++		/*
++		 * RTL819x router SoCs: same register block, native (non
++		 * byte-swapped) port order because the CPU is little-endian.
++		 * Line interrupts are not wired up on these boards.
++		 */
++		.compatible = "realtek,rtl8197f-gpio",
++		.data = (void *)(GPIO_PORTS_REVERSED | GPIO_INTERRUPTS_DISABLED)
++	},
++	{
+ 		.compatible = "realtek,rtl9300-gpio",
+ 		.data = (void *)(GPIO_PORTS_REVERSED | GPIO_INTERRUPTS_PER_CPU)
+ 	},

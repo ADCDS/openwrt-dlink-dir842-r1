@@ -97,7 +97,7 @@
 		 * what this little-endian SoC needs.
 		 */
 		gpio0: gpio@3500 {
-			compatible = "realtek,rtl8197f-gpio", "realtek,rtl9607-gpio";
+			compatible = "realtek,rtl8197f-gpio";
 			reg = <0x3500 0x1c>;
 
 			gpio-controller;
@@ -108,7 +108,7 @@
 		};
 
 		gpio1: gpio@351c {
-			compatible = "realtek,rtl8197f-gpio", "realtek,rtl9607-gpio";
+			compatible = "realtek,rtl8197f-gpio";
 			reg = <0x351c 0x1c>;
 
 			gpio-controller;
