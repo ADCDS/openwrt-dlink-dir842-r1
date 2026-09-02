@@ -1,10 +1,18 @@
 # Prebuilt images
 
-Built 2026-09-02 from the **v1.4** tree by the exact clean-room path the README
-documents: fresh clone → `./build.sh` inside the Debian 11 (bullseye) container
-from `docs/BENCH.md` §7. Nothing outside this repository went into them — **dual-band**
-(2.4 GHz `DIR842-2G` via the vendor `rtl8192cd` driver + 5 GHz `DIR842-OpenWrt` via
-rtw88, ⚠ both open by default) + wired + hardware-NAT + 802.11r images.
+Built 2026-09-02 from the **v1.4** tree (`eec304d`) with the build container's toolchain
+(Debian 11, `docs/BENCH.md` §7) and **no private profile in the tree** — the profile
+directory was removed from `openwrt/files/` before the image step, and the resulting rootfs
+was extracted with `unsquashfs` and audited: no `authorized_keys`, no `ap-profile/`, no
+profile seeds, no baked `wireless` config, no PSK strings anywhere under `/etc`; and every
+v1.4 fix present (HT20 default, seed guard, htmode migration, `led_type`, the rtw88 LED
+patch, the inert crystal-cap mechanism gone). The embedded squashfs was verified
+byte-identical to the audited one. ★ Unlike v1.3 this was **not** a from-scratch clone
+build: the from-scratch attempt ran out of disk mid-build, and the incremental build of
+the same tree, audited as above, was used instead. Nothing outside this repository went
+into the images — **dual-band** (2.4 GHz `DIR842-2G` via the vendor `rtl8192cd` driver +
+5 GHz `DIR842-OpenWrt` via rtw88, ⚠ both open by default) + wired + hardware-NAT +
+802.11r images.
 
 ★ **v1.4 makes the 5 GHz AP actually usable, and stops sysupgrade from wiping your
 config.** On this hardware the 5 GHz radio at 80/40 MHz associates clients but never
