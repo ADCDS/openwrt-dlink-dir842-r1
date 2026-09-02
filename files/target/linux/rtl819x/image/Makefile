@@ -99,8 +99,9 @@ define Device/dlink_dir-842-r1
 	DEVICE_COMPAT_VERSION := 2.0
 	DEVICE_COMPAT_MESSAGE := Config cannot be migrated from swconfig to DSA \
 		(eth0.1/eth0.2 became wan/lan1..lan4); sysupgrade with -n
-	DEVICE_PACKAGES := kmod-rtw88-8822be rtl8822be-firmware wpad-basic-mbedtls iw \
-		kmod-leds-gpio kmod-gpio-button-hotplug iperf3
+	# Radio packages are added back when PCIe and the 2.4 GHz WMAC are enabled;
+	# rtw88 cannot even link without PCI in the kernel.
+	DEVICE_PACKAGES := kmod-leds-gpio kmod-gpio-button-hotplug iperf3
 	IMAGE/factory.bin := append-kernel | append-fake-rootfs | append-rootfs | \
 		cvimg-kernel-cr6b | cvimg-pad-rootfs | dlink-md5-sign | check-size
 	# sysupgrade MUST sign BEFORE pad-rootfs: pad-rootfs appends the jffs2 'deadc0de'
