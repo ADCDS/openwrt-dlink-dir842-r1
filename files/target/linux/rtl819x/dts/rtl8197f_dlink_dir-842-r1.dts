@@ -90,6 +90,14 @@
 		/* the SoC MAC inserts and strips the short form of the CPU tag */
 		realtek,cpu-tag-4byte;
 
+		/*
+		 * The management lines on this board need far longer to settle
+		 * than the driver's default. 1500ns is the value the vendor
+		 * driver used here; at the default the transactions are
+		 * marginal and fail in bursts under load.
+		 */
+		realtek,clk-delay-ns = <1500>;
+
 		mdio {
 			compatible = "realtek,smi-mdio";
 			#address-cells = <1>;

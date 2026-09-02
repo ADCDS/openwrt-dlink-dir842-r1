@@ -1,0 +1,52 @@
+From: DIR-842 R1 port
+Subject: [PATCH] net: dsa: realtek: allow the SMI clock delay to be set per board
+
+The bit-banged SMI clock delay is a per-chip constant, but how long the
+management lines actually need to settle is a property of the board's wiring,
+not of the switch. Where the default is too short the transactions become
+marginal: they mostly succeed, and then fail in bursts once the CPU is busy
+elsewhere, which shows up as PHY read timeouts and ports stuck down.
+
+Let the device tree override it, defaulting to the existing per-chip value so
+nothing changes for boards that do not set the property.
+
+--- a/drivers/net/dsa/realtek/realtek.h	2026-09-02 14:55:27.415291841 -0300
++++ b/drivers/net/dsa/realtek/realtek.h	2026-09-02 14:55:27.423292118 -0300
+@@ -57,6 +57,7 @@
+ 	struct gpio_desc	*reset;
+ 	struct gpio_desc	*mdc;
+ 	struct gpio_desc	*mdio;
++	unsigned int		clk_delay;
+ 	struct regmap		*map;
+ 	struct regmap		*map_nolock;
+ 	struct mutex		map_lock;
+--- a/drivers/net/dsa/realtek/realtek-smi.c	2026-09-02 14:55:27.415291841 -0300
++++ b/drivers/net/dsa/realtek/realtek-smi.c	2026-09-02 14:55:27.423292118 -0300
+@@ -46,7 +46,7 @@
+ 
+ static inline void realtek_smi_clk_delay(struct realtek_priv *priv)
+ {
+-	ndelay(priv->variant->clk_delay);
++	ndelay(priv->clk_delay);
+ }
+ 
+ static void realtek_smi_start(struct realtek_priv *priv)
+--- a/drivers/net/dsa/realtek/rtl83xx.c	2026-09-02 14:55:27.415291841 -0300
++++ b/drivers/net/dsa/realtek/rtl83xx.c	2026-09-02 14:55:27.423292118 -0300
+@@ -192,6 +192,16 @@
+ 
+ 	spin_lock_init(&priv->lock);
+ 
++	/*
++	 * How long to hold each level when bit-banging SMI. The per-chip default
++	 * suits boards whose management lines settle quickly; where they do not,
++	 * too short a delay makes transactions marginal -- they mostly succeed,
++	 * then fail in bursts under load.
++	 */
++	priv->clk_delay = var->clk_delay;
++	of_property_read_u32(dev->of_node, "realtek,clk-delay-ns",
++			     &priv->clk_delay);
++
+ 	priv->leds_disabled = of_property_read_bool(dev->of_node,
+ 						    "realtek,disable-leds");
+ 

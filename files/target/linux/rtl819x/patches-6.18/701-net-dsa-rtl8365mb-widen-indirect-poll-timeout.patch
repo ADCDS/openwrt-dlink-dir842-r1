@@ -1,0 +1,35 @@
+From: DIR-842 R1 port
+Subject: [PATCH] net: dsa: rtl8365mb: widen the indirect-access poll timeout
+
+Waiting for the indirect PHY access to complete is given 100us. Each poll is
+itself a register access, and over the bit-banged SMI transport a single access
+is tens of microseconds of software bit toggling, so the whole budget can expire
+inside one iteration whenever the CPU is busy with something else.
+
+Observed on an RTL8197F board driving this switch over bit-banged SMI: sustained
+traffic produces a burst of "failed to read PHY.. -ETIMEDOUT", after which
+phylink reports every port down and they do not come back.
+
+Widen the timeout to 10ms. On a real MDIO controller the loop still exits on its
+first read, so nothing changes there.
+
+--- a/drivers/net/dsa/realtek/rtl8365mb_main.c	2026-09-02 14:52:01.748198795 -0300
++++ b/drivers/net/dsa/realtek/rtl8365mb_main.c	2026-09-02 14:52:01.756199069 -0300
+@@ -864,9 +864,16 @@
+ {
+ 	u32 val;
+ 
++	/*
++	 * Every poll here is itself a register access, and on the bit-banged SMI
++	 * transport one of those takes tens of microseconds of software toggling
++	 * -- so a 100us budget can expire inside a single iteration once the CPU
++	 * is busy elsewhere. Allow enough time for the slow transport; on a real
++	 * MDIO controller the loop still exits on the first read.
++	 */
+ 	return regmap_read_poll_timeout(priv->map_nolock,
+ 					RTL8365MB_INDIRECT_ACCESS_STATUS_REG,
+-					val, !val, 10, 100);
++					val, !val, 10, 10000);
+ }
+ 
+ static int rtl8365mb_phy_ocp_prepare(struct realtek_priv *priv, int phy,
