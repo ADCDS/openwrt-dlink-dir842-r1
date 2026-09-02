@@ -7,9 +7,9 @@ need their own machine symbol. Wire up the generic board file, the include path
 for the SoC header, the (shared) Realtek interrupt controller, the Otto GPIO
 driver and the PCIe host driver.
 
---- a/arch/mips/Kconfig	2026-09-02 12:33:45.103477556 -0300
-+++ b/arch/mips/Kconfig	2026-09-02 12:33:45.159480742 -0300
-@@ -714,6 +714,37 @@
+--- a/arch/mips/Kconfig
++++ b/arch/mips/Kconfig
+@@ -714,6 +714,29 @@
  	select USE_OF
  	select REALTEK_OTTO_TIMER
  
@@ -36,17 +36,24 @@ driver and the PCIe host driver.
 +	  Realtek RTL819x home-router SoCs (RTL8197F). Unlike the RTL838x/RTL839x
 +	  managed-switch family above these are little-endian MIPS32r2 cores.
 +
-+config SOC_RTL8197F
-+	bool "RTL8197F"
-+	depends on MACH_REALTEK_RTL819X
-+	default y
-+	help
-+	  Realtek RTL8197F: MIPS 24Kc, on-SoC 2.4 GHz WMAC, five-port switch
-+	  core behind an RGMII trunk, one PCIe root complex.
-+
  config SGI_IP22
  	bool "SGI IP22 (Indy/Indigo2)"
  	select ARC_MEMORY
+@@ -1047,6 +1070,14 @@
+ 
+ endchoice
+ 
++config SOC_RTL8197F
++	bool "Realtek RTL8197F"
++	depends on MACH_REALTEK_RTL819X
++	default y
++	help
++	  Realtek RTL8197F: MIPS 24Kc, on-SoC 2.4 GHz WMAC, five-port
++	  switch core behind an RGMII trunk, one PCIe root complex.
++
+ config FIT_IMAGE_FDT_EPM5
+ 	bool "Include FDT for Mobileye EyeQ5 development platforms"
+ 	depends on MACH_EYEQ5
 --- a/arch/mips/generic/Platform	2026-09-02 12:33:45.107477784 -0300
 +++ b/arch/mips/generic/Platform	2026-09-02 12:33:45.159480742 -0300
 @@ -10,6 +10,7 @@

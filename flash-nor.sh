@@ -24,7 +24,8 @@ LOG=/home/agiu/dir842-r1-bootlog.txt
 FLAG=/tmp/flashnor-spam.flag
 TOMADA="${TOMADA:-/home/agiu/.local/bin/tomada}"
 IFACE="${IFACE:-eth1}"	# host NIC cabled to the DIR-842 LAN — override: IFACE=... ./flash-nor.sh
-IMG="${1:-$(ls /home/agiu/dir842-build/openwrt/bin/targets/realtek/rtl8197f/*squashfs-factory.bin | head -1)}"
+BIN_DIR="${BIN_DIR:-$(dirname "$(readlink -f "$0")")/openwrt/bin/targets/rtl819x/rtl8197f}"
+IMG="${1:-$(ls $BIN_DIR/*squashfs-factory.bin | head -1)}"
 
 sr() { stty -F "$PORT" 38400 cs8 -parenb -cstopb -crtscts -ixon clocal raw -echo 2>/dev/null; }
 spam_stop() { rm -f "$FLAG"; sleep 0.3; }

@@ -1,21 +1,18 @@
+From: DIR-842 R1 port
+Subject: [PATCH] net: skbuff: symbolize the skb_panic caller
+
+skb_panic() prints the return address raw, which on a stripped router image is
+an unsearchable number. %pS resolves it to func+off/size [module], which is what
+turned a recurring wlan1 skb_under_panic into a one-line diagnosis here.
+
 --- a/net/core/skbuff.c
 +++ b/net/core/skbuff.c
-@@ -98,7 +98,17 @@
+@@ -206,7 +206,7 @@ static void skb_panic(struct sk_buff *sk
  static void skb_panic(struct sk_buff *skb, unsigned int sz, void *addr,
  		      const char msg[])
  {
--	pr_emerg("%s: text:%p len:%d put:%d head:%p data:%p tail:%#lx end:%#lx dev:%s\n",
-+	/* ★ %pS, not %p: `addr` is skb_push()/skb_put()'s
-+	 * __builtin_return_address(0), i.e. the caller that overran the
-+	 * buffer -- the single most useful fact in this panic. Printed raw it
-+	 * is a bare module address, and module bases move every boot, so it
-+	 * cannot be resolved after the fact. Symbolising it here turns
-+	 * "text:833c978c" into "text:some_func+0x1c/0x80 [some_module]".
-+	 * Cost is a kallsyms lookup on a path that is already panicking.
-+	 * Added chasing a recurring skb_under_panic on wlan1 (put:48, 34 bytes
-+	 * of headroom) that three captures could not pin down without it.
-+	 */
-+	pr_emerg("%s: text:%pS len:%d put:%d head:%p data:%p tail:%#lx end:%#lx dev:%s\n",
+-	pr_emerg("%s: text:%px len:%d put:%d head:%px data:%px tail:%#lx end:%#lx dev:%s\n",
++	pr_emerg("%s: text:%pS len:%d put:%d head:%px data:%px tail:%#lx end:%#lx dev:%s\n",
  		 msg, addr, skb->len, sz, skb->head, skb->data,
  		 (unsigned long)skb->tail, (unsigned long)skb->end,
  		 skb->dev ? skb->dev->name : "<NULL>");

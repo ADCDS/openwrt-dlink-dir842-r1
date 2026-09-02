@@ -950,7 +950,7 @@ static void rtl819x_hang_work(struct work_struct *w)
 	 * Quiesce EVERYTHING that can touch 0xBB80xxxx/0xB801xxxx: during the
 	 * level-3 clock-gate window (600ms+) any switch-core register access
 	 * stalls the Lexra bus. The HAL mutex fences gw_prog//proc scanners/
-	 * hwnat; del_timer_sync stops the GDSR_PORT_CONG drain; napi_disable
+	 * hwnat; timer_delete_sync stops the GDSR_PORT_CONG drain; napi_disable
 	 * stops the poll (its GDSR read + ring work); netif_tx_disable
 	 * synchronously fences in-flight xmit (doorbell writes) and keeps the
 	 * stack off; rtl865x_down masks CPUIIMR+GIMR so the (level-triggered)
@@ -959,7 +959,7 @@ static void rtl819x_hang_work(struct work_struct *w)
 	 * sleeps (msleep in the reset) — a BH lock can't be held across it.
 	 */
 	mutex_lock(&rtl865x_hal_lock);
-	del_timer_sync(&priv->rx_timer);
+	timer_delete_sync(&priv->rx_timer);
 	napi_disable(&priv->napi);
 	netif_tx_disable(priv->dev);
 
@@ -1216,7 +1216,7 @@ static void rtl819x_hang_check(struct rtl819x_eth_priv *priv)
  * M6.5: also the cadence for the fabric-wedge detector. */
 static void rtl819x_rx_timer(struct timer_list *t)
 {
-	struct rtl819x_eth_priv *priv = from_timer(priv, t, rx_timer);
+	struct rtl819x_eth_priv *priv = timer_container_of(priv, t, rx_timer);
 
 	napi_schedule(&priv->napi);
 	rtl819x_hang_check(priv);
@@ -1481,7 +1481,7 @@ static int rtl819x_eth_stop(struct net_device *dev)
 	 * live timer behind. A work queued after this point no-ops on
 	 * !netif_running(). */
 	cancel_work_sync(&priv->hang_work);
-	del_timer_sync(&priv->rx_timer);
+	timer_delete_sync(&priv->rx_timer);
 	napi_disable(&priv->napi);
 	rtl865x_down();
 	free_irq(priv->irq, dev);
@@ -1499,8 +1499,11 @@ static const struct net_device_ops rtl819x_eth_netdev_ops = {
 	.ndo_start_xmit		= rtl819x_eth_xmit,
 	.ndo_set_mac_address	= eth_mac_addr,
 	.ndo_validate_addr	= eth_validate_addr,
-	.ndo_flow_offload_check	= rtl819x_hwnat_flow_offload_check,
-	.ndo_flow_offload	= rtl819x_hwnat_flow_offload,
+	/*
+	 * Hardware NAT attaches through ndo_setup_tc(TC_SETUP_FT) now; the
+	 * downstream ndo_flow_offload interface this port used to hook no longer
+	 * exists. See rtl819x_hwnat.c.
+	 */
 };
 
 static int rtl819x_eth_probe(struct platform_device *pdev)
@@ -1508,7 +1511,6 @@ static int rtl819x_eth_probe(struct platform_device *pdev)
 	struct net_device *dev;
 	struct rtl819x_eth_priv *priv;
 	struct resource *res;
-	const void *mac;
 	int ret;
 
 	dev = alloc_etherdev(sizeof(*priv));
@@ -1545,13 +1547,10 @@ static int rtl819x_eth_probe(struct platform_device *pdev)
 	 */
 	dev->features |= NETIF_F_HW_VLAN_CTAG_RX | NETIF_F_HW_VLAN_CTAG_TX;
 	dev->hw_features |= NETIF_F_HW_VLAN_CTAG_RX | NETIF_F_HW_VLAN_CTAG_TX;
-	netif_napi_add(dev, &priv->napi, rtl819x_eth_poll, NAPI_POLL_WEIGHT);
+	netif_napi_add(dev, &priv->napi, rtl819x_eth_poll);
 
-	/* MAC address: DT if present, else random until efuse/flash read added. */
-	mac = of_get_mac_address(pdev->dev.of_node);
-	if (mac)
-		ether_addr_copy(dev->dev_addr, mac);
-	else
+	/* MAC address: DT if present, else random (userspace sets the real one). */
+	if (of_get_ethdev_address(pdev->dev.of_node, dev))
 		eth_hw_addr_random(dev);
 
 	New_swNic_setDev(dev);
@@ -1572,7 +1571,7 @@ err_free:
 	return ret;
 }
 
-static int rtl819x_eth_remove(struct platform_device *pdev)
+static void rtl819x_eth_remove(struct platform_device *pdev)
 {
 	struct net_device *dev = platform_get_drvdata(pdev);
 	struct rtl819x_eth_priv *priv = netdev_priv(dev);
@@ -1581,7 +1580,6 @@ static int rtl819x_eth_remove(struct platform_device *pdev)
 	netif_napi_del(&priv->napi);
 	New_swNic_setDev(NULL);
 	free_netdev(dev);
-	return 0;
 }
 
 static const struct of_device_id rtl819x_eth_of_ids[] = {

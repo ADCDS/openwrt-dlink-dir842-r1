@@ -35,7 +35,7 @@
 #include <linux/ip.h>
 #include <linux/tcp.h>
 #include <linux/crc32.h>	/* M7: software FCS verify (wedge detector) */
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <asm/cpu-features.h>
 
 #include "rtl819x_regs.h"

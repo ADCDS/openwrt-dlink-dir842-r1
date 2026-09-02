@@ -14,3 +14,15 @@ config NET_RTL819X
 	  module_platform_driver() (rtl819x-eth.c) with late_initcall()
 	  (rtl865x_asichal.c) — two init_module definitions under =m — and the
 	  /proc entries are never removed, so it cannot be built modular.
+
+config RTL819X_HWNAT
+	bool "Hardware NAT offload for the RTL8197F ASIC"
+	depends on NET_RTL819X && NF_FLOW_TABLE
+	help
+	  Offload established IPv4 NAT flows into the SoC's ASIC NAPT table via
+	  the netfilter flow table's hardware offload path
+	  (ndo_setup_tc(TC_SETUP_FT)). Without this the datapath is correct but
+	  every forwarded packet crosses the CPU.
+
+	  Not yet available on this kernel: the 4.14 implementation targeted the
+	  downstream ndo_flow_offload interface, which is gone.

@@ -31,7 +31,7 @@
 #include <asm/reboot.h>
 #include <asm/setup.h>
 
-#include <mach-rtl819x/rtl819x-sysc.h>
+#include <rtl819x-sysc.h>
 
 /*
  * UART0 for early printk. Deliberately open-coded rather than using

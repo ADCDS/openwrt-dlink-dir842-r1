@@ -1574,12 +1574,11 @@ static int gw_proc_open(struct inode *inode, struct file *file)
 	return single_open(file, gw_prog, NULL);
 }
 
-static const struct file_operations gw_proc_fops = {
-	.owner   = THIS_MODULE,
-	.open    = gw_proc_open,
-	.read    = seq_read,
-	.llseek  = seq_lseek,
-	.release = single_release,
+static const struct proc_ops gw_proc_fops = {
+	.proc_open    = gw_proc_open,
+	.proc_read    = seq_read,
+	.proc_lseek  = seq_lseek,
+	.proc_release = single_release,
 };
 
 /* M6.6 DIAGNOSTIC: read-only scan of all 1024 L4/NAPT rows — dumps every valid
@@ -1651,9 +1650,9 @@ static int gw_dump_open(struct inode *inode, struct file *file)
 	return single_open_size(file, gw_dump_show, NULL, 128 * 1024);
 }
 
-static const struct file_operations gw_dump_fops = {
-	.owner = THIS_MODULE, .open = gw_dump_open,
-	.read = seq_read, .llseek = seq_lseek, .release = single_release,
+static const struct proc_ops gw_dump_fops = {
+	.proc_open = gw_dump_open,
+	.proc_read = seq_read, .proc_lseek = seq_lseek, .proc_release = single_release,
 };
 
 static int napt_scan_show(struct seq_file *m, void *v)
@@ -1685,9 +1684,9 @@ static int napt_scan_open(struct inode *inode, struct file *file)
 	return single_open(file, napt_scan_show, NULL);
 }
 
-static const struct file_operations napt_scan_fops = {
-	.owner = THIS_MODULE, .open = napt_scan_open,
-	.read = seq_read, .llseek = seq_lseek, .release = single_release,
+static const struct proc_ops napt_scan_fops = {
+	.proc_open = napt_scan_open,
+	.proc_read = seq_read, .proc_lseek = seq_lseek, .proc_release = single_release,
 };
 
 /* M6.6 A-2 DIAGNOSTIC: dump the switch-fabric descriptor-pool + per-port
@@ -1748,9 +1747,9 @@ static int fabric_open(struct inode *inode, struct file *file)
 	return single_open(file, fabric_show, NULL);
 }
 
-static const struct file_operations fabric_fops = {
-	.owner = THIS_MODULE, .open = fabric_open,
-	.read = seq_read, .llseek = seq_lseek, .release = single_release,
+static const struct proc_ops fabric_fops = {
+	.proc_open = fabric_open,
+	.proc_read = seq_read, .proc_lseek = seq_lseek, .proc_release = single_release,
 };
 
 /* ---- AP/bridge role: invalidate a stale L2 row for a station -----------------
@@ -1909,9 +1908,9 @@ static int l2flush_open(struct inode *inode, struct file *file)
 	return single_open(file, l2flush_show, NULL);
 }
 
-static const struct file_operations l2flush_fops = {
-	.owner = THIS_MODULE, .open = l2flush_open, .write = l2flush_write,
-	.read = seq_read, .llseek = seq_lseek, .release = single_release,
+static const struct proc_ops l2flush_fops = {
+	.proc_open = l2flush_open, .proc_write = l2flush_write,
+	.proc_read = seq_read, .proc_lseek = seq_lseek, .proc_release = single_release,
 };
 
 static int __init rtl865x_asichal_init(void)

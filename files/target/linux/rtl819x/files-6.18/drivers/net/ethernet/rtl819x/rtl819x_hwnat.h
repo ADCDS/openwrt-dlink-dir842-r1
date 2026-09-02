@@ -28,21 +28,33 @@
 /* Runtime gate: module param rtl819x.hwnat, perm 0644, default 0. Read (READ_ONCE)
  * by the offload hooks on every flow; writable via
  * /sys/module/rtl819x/parameters/hwnat. */
+#ifdef CONFIG_RTL819X_HWNAT
 extern bool rtl819x_hwnat_enabled;
+#else
+#define rtl819x_hwnat_enabled false
+#endif
 
-/* The two ndo_flow_offload hooks, referenced by the hwnat net_device_ops in
- * rtl819x-eth.c. Signatures must match struct net_device_ops exactly. */
-int rtl819x_hwnat_flow_offload_check(struct flow_offload_hw_path *path);
-int rtl819x_hwnat_flow_offload(enum flow_offload_type type,
-			       struct flow_offload *flow,
-			       struct flow_offload_hw_path *src,
-			       struct flow_offload_hw_path *dest);
+/*
+ * Flow offload entry point. The 4.14 port hooked ndo_flow_offload, a downstream
+ * interface that no longer exists; the replacement is ndo_setup_tc(TC_SETUP_FT)
+ * feeding a flow_block callback, which is also what DSA user ports forward to
+ * their conduit. Until that lands rtl819x_hwnat.c is out of the build and these
+ * two calls are no-ops, so the datapath runs entirely in software.
+ */
 
 /* Lifecycle, driven from rtl819x_eth_open()/rtl819x_eth_stop(). start() arms the
  * offload (aging worker) once the datapath is up; stop() tears down every installed
  * flow and quiesces the worker. Both are no-ops when hwnat is disabled. */
+#ifdef CONFIG_RTL819X_HWNAT
 void rtl819x_hwnat_start(struct net_device *dev);
+#else
+static inline void rtl819x_hwnat_start(struct net_device *dev) { }
+#endif
+#ifdef CONFIG_RTL819X_HWNAT
 void rtl819x_hwnat_stop(void);
+#else
+static inline void rtl819x_hwnat_stop(void) { }
+#endif
 
 /*
  * M7.3 step 4 — software-flow timeout refresh, built-in <-> module handshake.
