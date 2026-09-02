@@ -1259,6 +1259,17 @@ static void rtl819x_rx_timer(struct timer_list *t)
  * no effect. 1 = flood every jack (proven), 0 = use the port the tagger asked
  * for. Settable at runtime so both can be measured on one boot.
  */
+/*
+ * VLAN id stamped on frames the CPU originates under DSA. The switch already
+ * learns the destination from the Realtek CPU tag, so an 802.1Q tag on top is
+ * redundant -- and because these frames egress verbatim, without an L2 lookup,
+ * the VLAN table's untag rule never gets to strip it and it reaches the host.
+ * 0 means do not stamp one.
+ */
+static int dsa_tx_vid;
+module_param(dsa_tx_vid, int, 0644);
+MODULE_PARM_DESC(dsa_tx_vid, "802.1Q id for CPU-originated frames under DSA (0 = none)");
+
 static int dsa_tx_flood = 1;
 module_param(dsa_tx_flood, int, 0644);
 MODULE_PARM_DESC(dsa_tx_flood, "CPU-originated frames flood all jacks (1) or go only to the port DSA named (0)");
@@ -1530,8 +1541,7 @@ static netdev_tx_t rtl819x_eth_xmit(struct sk_buff *skb, struct net_device *dev)
 	 * mask and an unknown tag downstream.
 	 */
 	if (dsa_ports >= 0)
-		/* jack 4 is the WAN zone, jacks 0-3 the LAN zone */
-		nicTx.vid = (dsa_ports & BIT(4)) ? RTL865X_VID_WAN : RTL865X_VID_LAN;
+		nicTx.vid = dsa_tx_vid;
 	else if (skb_vlan_tag_present(skb))
 		nicTx.vid = skb_vlan_tag_get(skb) & 0xfff;
 	else
