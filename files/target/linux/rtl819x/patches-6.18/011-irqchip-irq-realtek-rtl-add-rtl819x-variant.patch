@@ -10,13 +10,23 @@ working vendor/fork driver on hardware:
  - the routing field holds the MIPS interrupt-pending number itself (IP4 is
    written as 4), not (parent hwirq - 1).
 
-Select the behaviour per compatible. "realtek,rtl8197f-intc" deliberately has no
-"realtek,rtl-intc" fallback so an unpatched kernel cannot bind with the wrong
-semantics.
+They also need the CP0 timer interrupt line corrected, which has to happen after
+trap_init() re-reads IntCtl and before time_init() requests the line; the init
+callback here is the one hook in that window.
 
---- a/drivers/irqchip/irq-realtek-rtl.c	2026-09-02 12:35:34.085382938 -0300
-+++ b/drivers/irqchip/irq-realtek-rtl.c	2026-09-02 12:35:34.093383351 -0300
-@@ -38,12 +38,36 @@
+--- a/drivers/irqchip/irq-realtek-rtl.c	2026-09-02 13:22:43.659244430 -0300
++++ b/drivers/irqchip/irq-realtek-rtl.c	2026-09-02 13:22:43.667244723 -0300
+@@ -11,6 +11,9 @@
+ #include <linux/of_address.h>
+ #include <linux/irqchip/chained_irq.h>
+ 
++/* cp0_compare_irq, corrected for the RTL819x timer routing below */
++#include <asm/time.h>
++
+ /* Global Interrupt Mask Register */
+ #define RTL_ICTL_GIMR		0x00
+ /* Global Interrupt Status Register */
+@@ -38,12 +41,39 @@
  static void __iomem *realtek_ictl_base[NR_CPUS];
  
  /*
@@ -36,6 +46,9 @@ semantics.
 + * interrupt-pending number itself, so IP4 is written as 4.
   */
 -#define IRR_OFFSET(idx)		(4 * (3 - (idx * 4) / 32))
++/* MIPS interrupt-pending line the RTL819x SoCs route the CPU timer to */
++#define RTL819X_CP0_TIMER_IP	7
++
 +struct realtek_ictl_variant {
 +	bool irr_inverted;
 +	unsigned int route_bias;
@@ -58,7 +71,7 @@ semantics.
  #define IRR_SHIFT(idx)		((idx * 4) % 32)
  
  static inline void enable_gimr(unsigned int cpu, unsigned int hw_irq)
-@@ -124,7 +148,8 @@
+@@ -124,7 +154,8 @@
  	guard(raw_spinlock_irqsave)(&irq_lock);
  	output->mask |= BIT(hw_irq);
  	for_each_present_cpu(cpu)
@@ -68,13 +81,22 @@ semantics.
  
  	return 0;
  }
-@@ -265,4 +290,12 @@
+@@ -265,4 +296,21 @@
  	return realtek_setup_parents(node);
  }
  
 +static int __init realtek_rtl819x_of_init(struct device_node *node, struct device_node *parent)
 +{
 +	realtek_ictl_variant = &realtek_ictl_rtl819x;
++
++	/*
++	 * The bootloader leaves CP0 IntCtl.IPTI pointing at IP2, the line this
++	 * controller is chained to, while the core's timer interrupt is routed
++	 * to IP7. per_cpu_trap_init() re-reads IntCtl after the platform's early
++	 * setup runs, so the correction belongs here: init_IRQ() happens after
++	 * trap_init() and before time_init() asks for the timer line.
++	 */
++	cp0_compare_irq = RTL819X_CP0_TIMER_IP;
 +
 +	return realtek_rtl_of_init(node, parent);
 +}

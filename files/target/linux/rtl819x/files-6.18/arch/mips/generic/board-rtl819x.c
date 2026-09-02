@@ -30,7 +30,6 @@
 #include <asm/machine.h>
 #include <asm/reboot.h>
 #include <asm/setup.h>
-#include <asm/time.h>
 
 #include <rtl819x-sysc.h>
 
@@ -119,16 +118,6 @@ static void __init rtl819x_soc_init(void)
 		sr_r32(REALTEK_SR_CLKMANAGE));
 
 	rtl819x_setup_timer_irq();
-
-	/*
-	 * cpu_probe() takes the timer interrupt line from CP0 IntCtl.IPTI, which
-	 * the bootloader leaves pointing at IP2 -- the line the SoC interrupt
-	 * controller is chained to. The core's own timer arrives on IP7, where
-	 * the routing above puts it, so correct the line before time_init()
-	 * requests it. Without this the kernel fails to request the timer
-	 * interrupt and never gets a tick.
-	 */
-	cp0_compare_irq = 7;
 }
 
 static __init const void *rtl819x_fixup_fdt(const void *fdt,
