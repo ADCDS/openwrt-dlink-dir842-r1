@@ -1270,7 +1270,12 @@ static int dsa_tx_vid;
 module_param(dsa_tx_vid, int, 0644);
 MODULE_PARM_DESC(dsa_tx_vid, "802.1Q id for CPU-originated frames under DSA (0 = none)");
 
-static int dsa_tx_flood = 1;
+/*
+ * Measured on hardware: this MAC does honour the single port the tagger names,
+ * at the same throughput as flooding, so send only there. Setting this restores
+ * the old flood-every-jack behaviour, kept as a fallback.
+ */
+static int dsa_tx_flood;
 module_param(dsa_tx_flood, int, 0644);
 MODULE_PARM_DESC(dsa_tx_flood, "CPU-originated frames flood all jacks (1) or go only to the port DSA named (0)");
 
