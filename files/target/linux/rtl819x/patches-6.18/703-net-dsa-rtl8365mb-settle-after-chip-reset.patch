@@ -1,0 +1,57 @@
+From: DIR-842 R1 port
+Subject: [PATCH] net: dsa: rtl8365mb: let the chip settle after a reset
+
+rtl8365mb_reset_chip() waits only for the hardware reset bit to clear and then
+returns straight into rtl8365mb_switch_init(), which blasts the vendor jam
+table at the chip over the SMI bus -- bit-banged over two GPIOs on this board.
+Realtek's own documentation says the chip needs a full second to reset, and the
+reset bit clears well before that.
+
+Writes issued into that window are dropped silently: no NAK, no error return.
+Setup reports success and the switch is left partly configured, with whichever
+registers happened to land. On the DIR-842 R1 that shows up as a box which
+receives perfectly and forwards nothing out of any jack on a large fraction of
+cold boots -- the switch's CPU port counts the bytes arriving from the SoC, no
+egress counter moves anywhere, no discard counter moves either, and every
+register sampled afterwards reads exactly what a working boot reads. Which
+writes are lost varies from boot to boot, which is why the failure looks
+intermittent and why no runtime knob recovers it.
+
+Sleep out the documented settle before returning.
+
+--- a/drivers/net/dsa/realtek/rtl8365mb_main.c
++++ b/drivers/net/dsa/realtek/rtl8365mb_main.c
+@@ -2991,6 +2991,7 @@
+ static int rtl8365mb_reset_chip(struct realtek_priv *priv)
+ {
+ 	u32 val;
++	int ret;
+ 
+ 	priv->write_reg_noack(priv, RTL8365MB_CHIP_RESET_REG,
+ 			      FIELD_PREP(RTL8365MB_CHIP_RESET_HW_MASK, 1));
+@@ -2999,9 +3000,22 @@
+ 	 * for 100 ms before accessing any registers to prevent ACK timeouts.
+ 	 */
+ 	msleep(100);
+-	return regmap_read_poll_timeout(priv->map, RTL8365MB_CHIP_RESET_REG, val,
+-					!(val & RTL8365MB_CHIP_RESET_HW_MASK),
+-					20000, 1e6);
++	ret = regmap_read_poll_timeout(priv->map, RTL8365MB_CHIP_RESET_REG, val,
++				       !(val & RTL8365MB_CHIP_RESET_HW_MASK),
++				       20000, 1e6);
++	if (ret)
++		return ret;
++
++	/* The reset bit clears long before the chip is ready to be programmed.
++	 * Realtek documents a full second for the reset, so wait out the rest
++	 * of it: register writes issued into this window are dropped silently,
++	 * with no NAK and no error return, and a switch that came up with part
++	 * of its init jam table missing gives no indication of it beyond not
++	 * forwarding.
++	 */
++	msleep(1000);
++
++	return 0;
+ }
+ 
+ static int rtl8365mb_setup(struct dsa_switch *ds)
