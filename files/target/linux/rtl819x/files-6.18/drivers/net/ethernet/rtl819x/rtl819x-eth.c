@@ -1266,6 +1266,14 @@ static void rtl819x_rx_timer(struct timer_list *t)
  * the VLAN table's untag rule never gets to strip it and it reaches the host.
  * 0 means do not stamp one.
  */
+/*
+ * Datapath console diagnostics: the descriptor-pool pressure warning and the
+ * liveness heartbeat. Off by default; see the note in the poll routine.
+ */
+static bool datapath_debug;
+module_param(datapath_debug, bool, 0644);
+MODULE_PARM_DESC(datapath_debug, "log descriptor-pool pressure and a liveness heartbeat to the console");
+
 static int dsa_tx_vid;
 module_param(dsa_tx_vid, int, 0644);
 MODULE_PARM_DESC(dsa_tx_vid, "802.1Q id for CPU-originated frames under DSA (0 = none)");
@@ -1439,6 +1447,14 @@ static int rtl819x_eth_poll(struct napi_struct *napi, int budget)
 			napi_schedule(napi);
 	}
 
+	/*
+	 * ★ Off by default. This console traffic is not free: at 38400 baud a
+	 * steady heartbeat plus the pressure lines consume most of the line, and
+	 * printk to a serial console is synchronous -- so under load the
+	 * diagnostic blocks every napi poll and becomes the thing that stalls the
+	 * datapath. Measured during bring-up: a flood ping went from 0%% loss to
+	 * 100%% purely from having this enabled.
+	 */
 	/* Liveness heartbeat (~every 10s @ HZ=100): if this stops, the box wedged.
 	 * Also log the engine status so a dead-RX boot self-diagnoses: rx_pkts==0
 	 * with a valid CPURPDCR0 and no RX_DONE bits in CPUIISR == engine wedge. */
@@ -1457,12 +1473,12 @@ static int rtl819x_eth_poll(struct napi_struct *napi, int budget)
 		 * which reads as "the napi loop has hung" when in fact only the
 		 * counter had stopped. It cost real diagnostic time; don't put side
 		 * effects back into this condition. */
-		beat = !(++pc & 0x3ff);
+		beat = datapath_debug && !(++pc & 0x3ff);
 
 		/* Descriptor-pool watch: log if the shared pool is filling (USEDDSC)
 		 * or has latched a run-out (DSCRUNOUT) - the large-frame drop
 		 * signature - as well as the periodic liveness heartbeat. */
-		if (pressure)
+		if (pressure && datapath_debug)
 			/* ★ Rate-limited, and it must stay that way. `pressure` is true
 			 * on EVERY poll while the pool is full, and printk to a serial
 			 * console is synchronous. Unthrottled this measured 37.7 lines/s
