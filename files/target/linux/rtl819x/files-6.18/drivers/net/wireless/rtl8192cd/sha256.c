@@ -98,14 +98,14 @@ int hmac_sha256_vector(const u1Byte *key, size_t key_len, size_t num_elem,
 
 #ifndef __ECOS
 /**
- * hmac_sha256 - HMAC-SHA256 over data buffer (RFC 2104)
+ * rtl_hmac_sha256 - HMAC-SHA256 over data buffer (RFC 2104)
  * @key: Key for HMAC operations
  * @key_len: Length of the key in bytes
  * @data: Pointers to the data area
  * @data_len: Length of the data area
  * @mac: Buffer for the hash (20 bytes)
  */
-int hmac_sha256(const u1Byte *key, size_t key_len, const u1Byte *data,
+int rtl_hmac_sha256(const u1Byte *key, size_t key_len, const u1Byte *data,
 		 size_t data_len, u1Byte *mac)
 {
 	return hmac_sha256_vector(key, key_len, 1, &data, &data_len, mac);

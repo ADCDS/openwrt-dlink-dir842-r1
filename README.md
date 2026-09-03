@@ -84,9 +84,12 @@ and the exact register-level evidence for the hardware-NAT gap): see
 
 **Does not exist yet:**
 
-- **2.4 GHz WiFi.** No driver at all on this branch. Porting the vendor `rtl8192cd` driver
-  (the thing that makes the `main` branch dual-band) is scoped at two to three weeks of
-  focused work and has not been started here.
+- **2.4 GHz WiFi.** No working driver yet on this branch. Porting the vendor `rtl8192cd`
+  driver (the thing that makes the `main` branch dual-band) is scoped at two to three weeks
+  of focused work; two build-system bugs that were hiding the true scope entirely are now
+  fixed, and what remains is precisely two kernel-API-portability categories (timers, DMA) —
+  see [`docs/PORT-MAIN-6.18-STATUS.md`](docs/PORT-MAIN-6.18-STATUS.md) §6 for exact site
+  counts. Not compiling yet.
 - **LuCI.** Included in the release package set but not smoke-tested against 6.18's web
   stack on this hardware.
 

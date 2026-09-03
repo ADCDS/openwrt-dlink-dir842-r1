@@ -9045,7 +9045,7 @@ void pwr_state(struct rtl8192cd_priv *priv, struct rx_frinfo *pfrinfo)
 #if defined(CONFIG_VERIWAVE_CHECK)
                 if((pfrinfo->pktlen+_CRCLNG_)==32){
 			unsigned int crc = 0;
-			crc = crc32( pframe, pfrinfo->pktlen);
+			crc = rtl_crc32( pframe, pfrinfo->pktlen);
 			crc = le32_to_cpu(crc);
 			if(memcmp((void*)&crc, (void*)pframe+pfrinfo->pktlen, 4)){
 				printk("[%s %d] CRC error!!\n", __FUNCTION__, __LINE__);

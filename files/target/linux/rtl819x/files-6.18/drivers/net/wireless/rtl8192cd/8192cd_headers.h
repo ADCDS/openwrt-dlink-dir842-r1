@@ -752,7 +752,7 @@ EXTERN void fill_bcn_desc(struct rtl8192cd_priv *priv, struct tx_desc *pdesc, vo
 #if defined(CONFIG_VERIWAVE_CHECK)
 EXTERN void rtl8192cd_check_veriwave_timer(unsigned long task_priv);
 EXTERN void update_wifi_allitf_txrx_stats(struct rtl8192cd_priv *priv);
-EXTERN unsigned int crc32(unsigned char *buf, int len);
+EXTERN unsigned int rtl_crc32(unsigned char *buf, int len);
 #endif
 EXTERN void mgt_handler(struct rtl8192cd_priv *priv, struct rx_frinfo *pfrinfo);
 EXTERN void pwr_state(struct rtl8192cd_priv *priv, struct rx_frinfo *pfrinfo);
@@ -1830,7 +1830,7 @@ EXTERN int hmac_sha256_vector(const unsigned char *key, size_t key_len, size_t n
 			const unsigned char *addr[], const size_t *len, unsigned char *mac);
 EXTERN int aesccmp_checkmic(struct rtl8192cd_priv *priv, struct rx_frinfo *pfrinfo, unsigned char *pmic);
 #ifndef __ECOS
-EXTERN int hmac_sha256(const unsigned char *key, size_t key_len, const unsigned char *data,
+EXTERN int rtl_hmac_sha256(const unsigned char *key, size_t key_len, const unsigned char *data,
 		 size_t data_len, unsigned char *mac);
 #endif
 #ifdef CONFIG_IEEE80211W

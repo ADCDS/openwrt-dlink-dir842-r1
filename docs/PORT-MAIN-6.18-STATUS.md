@@ -33,7 +33,7 @@ anything yet** — see §4.
 | M4 | PCIe + 5 GHz AP | ✅ except a client-association/DHCP test (§3) |
 | M5 | hardware NAT | ⚠️ rebuilt, not accelerating (§4) |
 | M6 | flash boot (factory + sysupgrade) | ✅ (§5) |
-| M7 | vendor 2.4 GHz `rtl8192cd` driver | ❌ not started (§6) |
+| M7 | vendor 2.4 GHz `rtl8192cd` driver | ⚠️ scoped and started, does not compile yet (§6) |
 | M8 | LuCI, docs, release | this pass |
 
 ## 1. Kernel platform
@@ -169,18 +169,85 @@ Both `flash-nor.sh` and `bootgate.sh` had `ramboot.sh`'s old unanchored
 `pgrep -f "cat /dev/ttyUSB0"` logger-guard bug — the pattern also matches the invoking shell
 itself, so no logger starts and every board reads as failed. Fixed in both.
 
-## 6. Vendor 2.4 GHz driver (M7) — not started
+## 6. Vendor 2.4 GHz driver (M7) — real progress, not compiling yet
 
 Scoped in the plan at roughly 100 timer conversions (`init_timer`/`setup_timer`/`mod_timer`
 → `timer_setup`), ~62 `virt_to_bus`/`bus_to_virt` sites in the DMA path (silent-corruption
 risk, not a compile error), proc/`set_fs`/ioctl-routing cleanup, a new platform-bridge probe
 matching the DT node the 6.18 board file already declares (`realtek,rtl8197f-wmac`), and a
 full RF bring-up — an estimated two to three weeks of focused work, genuinely a separate
-undertaking from the rest of this port. The vendor source itself ships in the tree
-(`files/target/linux/rtl819x/files-6.18/drivers/net/wireless/rtl8192cd/`, carried forward
-verbatim from the 4.14 port in a single restructuring commit, same redistribution basis —
-see the root README's *Credits & license*) but has not been touched since: it still targets
-4.14-era kernel APIs and will not currently compile. `seed.config` does not enable it.
+undertaking from the rest of this port.
+
+This pass got the driver from "does not compile, thousands of opaque errors, nothing about
+the scope was verified" to "two well-understood, precisely-scoped kernel-API-portability
+categories away from compiling clean." Two real build-system bugs, not source bugs, were
+hiding the true picture entirely:
+
+- **`EXTRA_CFLAGS +=` is unrecognized by modern kbuild** (removed as a supported variable
+  name well before 6.18; only `ccflags-y` is honored now). 21 such lines in the vendor
+  Makefile were silently no-ops, including every chip-select `-D` and every `-I` include
+  path added after the file's own initial `ccflags-y` block -- which alone produced
+  thousands of "unknown type" / "not defined" errors that looked like the whole tree was
+  unportable. Converted throughout.
+- **A macro-value/token mismatch broke the driver's own AP-vs-CE-vs-WIN build-type
+  selection.** `phydm/phydm_precomp.h` decides whether to `#include "../odm_inc.h"` (which
+  in turn defines every `RTL8197F_SUPPORT`/`RTL8822B_SUPPORT`/etc. chip-select macro
+  `phydm_features.h` branches on) via `#if (DM_ODM_SUPPORT_TYPE == ODM_AP)`. With the
+  `EXTRA_CFLAGS` bug also silently dropping the Makefile's own
+  `-DDM_ODM_SUPPORT_TYPE=0x01`, `DM_ODM_SUPPORT_TYPE` read as 0, that `#if` was always
+  false, and `odm_inc.h` -- and everything it defines -- never compiled in. Restoring the
+  flag (via the `ccflags-y` fix above) was the complete, correct fix here; `ODM_AP` etc.
+  are already correctly defined in `phydm/phydm_types.h` and need no help.
+
+With those fixed, a blanket `-Wno-error` was added for this one third-party module (real
+warnings still print; none abort the build) -- pedantry from a ~2011-era, 665-file vendor
+tree under a gcc-14/kernel-6.18 toolchain that enforces far more by default than the
+4.14-era build ever did (unused variables, missing prototypes, `packed` on an
+already-aligned array, benign same-value macro redefinition) is not worth hand-fixing
+across code this port does not maintain upstream. That took the error count from
+"thousands" to 9 genuine, individually verified issues, of which 5 were small and safe to
+fix now: three `RTL_R{8,16,32}_F()` register-read helpers returned `void` on one panic-guard
+path despite a non-`void` return type (gcc 14 hard error, not a warning; fixed with the
+conventional all-1s "failed read" sentinel), a local `crc32()`/`hmac_sha256()` collided in
+name (not signature) with kernel-exported symbols of the same name once a header pulled
+them in transitively (renamed to `rtl_crc32`/`rtl_hmac_sha256`, 9 call sites), and a
+`timeval_to_us()` helper used the kernel's now-removed `struct timeval` with zero callers
+anywhere in the tree (dead code, deleted).
+
+**What is left is exactly the two categories the plan predicted, now with real numbers
+instead of a guess, confirmed by an actual compiler run rather than reasoned about:**
+
+- **Timers: 102 `init_timer`/`setup_timer` call sites** need converting to `timer_setup()`,
+  each paired with its callback's signature changing from `void cb(unsigned long data)` to
+  `void cb(struct timer_list *t)` plus a `timer_container_of()` recovery line, plus 12 files
+  with non-standard `.data` access on top of that.
+- **DMA: this is one connected body of work, not two.** The `virt_to_bus`/`bus_to_virt`
+  address-translation side (58 sites, 9 files, 31 of them concentrated in `8192cd_tx.c`
+  alone -- the live TX descriptor ring) and the `PCI_DMA_FROMDEVICE`/`PCI_DMA_TODEVICE` +
+  `pci_dma_sync_single_for_cpu`/`_for_device` direction/sync side (100+ further sites across
+  `8192cd_tx.c`, `8192cd_rx.c`, `8192cd_rx.h`, `8192cd_aes.c`, `8192cd_hw.c`, `8192cd_sme.c`,
+  `8192cd_osdep.c`, the WlanHAL RTL88XX descriptor files) are the SAME calls
+  (`rtl_cache_sync_wback()`, `get_physical_addr()`, `pci_unmap_single()`) viewed from their
+  two different arguments. `pci_dma_sync_single_for_cpu`/`_for_device` no longer exist as
+  kernel functions at all (no compat shim remains); the modern equivalent is
+  `dma_sync_single_for_cpu`/`_for_device` taking a `struct device *`, and `priv->pshare->pdev`
+  (a `struct pci_dev *`) is very likely never populated for this on-SoC, platform-device
+  variant of the driver -- confirmed the probe function in
+  `files-6.18/drivers/net/wireless/rtl8197f/rtl8197f-wmac.c` takes a
+  `struct platform_device *`, not a `struct pci_dev *`.
+
+Getting DMA addressing wrong produces silent RX/TX corruption or intermittent hangs, not a
+compile error -- exactly the failure mode this port's own M3 investigation spent real bench
+time on for the *hardware-supplied* datapath, and not something to convert 150+ call sites
+of blind, then hope. Deliberately not attempted this pass; the honest next step is the same
+one the plan always named: convert it carefully, file by file, verified against real RX/TX
+traffic on the bench, not against compiler success alone.
+
+The vendor source lives at
+`files/target/linux/rtl819x/files-6.18/drivers/net/wireless/rtl8192cd/` (carried forward
+from the 4.14 port, same redistribution basis -- see the root README's *Credits &
+license*). `seed.config`/`seed-min.config` still do not enable `kmod-rtl8192cd`: it does
+not yet produce a working module.
 
 ## Bench facts that outlived this write-up
 

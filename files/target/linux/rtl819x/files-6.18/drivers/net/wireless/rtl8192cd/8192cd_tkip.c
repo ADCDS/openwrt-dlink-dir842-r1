@@ -685,7 +685,7 @@ void init_crc32_table(void)
 }
 
 
-unsigned int crc32(unsigned char *buf, int len)
+unsigned int rtl_crc32(unsigned char *buf, int len)
 {
 	unsigned char *p;
 	unsigned int  crc;
@@ -716,7 +716,7 @@ void appendICV(unsigned char *src, unsigned int len, unsigned char *dest)
 {
 	unsigned char CRC[4];
 
-	*((unsigned long *)CRC) = crc32(src,len);
+	*((unsigned long *)CRC) = rtl_crc32(src,len);
 	*(unsigned char *)dest=*((unsigned char *)CRC+3);
 	*(unsigned char *)(dest+1)=*((unsigned char *)CRC+2);
 	*(unsigned char *)(dest+2)=*((unsigned char *)CRC+1);
@@ -976,7 +976,7 @@ do_tkip_decrypt:
 	rc4_encrypt(rc4key, 16, pframe + hdr_len + 8, fr_len - hdr_len - 8, pframe + hdr_len + 8);
 
 	// now, let's check if icv is correct!
-	crc = crc32(pframe + hdr_len + 8, fr_len - hdr_len - 8 - 4);
+	crc = rtl_crc32(pframe + hdr_len + 8, fr_len - hdr_len - 8 - 4);
 
 	crc = le32_to_cpu(crc);  //crc is big endian located in the payload
 	if (memcmp((void *)&crc, (void *)(pframe + fr_len -4), 4))
@@ -1244,7 +1244,7 @@ do_decrypt:
 	rc4_encrypt(rc4key, keylen, pframe+hdr_len+4, fr_len-hdr_len-4, pframe+hdr_len+4);
 
 	// now, let's check if icv is correct!
-	crc = crc32(pframe+hdr_len+4, fr_len-hdr_len-4-4);
+	crc = rtl_crc32(pframe+hdr_len+4, fr_len-hdr_len-4-4);
 
 	crc = le32_to_cpu(crc);  //crc is big endian located in the payload
 	if (memcmp((void *)&crc, (void *)(pframe + fr_len -4), 4)) {

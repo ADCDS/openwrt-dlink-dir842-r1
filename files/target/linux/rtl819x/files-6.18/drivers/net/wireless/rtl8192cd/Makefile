@@ -35,10 +35,25 @@
 # rtw88 keeps 5 GHz. CONFIG_PCI_HCI stays ON (it is the descriptor/ring model the
 # on-SoC WMAC also uses, NOT a "PCIe card present" switch).
 # ── R4/G3 port flags ────────────────────────────────────────────────────────────
-# Placement matters: these must come BEFORE the vendor's own EXTRA_CFLAGS blocks.
+# Placement matters: these must come BEFORE the vendor's own ccflags-y blocks.
 # Appending them at the end instead breaks the vendor's -I$(src)/WlanHAL/... paths
 # (Hal88XXDesc.h stops resolving) and the build collapses to 2 objects.
 #
+# 0) 6.18/gcc-14 port (M7): this 665-file, ~2011-era vendor tree trips a long tail of
+# warning classes a modern toolchain enforces as -Werror by default that the 4.14-era
+# build never saw -- unused variables/statics, missing prototypes on file-scope
+# functions never declared in a header, `packed` on an array (already byte-aligned,
+# GCC just says so now), misleading indentation, and -- the big one -- macro
+# redefinition: several vendor headers (re)define a macro to the exact same value a
+# Makefile -D already set (DM_ODM_SUPPORT_TYPE, __LINUX_2_6__ and others), which is a
+# real, longstanding inconsistency in the vendor tree's own headers, functionally inert
+# either way, but GCC's redefinition check compares TOKEN TEXT, not evaluated value, so
+# "0x01" vs the macro name "ODM_AP" (which itself equals 0x01) still trips it. None of
+# this is worth hand-fixing across a third-party SDK we do not maintain upstream --
+# this is a blanket downgrade, not `-w`, so real warnings still print, they just do not
+# abort the build. Genuine kernel-API portability errors (removed/renamed symbols, hard
+# type errors) are NOT warnings and are unaffected by this line.
+ccflags-y += -Wno-error
 # 1) vendor targets gcc 4.x/7.x; this tree is gcc 8.4. Scoped to this driver only.
 ccflags-y += -Wno-error=incompatible-pointer-types
 ccflags-y += -Wno-error=implicit-function-declaration
@@ -387,9 +402,9 @@ ifeq ($(CONFIG_WLAN_HAL),y)
 endif
 
 ifeq ($(CONFIG_RTL_MESH_SUPPORT),y)
-        EXTRA_CFLAGS += -DCONFIG_RTK_MESH #-DMESH_USE_METRICOP
+        ccflags-y += -DCONFIG_RTK_MESH #-DMESH_USE_METRICOP
 #        ifeq ($(CONFIG_11S_TEST_MODE),y)
-#        EXTRA_CFLAGS += -D_11s_TEST_MODE_
+#        ccflags-y += -D_11s_TEST_MODE_
 #        endif
         obj-mesh = mesh_ext/mesh_proc.o\
         mesh_ext/mesh_route.o\
@@ -524,7 +539,16 @@ ifeq ($(CONFIG_RTL_92D_SUPPORT),y)
         rtl8192cd-objs += 8192d_hw.o Hal8192CDMOutSrc.o
 endif
 
-EXTRA_CFLAGS += -DDM_ODM_SUPPORT_TYPE=0x01
+# ODM_AP = 0x01 (phydm/phydm_types.h -- BIT0 of its "SW team" enum, alongside
+# ODM_CE=0x04/ODM_WIN=0x08). This line was ALREADY correct; the bug was purely that the
+# old EXTRA_CFLAGS variable name is unrecognized by modern kbuild (see the ccflags-y
+# conversion note at the top of this file), so this whole flag was silently dropped and
+# DM_ODM_SUPPORT_TYPE read as 0 -- which made `#if (DM_ODM_SUPPORT_TYPE == ODM_AP)` in
+# phydm_precomp.h false, which skips the #include of ../odm_inc.h, which is what defines
+# every RTL8197F_SUPPORT/RTL8822B_SUPPORT/etc. chip-select macro phydm actually branches
+# on. Do NOT also -D ODM_AP/ODM_CE/ODM_WIN here: phydm_types.h defines them itself and a
+# second, mismatched definition on the command line is a hard redefinition error.
+ccflags-y += -DDM_ODM_SUPPORT_TYPE=0x01
 ifeq ($(CONFIG_RTL_ODM_WLAN_DRIVER),y)
 	rtl8192cd-objs += \
 	phydm/phydm.o \
@@ -550,7 +574,7 @@ ifeq ($(CONFIG_RTL_ODM_WLAN_DRIVER),y)
 	phydm/txbf/phydm_hal_txbf_api.o\
 	phydm/phydm_noisemonitor.o\
 	EdcaTurboCheck.o
-	EXTRA_CFLAGS += -I$(src) -I$(src)/phydm
+	ccflags-y += -I$(src) -I$(src)/phydm
 endif
 
 ifeq ($(CONFIG_WLAN_HAL_8881A),y)
@@ -605,7 +629,7 @@ ifeq ($(CONFIG_WLAN_HAL_8197F),y)
 endif
 
 ifeq ($(CONFIG_BT_COEXIST),y)
-	EXTRA_CFLAGS += -I$(src)/btcoexist
+	ccflags-y += -I$(src)/btcoexist
 	rtl8192cd-objs += \
 	btcoexist/rtl_btc.o
 	ifeq ($(CONFIG_BT_COEXIST_SOCKET),y)
@@ -705,7 +729,7 @@ endif
 endif
 
 ifeq ($(CONFIG_WLAN_HAL),y)
-	EXTRA_CFLAGS += -I$(src) -I$(src)/WlanHAL/ -I$(src)/WlanHAL/Include -I$(src)/WlanHAL/HalHeader 
+	ccflags-y += -I$(src) -I$(src)/WlanHAL/ -I$(src)/WlanHAL/Include -I$(src)/WlanHAL/HalHeader 
 	rtl8192cd-objs += WlanHAL/HalCommon.o \
 										WlanHAL/HalCfg.o \
 										WlanHAL/HalDbgCmd.o	\
@@ -715,7 +739,7 @@ ifeq ($(CONFIG_WLAN_HAL),y)
 endif
 
 ifeq ($(CONFIG_WLAN_HAL_88XX),y)
-	EXTRA_CFLAGS += -I$(src)/WlanHAL/RTL88XX -I$(src)/WlanHAL/HalMac88XX 
+	ccflags-y += -I$(src)/WlanHAL/RTL88XX -I$(src)/WlanHAL/HalMac88XX 
 	rtl8192cd-objs += WlanHAL/RTL88XX/Hal88XXFirmware.o \
 										WlanHAL/RTL88XX/Hal88XXGen.o \
 										WlanHAL/RTL88XX/Hal88XXHWImg.o \
@@ -729,7 +753,7 @@ ifeq ($(CONFIG_WLAN_HAL_88XX),y)
 endif
 
 ifeq ($(CONFIG_WLAN_HAL_8881A),y)
-	EXTRA_CFLAGS += -I$(src)/WlanHAL/RTL88XX/RTL8881A
+	ccflags-y += -I$(src)/WlanHAL/RTL88XX/RTL8881A
 	rtl8192cd-objs += WlanHAL/RTL88XX/RTL8881A/Hal8881AFirmware.o \
 										WlanHAL/RTL88XX/RTL8881A/Hal8881AGen.o \
 										WlanHAL/RTL88XX/RTL8881A/Hal8881AHWImg.o \
@@ -744,7 +768,7 @@ ifeq ($(CONFIG_WLAN_HAL_8881A),y)
 endif
 
 ifeq ($(CONFIG_WLAN_HAL_8192EE),y)
-		EXTRA_CFLAGS += -I$(src)/WlanHAL/RTL88XX/RTL8192E/RTL8192EE -I$(src)/WlanHAL/RTL88XX/RTL8192E
+		ccflags-y += -I$(src)/WlanHAL/RTL88XX/RTL8192E/RTL8192EE -I$(src)/WlanHAL/RTL88XX/RTL8192E
 		rtl8192cd-objs += WlanHAL/RTL88XX/RTL8192E/RTL8192EE/Hal8192EEGen.o \
 				  WlanHAL/RTL88XX/RTL8192E/Hal8192EGen.o \
 				  WlanHAL/RTL88XX/RTL8192E/Hal8192EPhyCfg.o \
@@ -752,7 +776,7 @@ ifeq ($(CONFIG_WLAN_HAL_8192EE),y)
 endif
 
 ifeq ($(CONFIG_WLAN_HAL_8197F),y)
-	EXTRA_CFLAGS += -I$(src)/WlanHAL/RTL88XX/RTL8197F -I$(src)/efuse_97f
+	ccflags-y += -I$(src)/WlanHAL/RTL88XX/RTL8197F -I$(src)/efuse_97f
 	rtl8192cd-objs += WlanHAL/RTL88XX/RTL8197F/Hal8197FFirmware.o \
 										WlanHAL/RTL88XX/RTL8197F/Hal8197FGen.o \
 										WlanHAL/RTL88XX/RTL8197F/Hal8197FHWImg.o \
@@ -766,7 +790,7 @@ ifeq ($(CONFIG_WLAN_HAL_8197F),y)
 endif
 
 ifeq ($(CONFIG_WLAN_HAL_8814AE),y)
-		EXTRA_CFLAGS += -I$(src)/WlanHAL/RTL88XX/RTL8814A/RTL8814AE -I$(src)/WlanHAL/RTL88XX/RTL8814A
+		ccflags-y += -I$(src)/WlanHAL/RTL88XX/RTL8814A/RTL8814AE -I$(src)/WlanHAL/RTL88XX/RTL8814A
 		rtl8192cd-objs += WlanHAL/RTL88XX/RTL8814A/RTL8814AE/Hal8814AEGen.o \
 				  WlanHAL/RTL88XX/RTL8814A/Hal8814AGen.o \
 				  WlanHAL/RTL88XX/RTL8814A/Hal8814APhyCfg.o \
@@ -775,7 +799,7 @@ ifeq ($(CONFIG_WLAN_HAL_8814AE),y)
 endif
 
 ifeq ($(CONFIG_WLAN_HAL_8822BE),y)
-	EXTRA_CFLAGS += -I$(src)/WlanHAL/RTL88XX/RTL8822B
+	ccflags-y += -I$(src)/WlanHAL/RTL88XX/RTL8822B
 	rtl8192cd-objs += WlanHAL/RTL88XX/RTL8822B/Hal8822BFirmware.o \
 										WlanHAL/RTL88XX/RTL8822B/RTL8822BE/Hal8822BEGen.o \
 										WlanHAL/RTL88XX/RTL8822B/Hal8822BGen.o \
@@ -783,7 +807,7 @@ ifeq ($(CONFIG_WLAN_HAL_8822BE),y)
 										WlanHAL/RTL88XX/RTL8822B/Hal8822BPhyCfg.o \
 										8812_hw.o
 ifeq ($(CONFIG_WLAN_MACHAL_API),y)
-	EXTRA_CFLAGS += -I$(src)/WlanHAL/HalMac88XX 
+	ccflags-y += -I$(src)/WlanHAL/HalMac88XX 
 	rtl8192cd-objs += WlanHAL/HalMac88XX/halmac_api.o \
 										WlanHAL/HalMac88XX/halmac_88xx/halmac_api_88xx.o \
 										WlanHAL/HalMac88XX/halmac_88xx/halmac_api_88xx_pcie.o \
@@ -805,16 +829,16 @@ ifeq ($(CONFIG_RTL8672),y)
 	ifeq ($(CONFIG_OPENWRT_SDK),y)
 		ccflags-y += -DCONFIG_RTL8196B -DCONFIG_RTL8196C -DCONFIG_RTL8196B_GW -DCONFIG_RTL8196C_TESTCHIP_PATCH
 	else
-		EXTRA_CFLAGS += -DCONFIG_RTL8196B -DCONFIG_RTL8196C -DCONFIG_RTL8196B_GW -DCONFIG_RTL8196C_TESTCHIP_PATCH
+		ccflags-y += -DCONFIG_RTL8196B -DCONFIG_RTL8196C -DCONFIG_RTL8196B_GW -DCONFIG_RTL8196C_TESTCHIP_PATCH
 		ifeq ($(CONFIG_DEFAULTS_KERNEL_2_6),y)
-			EXTRA_CFLAGS += -DCONFIG_COMPAT_NET_DEV_OPS -D_MP_TELNET_SUPPORT_
+			ccflags-y += -DCONFIG_COMPAT_NET_DEV_OPS -D_MP_TELNET_SUPPORT_
 		endif
 	endif
 endif
 
 #CONFIG_SINUX_SUPPORT=1
 ifeq ($(CONFIG_SINUX_SUPPORT),1)
-EXTRA_CFLAGS  += -DOPENSSL_FIPS -D__linux__ -DRSDK_BUILT -DOPENSSL_NO_SPEED -DOPENSSL_THREADS -D_REENTRANT \
+ccflags-y  += -DOPENSSL_FIPS -D__linux__ -DRSDK_BUILT -DOPENSSL_NO_SPEED -DOPENSSL_THREADS -D_REENTRANT \
                         -DDSO_DLFCN -DHAVE_DLFCN_H -DOPENSSL_NO_KRB5 -DB_ENDIAN -DTERMIO \
 			-fomit-frame-pointer 
 # -save-temps                      
@@ -831,14 +855,14 @@ obj-y  += wps/ssl/mem.o wps/ssl/mem_clr.o wps/ssl/bn_add.o wps/ssl/bn_lib.o \
 				wps/ssl/rand_lib.o wps/ssl/sha1dgst.o wps/ssl/sha256.o \
                 wps/ssl/aes_cbc.o wps/ssl/fips_aes_core.o
 				
-#EXTRA_CFLAGS += -I../../../lib
+#ccflags-y += -I../../../lib
 obj-y += wps/8192cd_wscd.o
 obj-y += wps/sercomm_intf.o
 endif
 
-EXTRA_CFLAGS += -I$(DIR_BOARD) -D'SVN_REV="$(shell svnversion -n $(src))"'
-#EXTRA_CFLAGS += -I$(DIR_BOARD) -Werror
-#EXTRA_CFLAGS += -I$(DIR_LINUX)/drivers/net/rtl819x/
+ccflags-y += -I$(DIR_BOARD) -D'SVN_REV="$(shell svnversion -n $(src))"'
+#ccflags-y += -I$(DIR_BOARD) -Werror
+#ccflags-y += -I$(DIR_LINUX)/drivers/net/rtl819x/
 
 #
 #Build C code for TXT or BIN file

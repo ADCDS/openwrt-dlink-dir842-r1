@@ -812,7 +812,9 @@ static __inline__ unsigned char RTL_R8_F(struct rtl8192cd_priv *priv, unsigned i
 	if (GET_CHIP_VER(priv) == VERSION_8197F) {
 	  if(!(REG32(0xB8000064)&BIT0)){
 	  	panic_printk("Should not access WiFi register since 0xB8000064[0]=0\n");
-		return;
+		return 0xff;	/* 6.18 port: RTL_R8_F() returns unsigned char, not void --
+				 * "return;" here was a hard compile error under gcc 14.
+				 * 0xff is the conventional failed-register-read sentinel. */
 	  } 			   
 	}
 #endif
@@ -860,7 +862,7 @@ static __inline__ unsigned short RTL_R16_F(struct rtl8192cd_priv *priv, unsigned
 	if (GET_CHIP_VER(priv) == VERSION_8197F) {
 	  if(!(REG32(0xB8000064)&BIT0)){
 		panic_printk("Should not access WiFi register since 0xB8000064[0]=0\n");
-		return;
+		return 0xffff;	/* 6.18 port: see RTL_R8_F above */
 	  } 			   
 	}
 #endif
@@ -917,8 +919,8 @@ static __inline__ unsigned int RTL_R32_F(struct rtl8192cd_priv *priv, unsigned i
 	if (GET_CHIP_VER(priv) == VERSION_8197F) {
 	  if(!(REG32(0xB8000064)&BIT0)){
 		panic_printk("Should not access WiFi register since 0xB8000064[0]=0\n");
-		return;
-	  } 			   
+		return 0xffffffff;	/* 6.18 port: see RTL_R8_F above */
+	  }
 	}
 #endif
 
@@ -2071,12 +2073,9 @@ void append_skb_to_txq_tail(struct txq_list_head *head, struct rtl8192cd_priv *p
 void remove_skb_from_txq(struct txq_list_head *head, struct sk_buff **pskb, struct net_device **pdev, struct list_head *pool);
 #endif
 
-#ifndef __OSK__
-static inline long timeval_to_us(const struct timeval *tv)
-{
-	return (tv->tv_sec*1000000L)+ tv->tv_usec;
-}
-#endif
+/* 6.18 port: timeval_to_us() had zero callers anywhere in this tree (checked) and
+ * struct timeval was removed from the kernel's own headers in the y2038 cleanup, so
+ * there is nothing to port here -- just dead code that no longer compiles. Dropped. */
 
 // Get the N-bytes aligment offset from the current length
 #define N_BYTE_ALIGMENT(__Value, __Aligment) ((__Aligment == 1) ? (__Value) : (((__Value + __Aligment - 1) / __Aligment) * __Aligment))
