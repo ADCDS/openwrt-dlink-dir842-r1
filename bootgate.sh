@@ -9,7 +9,12 @@ LOG=/home/agiu/dir842-r1-bootlog.txt
 TOMADA="${TOMADA:-/home/agiu/.local/bin/tomada}"
 N="${N:-10}"; WAIT="${WAIT:-50}"
 pass=0; fail=0
-pgrep -f "cat /dev/ttyUSB0" >/dev/null || { setsid bash -c "cat /dev/ttyUSB0 >> $LOG" </dev/null >/dev/null 2>&1 & sleep 1; }
+touch "$LOG"
+# ★ Anchor to the logger process. An unanchored pattern also matches any shell
+# whose command line merely mentions the device node, so the guard skips
+# starting the logger and every slice below comes back empty -- which scores as
+# FAIL on a board that booted perfectly. Same bug flash-nor.sh had.
+pgrep -f "^cat /dev/ttyUSB0" >/dev/null || { setsid bash -c "exec cat /dev/ttyUSB0 >> $LOG" </dev/null >/dev/null 2>&1 & sleep 1; }
 
 for i in $(seq 1 "$N"); do
   M=$(wc -c < "$LOG")

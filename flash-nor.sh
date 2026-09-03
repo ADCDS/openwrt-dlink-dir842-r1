@@ -32,7 +32,14 @@ spam_stop() { rm -f "$FLAG"; sleep 0.3; }
 trap 'spam_stop' EXIT
 [ -f "$IMG" ] || { echo "no image: $IMG"; exit 2; }
 sr
-pgrep -f "cat $PORT" >/dev/null || { setsid bash -c "cat $PORT >> $LOG" </dev/null >/dev/null 2>&1 & sleep 1; }
+touch "$LOG"
+# ★ Anchor the pattern to the logger process itself. A bare `cat $PORT` pattern
+# also matches any shell whose command line merely MENTIONS the device node --
+# including the one invoking this script -- so the guard skips starting the
+# logger, the log stays empty, and every later `wc -c < $LOG` / catch test fails.
+# That reads as "no loader window" on every round while nothing is actually
+# wrong with the board. ramboot.sh was fixed for this; this script was not.
+pgrep -f "^cat $PORT" >/dev/null || { setsid bash -c "exec cat $PORT >> $LOG" </dev/null >/dev/null 2>&1 & sleep 1; }
 echo "[flash-nor] IMG=$IMG ($(stat -c%s "$IMG") bytes)"
 
 host_net() {
