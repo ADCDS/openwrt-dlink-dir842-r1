@@ -1,0 +1,23 @@
+#
+# Record the datapath compatibility version in board.json.
+#
+# It has to match the DEVICE_COMPAT_VERSION the image declares, or every
+# sysupgrade -- including 2.0 to 2.0 -- is treated as a version change and
+# refused with the swconfig-to-DSA message. A running system that records
+# nothing defaults to 1.0, which is exactly what a genuine v1.x box should
+# report: the refusal is correct there and wrong here.
+#
+. /lib/functions.sh
+. /lib/functions/uci-defaults.sh
+
+board_config_update
+
+case "$(board_name)" in
+	dlink,dir-842-r1)
+		ucidef_set_compat_version "2.0"
+		;;
+esac
+
+board_config_flush
+
+exit 0
