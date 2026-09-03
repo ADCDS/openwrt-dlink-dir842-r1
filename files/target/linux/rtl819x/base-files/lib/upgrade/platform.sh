@@ -4,20 +4,27 @@
 
 . /lib/functions.sh
 . /lib/functions/system.sh
-. /lib/realtek.sh
 
 PART_NAME=firmware
+REQUIRE_IMAGE_METADATA=1
 
 platform_check_image() {
 	local board=$(board_name)
 
 	case "$board" in
-	gwr1200ac-v1)
-		# DIR-842 R1: the on-flash firmware is a Realtek "cr6b" image
-		# (16-byte header the v3.4.11B loader validates + boots). Reject
-		# anything without that signature so a wrong-target image can't be
-		# written. The header is at offset 0 even when sysupgrade metadata
-		# is appended (metadata rides at the tail), so offset-0 is robust.
+	dlink,dir-842-r1|gwr1200ac-v1)
+		# The on-flash firmware is a Realtek "cr6b" image: a 16-byte header
+		# the v3.4.11B loader validates before booting. Reject anything
+		# without that signature so a wrong-target image cannot be written.
+		# The header sits at offset 0 even when sysupgrade metadata is
+		# appended, because that rides at the tail.
+		#
+		# ★ Both names are matched on purpose. This target calls the board
+		# dlink,dir-842-r1; v1.x images identified as gwr1200ac-v1 and
+		# SUPPORTED_DEVICES still carries it, so an upgrade started from one
+		# of those must be checked too. Matching only the old name -- which
+		# is what this file did -- silently skipped the check on every
+		# image this target builds.
 		local magic
 		magic=$(get_magic_long "$1")
 		if [ "$magic" != "63723662" ]; then

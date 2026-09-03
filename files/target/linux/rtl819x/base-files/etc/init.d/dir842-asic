@@ -85,9 +85,32 @@ asic_warm() {
 }
 
 start() {
-	[ -e /proc/rtl865x_gw ] || return 0
-	ROLE="$(asic_role)"
+	logger -t dir842-asic "bring-up starting"
+
+	# Wait for the driver's programming interface rather than exiting if it is
+	# not there yet. Returning early here is silent, and a silent skip leaves
+	# the datapath without its fabric reset -- i.e. dead -- with nothing in the
+	# log to say why. Observed on a cold flash boot: no log line at all.
+	local i=0
+	while [ $i -lt 30 ]; do
+		[ -e /proc/rtl865x_gw ] && break
+		i=$((i + 1))
+		sleep 1
+	done
+	if [ ! -e /proc/rtl865x_gw ]; then
+		logger -t dir842-asic "no /proc/rtl865x_gw after 30s - datapath driver missing, giving up"
+		return 0
+	fi
+
+	# Let netifd apply the configuration BEFORE deciding the role. The heuristic
+	# reads network.wan, and at S97 time on a cold boot that section may not be
+	# in place yet -- which silently downgrades a router to bridge and skips the
+	# fabric reset the datapath needs.
+	ubus -t 60 wait_for network.interface.lan 2>/dev/null
+
 	wait_netif
+	ROLE="$(asic_role)"
+	logger -t dir842-asic "role=$ROLE"
 	asic_program
 	asic_warm
 	if [ "$ROLE" = "router" ]; then
