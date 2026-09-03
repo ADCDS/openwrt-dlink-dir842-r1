@@ -1864,10 +1864,12 @@ static const struct net_device_ops rtl819x_eth_netdev_ops = {
 	.ndo_set_mac_address	= eth_mac_addr,
 	.ndo_validate_addr	= eth_validate_addr,
 	/*
-	 * Hardware NAT attaches through ndo_setup_tc(TC_SETUP_FT) now; the
-	 * downstream ndo_flow_offload interface this port used to hook no longer
-	 * exists. See rtl819x_hwnat.c.
+	 * Hardware NAT. DSA forwards TC_SETUP_FT from each user port to its
+	 * conduit, so this one hook covers lan1..lan4 and wan. A no-op returning
+	 * -EOPNOTSUPP when CONFIG_RTL819X_HWNAT is off, which leaves the flow
+	 * table in software.
 	 */
+	.ndo_setup_tc		= rtl819x_hwnat_setup_tc,
 };
 
 static int rtl819x_eth_probe(struct platform_device *pdev)

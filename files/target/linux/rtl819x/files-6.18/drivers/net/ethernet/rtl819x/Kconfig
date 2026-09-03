@@ -17,12 +17,19 @@ config NET_RTL819X
 
 config RTL819X_HWNAT
 	bool "Hardware NAT offload for the RTL8197F ASIC"
-	depends on NET_RTL819X && NF_FLOW_TABLE
+	depends on NET_RTL819X
+	# Deliberately NOT "depends on NF_FLOW_TABLE": the flow table is a module
+	# in OpenWrt and this driver is built in, but nothing here links against
+	# it. The offload block helpers all live in net/core/flow_offload.c, which
+	# is always built, and the flow table reaches us through ndo_setup_tc.
 	help
 	  Offload established IPv4 NAT flows into the SoC's ASIC NAPT table via
 	  the netfilter flow table's hardware offload path
 	  (ndo_setup_tc(TC_SETUP_FT)). Without this the datapath is correct but
 	  every forwarded packet crosses the CPU.
 
-	  Not yet available on this kernel: the 4.14 implementation targeted the
-	  downstream ndo_flow_offload interface, which is gone.
+	  Flows are offered as tc-flower rules on a flow block, the same path DSA
+	  user ports forward to their conduit. Only the masquerade shape is taken
+	  (IPv4 TCP/UDP, source NAT, no destination NAT); everything else is
+	  declined and stays on the software fastpath, so this is an accelerator
+	  and never a dependency.

@@ -61,6 +61,10 @@
 #include <linux/ip.h>
 #include <linux/netfilter.h>		/* nf_hookfn / nf_hook_state (needed by the header below) */
 #include <net/netfilter/nf_flow_table.h>
+#include <net/flow_offload.h>
+#include <net/pkt_cls.h>
+#include <net/neighbour.h>
+#include <linux/etherdevice.h>
 #include <net/netfilter/nf_conntrack.h>	/* struct nf_conn (silences fwd-decl warnings) */
 
 #include "rtl865x_asichal.h"
@@ -88,115 +92,29 @@ MODULE_PARM_DESC(hwnat,
  */
 struct hwnat_slot {
 	struct list_head		list;
-	struct flow_offload		*flow;		/* identity token only */
-	struct flow_offload_tuple	orig_tuple;	/* by-value copy (for step-4 refresh) */
-	u16				idx_out;	/* outbound row = gw_napt_hash1(...) */
-	u16				idx_in;		/* inbound  row = globalPort & 0x3ff */
+	/*
+	 * The two tc-flower cookies this flow was offered under -- one per
+	 * direction. nftables offers a bidirectional flow as two independent
+	 * rules and expects BOTH to be accepted, so the pair is installed from
+	 * whichever arrives first and the second is matched against it and
+	 * acknowledged. Either cookie alone must be able to tear the pair down.
+	 */
+	unsigned long			cookie_out;	/* LAN->WAN rule */
+	unsigned long			cookie_in;	/* WAN->LAN rule */
+	u32				int_ip, rem_ip, ext_ip;
+	u16				int_port, rem_port, gport;
+	u16				idx_out;	/* outbound ASIC row */
+	u16				idx_in;		/* inbound  ASIC row */
 	u8				last_aging;	/* last agingTime seen by the worker */
 	u8				is_tcp;
 };
-
 /* All of the following are protected by rtl865x_hal_lock. */
 static LIST_HEAD(hwnat_flows);
 static DECLARE_BITMAP(hwnat_used, RTL865X_NAPT_ROWS);	/* rows this module owns */
 static bool hwnat_active;				/* datapath up (open) & armed */
 
-/*
- * M7.3 step 4 handshake state (also under rtl865x_hal_lock): the module-owned flow table +
- * its flow_offload_lookup(), pushed in by xt_FLOWOFFLOAD at module init (we are =y and can't
- * link those =m symbols directly). Both NULL until the module registers; the aging worker
- * refreshes timeouts only while both are set.
- */
-static struct nf_flowtable		*hwnat_flowtable;
-static rtl819x_flow_lookup_fn		hwnat_flow_lookup;
-
 static void hwnat_aging_work_fn(struct work_struct *w);
 static DECLARE_DELAYED_WORK(hwnat_aging_work, hwnat_aging_work_fn);
-
-/* ------------------------------------------------------------------ check hook */
-
-/*
- * Runs under rcu_read_lock_bh (atomic): structural validation ONLY, no sleeping and
- * no ASIC table access. By the time we see the path the VLAN layer has flattened it
- * (path->dev == eth0, FLOW_OFFLOAD_PATH_VLAN set, vlan_id filled). Accept only a real
- * ethernet path carrying one of our two datapath VIDs; everything else declines to
- * the software fastpath. Called once for the LAN (src) path and once for the WAN
- * (dest) path — both must pass for the flow to be offered to ndo_flow_offload().
- *
- * ★ Deliberately NOT gated on rtl819x_hwnat_enabled: the framework re-runs this
- * check when preparing a DEL (nf_flow_table_hw.c flow_offload_hw_prepare), so a
- * decline here would silently DROP the DEL — toggling hwnat off with flows installed
- * would then leak their slots and leave live ASIC rows NAT-ing forever. The enable
- * gate lives in the ADD path only; with it off, every offer is declined there and
- * already-installed flows drain via their (still-delivered) DELs within one GC
- * timeout (~30 s).
- */
-/*
- * M7.2 Part B: the ASIC PPPoE hardware offload. Default ON — now FUNCTIONAL.
- * The EN_PPPOE encap path programs correctly (session table + type=1 PPPoEIndex
- * nexthop + dynamic extIP) AND now egresses. The original black-hole was the WAN
- * netif MTU set to 1492 (vs stock 1500), which made the ASIC trap the encap
- * frame as oversized — fixed in rtl865x_asichal.c gw_wan_netif_prog_locked().
- * Bench-validated: a LAN->PPPoE flow offloads and forwards end-to-end at
- * ~157 Mbit/s (peer eth0 rx-byte rate), was 0 (total black-hole). The A-2
- * trunk-pause fix (rtl819x-eth.c) is what lets it sustain — otherwise the
- * loader's trunk PAUSE throttled it. Set to 0 to force PPPoE onto software
- * forwarding.
- */
-static bool pppoe_hw_offload = true;
-module_param(pppoe_hw_offload, bool, 0644);
-MODULE_PARM_DESC(pppoe_hw_offload,
-	"ASIC PPPoE encap offload: 1=on (default, ~157 Mbit bench-validated), 0=software forwarding");
-
-/* Bench instrument: log why an offer was declined. Every decline path below is a
- * silent -EOPNOTSUPP, which makes "no row ever installs" indistinguishable from
- * "the offer never arrived" -- exactly the ambiguity that cost a full debug cycle.
- * Ratelimited; set hwnat_debug=0 to silence. */
-static int hwnat_debug = 1;
-module_param(hwnat_debug, int, 0644);
-MODULE_PARM_DESC(hwnat_debug, "log why hwnat declines a flow-offload offer (1=on)");
-
-#define HWNAT_DECLINE(fmt, ...)						\
-	do {								\
-		if (hwnat_debug)					\
-			pr_info_ratelimited("rtl819x hwnat: decline " fmt "\n", ##__VA_ARGS__); \
-		return -EOPNOTSUPP;					\
-	} while (0)
-
-int rtl819x_hwnat_flow_offload_check(struct flow_offload_hw_path *path)
-{
-	/* Two accepted path shapes once the upper layers have flattened onto eth0
-	 * (M7.2):
-	 *   ETHERNET|VLAN       — plain ethernet on one of our two datapath VIDs
-	 *                         (the LAN side, or the bench ethernet-WAN).
-	 *   PPPOE|VLAN (no ETH) — PPPoE WAN: ppp0 is not ARPHRD_ETHER so the core
-	 *                         never set ETHERNET (nf_flow_table_hw.c
-	 *                         flow_offload_check_ethernet); instead
-	 *                         pppoe_flow_offload_check filled eth_dest = the AC
-	 *                         MAC + pppoe_sid and chained through eth0.1 (which
-	 *                         added VLAN). Only the WAN VID may carry PPPoE, and
-	 *                         a connected session always has a nonzero sid. */
-	if (path->flags == (FLOW_OFFLOAD_PATH_ETHERNET | FLOW_OFFLOAD_PATH_VLAN)) {
-		if (path->vlan_id != RTL865X_VID_LAN && path->vlan_id != RTL865X_VID_WAN)
-			HWNAT_DECLINE("check: vid=%u not a datapath VID", path->vlan_id);
-		return 0;
-	}
-
-	if (path->flags == (FLOW_OFFLOAD_PATH_PPPOE | FLOW_OFFLOAD_PATH_VLAN)) {
-		/* Default OFF (see pppoe_hw_offload above): the ASIC encap black-holes
-		 * offloaded PPPoE, so decline here and let PPPoE ride software forwarding. */
-		if (!pppoe_hw_offload)
-			return -EOPNOTSUPP;
-		if (path->vlan_id != RTL865X_VID_WAN || path->pppoe_sid == 0)
-			return -EOPNOTSUPP;
-		return 0;
-	}
-
-	HWNAT_DECLINE("check: flags=%x vid=%u (want ETHERNET|VLAN or PPPOE|VLAN)",
-		      path->flags, path->vlan_id);
-}
-
-/* ------------------------------------------------------------------ ADD / DEL */
 
 /*
  * Current primary IPv4 of the netdev with ifindex @ifidx in @net, host order
@@ -401,15 +319,49 @@ static int hwnat_program_rows(u32 is_tcp, u32 int_ip, u16 int_port, u16 gport,
 	return 0;
 }
 
-static int hwnat_add_flow(struct flow_offload *flow,
-			  struct flow_offload_hw_path *src,
-			  struct flow_offload_hw_path *dest)
+/* Bench instrument: log why an offer was declined. Every decline path below is a
+ * silent -EOPNOTSUPP, which makes "no row ever installs" indistinguishable from
+ * "the offer never arrived" -- exactly the ambiguity that cost a full debug cycle.
+ * Ratelimited; set hwnat_debug=0 to silence. */
+static int hwnat_debug = 1;
+module_param(hwnat_debug, int, 0644);
+MODULE_PARM_DESC(hwnat_debug, "log why hwnat declines a flow-offload offer (1=on)");
+
+#define HWNAT_DECLINE(fmt, ...)						\
+	do {								\
+		if (hwnat_debug)					\
+			pr_info_ratelimited("rtl819x hwnat: decline " fmt "\n", ##__VA_ARGS__); \
+		return -EOPNOTSUPP;					\
+	} while (0)
+
+/*
+ * A flow as this driver needs it, gathered from ONE tc-flower rule.
+ *
+ * The kernel hands NAT flows to hardware as tc-flower rules on an ingress
+ * block: match keys describe the packet as it arrives, and the action list
+ * describes the rewrite. Everything the ASIC row needs is in there --
+ * the masquerade mapping is the MANGLE actions, not a second tuple -- except
+ * the LAN client's MAC, which is looked up from the neighbour table because
+ * only the opposite direction's rule carries it.
+ */
+struct hwnat_rule {
+	u32			int_ip, rem_ip, ext_ip;
+	u16			int_port, rem_port, gport;
+	u8			is_tcp;
+	bool			wan_pppoe;
+	u16			pppoe_sid;
+	u8			wan_peer_mac[ETH_ALEN];
+	u8			lan_peer_mac[ETH_ALEN];
+	struct net_device	*in_dev;	/* LAN ingress (DSA user port) */
+	struct net_device	*out_dev;	/* WAN egress */
+};
+
+static int hwnat_add_flow(const struct hwnat_rule *r, unsigned long cookie)
 {
-	const struct flow_offload_tuple *o = &flow->tuplehash[FLOW_OFFLOAD_DIR_ORIGINAL].tuple;
-	const struct flow_offload_tuple *r = &flow->tuplehash[FLOW_OFFLOAD_DIR_REPLY].tuple;
-	u32 int_ip, rem_ip, ext_ip, is_tcp, wan_ip;
-	u16 int_port, rem_port, gport;
-	bool wan_pppoe;
+	u32 int_ip = r->int_ip, rem_ip = r->rem_ip, ext_ip = r->ext_ip;
+	u16 int_port = r->int_port, rem_port = r->rem_port, gport = r->gport;
+	u32 is_tcp = r->is_tcp, wan_ip;
+	bool wan_pppoe = r->wan_pppoe;
 	u16 idx_out, idx_in;
 	struct hwnat_slot *slot;
 	int rc;
@@ -417,56 +369,18 @@ static int hwnat_add_flow(struct flow_offload *flow,
 	if (!READ_ONCE(rtl819x_hwnat_enabled))	/* runtime gate (also guards a stale ADD) */
 		return -EOPNOTSUPP;
 
-	/* Structural: LAN(vid2) src -> WAN(vid1) dest only; PPPoE (if present) can
-	 * only be the WAN side. */
-	if (src->vlan_id != RTL865X_VID_LAN || dest->vlan_id != RTL865X_VID_WAN)
-		HWNAT_DECLINE("add: src vid=%u dst vid=%u (want %u->%u), sflags=%x dflags=%x",
-			      src->vlan_id, dest->vlan_id, RTL865X_VID_LAN,
-			      RTL865X_VID_WAN, src->flags, dest->flags);
-	if (src->flags & FLOW_OFFLOAD_PATH_PPPOE)
-		HWNAT_DECLINE("add: PPPoE on the LAN side");
-	wan_pppoe = !!(dest->flags & FLOW_OFFLOAD_PATH_PPPOE);
-
-	/* Source-NAT masquerade only (no destination NAT / port forwards), and not a
-	 * flow that is already being torn down. */
-	if (!(flow->flags & FLOW_OFFLOAD_SNAT) || (flow->flags & FLOW_OFFLOAD_DNAT))
-		HWNAT_DECLINE("add: flow flags=%x (need SNAT, not DNAT)", flow->flags);
-	if (flow->flags & (FLOW_OFFLOAD_DYING | FLOW_OFFLOAD_TEARDOWN))
-		HWNAT_DECLINE("add: flow dying/teardown (flags=%x)", flow->flags);
-
-	/* IPv4 TCP/UDP only (ICMP et al. keep trapping to the CPU via NAPTF2CPU). */
-	if (o->l3proto != AF_INET)
-		HWNAT_DECLINE("add: l3proto=%u not IPv4", o->l3proto);
-	if (o->l4proto == IPPROTO_TCP)
-		is_tcp = 1;
-	else if (o->l4proto == IPPROTO_UDP)
-		is_tcp = 0;
-	else
-		HWNAT_DECLINE("add: l4proto=%u not TCP/UDP", o->l4proto);
-
-	/* Tuple extraction (all conntrack fields are network-order; the ASIC tables and
-	 * gw_napt_hash1() use host order). The REPLY tuple's destination is the actual
-	 * masquerade mapping Linux picked (external IP + global port G) — never assume
-	 * keep-port. */
-	int_ip   = ntohl(o->src_v4.s_addr);
-	int_port = ntohs(o->src_port);
-	rem_ip   = ntohl(o->dst_v4.s_addr);
-	rem_port = ntohs(o->dst_port);
-	ext_ip   = ntohl(r->dst_v4.s_addr);
-	gport    = ntohs(r->dst_port);
-
-	/* M7.2: the masquerade IP is DYNAMIC — it must equal the WAN interface's
+	/*
+	 * The masquerade IP is DYNAMIC -- it must equal the WAN interface's
 	 * CURRENT primary IPv4 (ppp0's local address on a PPPoE WAN, assigned at
-	 * IPCP-up and different every reconnect; the bench rig's static 172.16.0.1
-	 * on the ethernet WAN). The REPLY tuple's iifidx IS the WAN-side ingress
-	 * device (nf_flow_table_core fill_dir: iifidx = other-direction egress dev),
-	 * so read the address off it live. Masquerade always sources from the
-	 * egress interface's address, so a mismatch means the address moved under
-	 * the flow — decline; the flow is dying with the old address anyway. */
-	wan_ip = hwnat_wan_ipv4(dev_net(dest->dev), r->iifidx);
+	 * IPCP-up and different every reconnect; a static address on an ethernet
+	 * WAN). Masquerade always sources from the egress interface's address, so
+	 * a mismatch means the address moved under the flow: decline, the flow is
+	 * dying with the old address anyway.
+	 */
+	wan_ip = hwnat_wan_ipv4(dev_net(r->out_dev), r->out_dev->ifindex);
 	if (!wan_ip || ext_ip != wan_ip)
-		HWNAT_DECLINE("add: extIP %pI4h != live WAN IP %pI4h (iifidx=%u)",
-			      &ext_ip, &wan_ip, r->iifidx);
+		HWNAT_DECLINE("add: extIP %pI4h != live WAN IP %pI4h (oif=%s)",
+			      &ext_ip, &wan_ip, r->out_dev->name);
 
 	/* The ASIC hashes/keys the ON-WIRE (network-order) header fields. The vendor
 	 * driver installs the outbound row at hash(htonl(intIP),htons(intPort),
@@ -521,8 +435,8 @@ static int hwnat_add_flow(struct flow_offload *flow,
 	 * compare the live netdev MAC here and reprogram + flush on divergence. */
 	if (rtl865x_wan_netif_mac_sync() > 0)
 		hwnat_flush_locked();
-	rc = rtl865x_wan_set_nexthop(dest->eth_dest, wan_pppoe,
-				     wan_pppoe ? dest->pppoe_sid : 0);
+	rc = rtl865x_wan_set_nexthop(r->wan_peer_mac, wan_pppoe,
+				     wan_pppoe ? r->pppoe_sid : 0);
 	if (rc < 0)
 		goto out_unlock;
 	if (rc > 0)
@@ -533,7 +447,7 @@ static int hwnat_add_flow(struct flow_offload *flow,
 	 * flow's internal address. Without this the ASIC kept a build-time constant
 	 * -- one bench machine's MAC -- so the reply direction had no valid L2 and
 	 * the flow degraded to CPU forwarding on any real network. */
-	rc = rtl865x_lan_set_nexthop(src->eth_dest, int_ip);
+	rc = rtl865x_lan_set_nexthop(r->lan_peer_mac, int_ip);
 	if (rc < 0)
 		goto out_unlock;
 	if (rc > 0)
@@ -560,18 +474,19 @@ static int hwnat_add_flow(struct flow_offload *flow,
 	__set_bit(idx_out, hwnat_used);
 	__set_bit(idx_in, hwnat_used);
 
-	slot->flow       = flow;		/* identity token (never dereferenced later) */
-	slot->orig_tuple = *o;			/* by-value copy while flow is alive */
+	slot->cookie_out = cookie;
+	slot->cookie_in  = 0;			/* filled in when the reply rule arrives */
+	slot->int_ip     = int_ip;
+	slot->int_port   = int_port;
+	slot->rem_ip     = rem_ip;
+	slot->rem_port   = rem_port;
+	slot->ext_ip     = ext_ip;
+	slot->gport      = gport;
 	slot->idx_out    = idx_out;
 	slot->idx_in     = idx_in;
 	slot->last_aging = RTL865X_NAPT_AGING_RELOAD;
 	slot->is_tcp     = is_tcp;
 	list_add_tail(&slot->list, &hwnat_flows);
-
-	/* Give the software flow a fresh 30 s window now (safe: the flow is alive during
-	 * ADD). Step 4's aging worker will keep refreshing it for as long as the ASIC
-	 * shows the row active, so a fully HW-forwarded flow won't be GC'd at 30 s. */
-	flow->timeout = (u32)jiffies + NF_FLOW_TIMEOUT;
 
 	mutex_unlock(&rtl865x_hal_lock);
 
@@ -591,18 +506,15 @@ out_unlock:
 	return rc;
 }
 
-static int hwnat_del_flow(struct flow_offload *flow)
+
+static int hwnat_del_cookie(unsigned long cookie)
 {
 	struct hwnat_slot *slot, *tmp;
+	int found = 0;
 
-	/* NOTE: `flow` may already be freed; use it ONLY as a comparison key.
-	 * No `break` on match: if a slot's DEL was ever lost (see the check-hook
-	 * comment) its stale pointer can alias a LATER flow allocated at the same
-	 * address — clearing every match takes out the stale slot together with the
-	 * real one instead of leaking the live flow's rows. */
 	mutex_lock(&rtl865x_hal_lock);
 	list_for_each_entry_safe(slot, tmp, &hwnat_flows, list) {
-		if (slot->flow != flow)
+		if (slot->cookie_out != cookie && slot->cookie_in != cookie)
 			continue;
 		rtl865x_napt_clear(slot->idx_out);
 		rtl865x_napt_clear(slot->idx_in);
@@ -610,80 +522,356 @@ static int hwnat_del_flow(struct flow_offload *flow)
 		__clear_bit(slot->idx_in, hwnat_used);
 		list_del(&slot->list);
 		kfree(slot);
+		found++;
 	}
 	mutex_unlock(&rtl865x_hal_lock);
+
+	return found ? 0 : -ENOENT;
+}
+
+/* ------------------------------------------------------------- tc-flower front end */
+
+static void hwnat_mangle_eth(const struct flow_action_entry *act, struct ethhdr *eth)
+{
+	void *dest = (void *)eth + act->mangle.offset;
+	const void *src = &act->mangle.val;
+
+	if (act->mangle.offset > 8)
+		return;
+	if (act->mangle.mask == 0xffff) {
+		src += 2;
+		dest += 2;
+	}
+	memcpy(dest, src, act->mangle.mask ? 2 : 4);
+}
+
+/*
+ * Resolve the LAN client's MAC.
+ *
+ * Only the reply-direction rule carries it (as its ethernet MANGLE), and the
+ * two directions are offered independently, so rather than make row
+ * installation wait on rule ordering, ask the neighbour table: the client is by
+ * definition actively sending on this flow, so its entry is present and fresh.
+ */
+static int hwnat_lan_mac(struct net_device *dev, u32 int_ip_host, u8 *mac)
+{
+	__be32 ip = htonl(int_ip_host);
+	struct net_device *l3dev;
+	struct neighbour *n;
+	int rc = -ENOENT;
+
+	/*
+	 * The rule names the DSA user port the packet arrived on, but ARP is
+	 * resolved on the L3 device -- br-lan -- and that is where the entry
+	 * lives. Looking it up on lan2 itself finds nothing, every flow declines,
+	 * and the offload silently never engages.
+	 */
+	rcu_read_lock();
+	l3dev = netdev_master_upper_dev_get_rcu(dev);
+	if (l3dev)
+		dev_hold(l3dev);
+	rcu_read_unlock();
+	if (!l3dev) {
+		l3dev = dev;
+		dev_hold(l3dev);
+	}
+
+	n = neigh_lookup(&arp_tbl, &ip, l3dev);
+	dev_put(l3dev);
+	if (!n)
+		return -ENOENT;
+
+	read_lock_bh(&n->lock);
+	if (n->nud_state & NUD_VALID) {
+		ether_addr_copy(mac, n->ha);
+		rc = 0;
+	}
+	read_unlock_bh(&n->lock);
+	neigh_release(n);
+
+	return rc;
+}
+
+static int hwnat_flow_replace(struct flow_cls_offload *cls)
+{
+	struct flow_rule *rule = flow_cls_offload_flow_rule(cls);
+	struct flow_match_ipv4_addrs addrs;
+	struct flow_match_control control;
+	struct flow_match_basic basic;
+	struct flow_match_ports ports;
+	struct flow_match_meta meta;
+	struct flow_action_entry *act;
+	struct hwnat_slot *slot;
+	struct hwnat_rule r = {};
+	struct ethhdr eth = {};
+	struct net_device *idev;
+	u32 msrc_ip, mdst_ip;
+	u16 msrc_port, mdst_port;
+	__be32 nat_src = 0, nat_dst = 0;
+	__be16 nat_sport = 0, nat_dport = 0;
+	bool have_redirect = false;
+	int i, rc;
+
+	if (!READ_ONCE(rtl819x_hwnat_enabled))
+		return -EOPNOTSUPP;
+
+	/* Ingress device: the DSA user port the client is on. */
+	if (!flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_META))
+		HWNAT_DECLINE("replace: no META key");
+	flow_rule_match_meta(rule, &meta);
+	if (!meta.key->ingress_ifindex)
+		HWNAT_DECLINE("replace: no ingress ifindex");
+
+	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_CONTROL)) {
+		flow_rule_match_control(rule, &control);
+		if (control.key->flags & FLOW_DIS_IS_FRAGMENT)
+			HWNAT_DECLINE("replace: fragmented flow");
+	}
+
+	if (!flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_BASIC))
+		HWNAT_DECLINE("replace: no BASIC key");
+	flow_rule_match_basic(rule, &basic);
+	if (basic.key->n_proto != htons(ETH_P_IP))
+		HWNAT_DECLINE("replace: n_proto %04x not IPv4", ntohs(basic.key->n_proto));
+	if (basic.key->ip_proto == IPPROTO_TCP)
+		r.is_tcp = 1;
+	else if (basic.key->ip_proto == IPPROTO_UDP)
+		r.is_tcp = 0;
+	else
+		HWNAT_DECLINE("replace: ip_proto %u not TCP/UDP", basic.key->ip_proto);
+
+	if (!flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_IPV4_ADDRS) ||
+	    !flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_PORTS))
+		HWNAT_DECLINE("replace: missing address/port keys");
+	flow_rule_match_ipv4_addrs(rule, &addrs);
+	flow_rule_match_ports(rule, &ports);
+
+	flow_action_for_each(i, act, &rule->action) {
+		switch (act->id) {
+		case FLOW_ACTION_MANGLE:
+			switch (act->mangle.htype) {
+			case FLOW_ACT_MANGLE_HDR_TYPE_ETH:
+				hwnat_mangle_eth(act, &eth);
+				break;
+			case FLOW_ACT_MANGLE_HDR_TYPE_IP4:
+				if (act->mangle.offset == offsetof(struct iphdr, saddr))
+					memcpy(&nat_src, &act->mangle.val, 4);
+				else if (act->mangle.offset == offsetof(struct iphdr, daddr))
+					memcpy(&nat_dst, &act->mangle.val, 4);
+				else
+					HWNAT_DECLINE("replace: ip mangle off %u",
+						      act->mangle.offset);
+				break;
+			case FLOW_ACT_MANGLE_HDR_TYPE_TCP:
+			case FLOW_ACT_MANGLE_HDR_TYPE_UDP: {
+				u32 val = ntohl(act->mangle.val);
+
+				if (act->mangle.offset == 0) {
+					if (act->mangle.mask == ~htonl(0xffff))
+						nat_dport = cpu_to_be16(val);
+					else
+						nat_sport = cpu_to_be16(val >> 16);
+				} else if (act->mangle.offset == 2) {
+					nat_dport = cpu_to_be16(val);
+				} else {
+					HWNAT_DECLINE("replace: l4 mangle off %u",
+						      act->mangle.offset);
+				}
+				break;
+			}
+			default:
+				HWNAT_DECLINE("replace: mangle htype %u", act->mangle.htype);
+			}
+			break;
+		case FLOW_ACTION_REDIRECT:
+			r.out_dev = act->dev;
+			have_redirect = true;
+			break;
+		case FLOW_ACTION_CSUM:
+			break;
+		case FLOW_ACTION_PPPOE_PUSH:
+			r.wan_pppoe = true;
+			r.pppoe_sid = act->pppoe.sid;
+			break;
+		default:
+			/* VLAN push/pop and anything else: leave it in software. */
+			HWNAT_DECLINE("replace: action id %u unsupported", act->id);
+		}
+	}
+
+	if (!have_redirect || !r.out_dev)
+		HWNAT_DECLINE("replace: no redirect action");
+
+	msrc_ip   = ntohl(addrs.key->src);
+	mdst_ip   = ntohl(addrs.key->dst);
+	msrc_port = ntohs(ports.key->src);
+	mdst_port = ntohs(ports.key->dst);
+
+	/*
+	 * Is this the reply half of a flow whose rows are already installed?
+	 *
+	 * A bidirectional flow is offered as two independent rules and BOTH must
+	 * be accepted or the kernel keeps the whole flow in software. The reply
+	 * rule un-NATs, so it rewrites the DESTINATION -- which the shape check
+	 * below rejects. Match it against the installed pair FIRST: its match
+	 * tuple is {remote -> external:G}, the exact mirror of what we recorded.
+	 * (nf_flow_table offers the original direction first, so by the time the
+	 * reply arrives the pair exists.)
+	 */
+	mutex_lock(&rtl865x_hal_lock);
+	list_for_each_entry(slot, &hwnat_flows, list) {
+		if (slot->is_tcp != r.is_tcp)
+			continue;
+		if (slot->rem_ip != msrc_ip || slot->rem_port != msrc_port ||
+		    slot->ext_ip != mdst_ip || slot->gport != mdst_port)
+			continue;
+		slot->cookie_in = cls->cookie;
+		mutex_unlock(&rtl865x_hal_lock);
+		return 0;
+	}
+	mutex_unlock(&rtl865x_hal_lock);
+
+	/*
+	 * Masquerade shape only: the source address and port are rewritten and the
+	 * destination is not. A DNAT/port-forward rewrites the destination, and the
+	 * ASIC row pair this driver programs cannot express that, so it stays in
+	 * software.
+	 */
+	if (nat_dst || nat_dport)
+		HWNAT_DECLINE("replace: destination NAT not supported");
+	if (!nat_src || !nat_sport)
+		HWNAT_DECLINE("replace: not a source-NAT rule");
+
+	r.int_ip   = msrc_ip;
+	r.rem_ip   = mdst_ip;
+	r.int_port = msrc_port;
+	r.rem_port = mdst_port;
+	r.ext_ip   = ntohl(nat_src);
+	r.gport    = ntohs(nat_sport);
+	ether_addr_copy(r.wan_peer_mac, eth.h_dest);
+
+	if (is_zero_ether_addr(r.wan_peer_mac))
+		HWNAT_DECLINE("replace: no WAN next-hop MAC in the rule");
+
+	idev = dev_get_by_index(dev_net(r.out_dev), meta.key->ingress_ifindex);
+	if (!idev)
+		HWNAT_DECLINE("replace: ingress ifindex %u is gone",
+			      meta.key->ingress_ifindex);
+	r.in_dev = idev;
+
+	rc = hwnat_lan_mac(idev, r.int_ip, r.lan_peer_mac);
+	if (rc) {
+		dev_put(idev);
+		HWNAT_DECLINE("replace: no neighbour entry for %pI4h on %s",
+			      &r.int_ip, idev->name);
+	}
+
+	rc = hwnat_add_flow(&r, cls->cookie);
+	dev_put(idev);
+
+	return rc;
+}
+
+static int hwnat_flow_stats(struct flow_cls_offload *cls)
+{
+	struct asic_napt_tcpudp e;
+	struct hwnat_slot *slot;
+	u64 lastused = 0;
+
+	/*
+	 * The ASIC keeps no per-flow byte or packet counters, only a 6-bit aging
+	 * counter that reloads on a hit. Report activity through lastused and
+	 * leave the counters at zero -- which is why conntrack accounting freezes
+	 * on an offloaded flow, exactly as it did on the 4.14 port.
+	 */
+	mutex_lock(&rtl865x_hal_lock);
+	list_for_each_entry(slot, &hwnat_flows, list) {
+		if (slot->cookie_out != cls->cookie && slot->cookie_in != cls->cookie)
+			continue;
+		if (!rtl865x_napt_read(slot->idx_out, &e) && e.valid &&
+		    (e.agingTime >= RTL865X_NAPT_AGING_RELOAD ||
+		     e.agingTime > slot->last_aging))
+			lastused = jiffies;
+		break;
+	}
+	mutex_unlock(&rtl865x_hal_lock);
+
+	flow_stats_update(&cls->stats, 0, 0, 0, lastused, FLOW_ACTION_HW_STATS_IMMEDIATE);
+
 	return 0;
 }
 
-int rtl819x_hwnat_flow_offload(enum flow_offload_type type,
-			       struct flow_offload *flow,
-			       struct flow_offload_hw_path *src,
-			       struct flow_offload_hw_path *dest)
+static int hwnat_flow_block_cb(enum tc_setup_type type, void *type_data, void *cb_priv)
 {
-	switch (type) {
-	case FLOW_OFFLOAD_ADD:
-		return hwnat_add_flow(flow, src, dest);
-	case FLOW_OFFLOAD_DEL:
-		return hwnat_del_flow(flow);
+	struct flow_cls_offload *cls = type_data;
+
+	if (type != TC_SETUP_CLSFLOWER)
+		return -EOPNOTSUPP;
+
+	switch (cls->command) {
+	case FLOW_CLS_REPLACE:
+		return hwnat_flow_replace(cls);
+	case FLOW_CLS_DESTROY:
+		return hwnat_del_cookie(cls->cookie);
+	case FLOW_CLS_STATS:
+		return hwnat_flow_stats(cls);
 	default:
 		return -EOPNOTSUPP;
 	}
 }
 
-/* ------------------------------------------------------------------ step-4 handshake */
+static LIST_HEAD(hwnat_block_cb_list);
 
 /*
- * Registration handshake with xt_FLOWOFFLOAD (=m). We are =y and cannot link that module's
- * EXPORT'd flow_offload_lookup() nor its file-static nf_flowtable, so the module hands us
- * {&nf_flowtable, flow_offload_lookup} at its init and retracts them at its exit (see
- * hack-4.14/650-netfilter-add-xt_OFFLOAD-target.patch and the prototypes in rtl819x_hwnat.h).
- * Serialized against the aging worker by rtl865x_hal_lock, so once unregister() returns no
- * poll can dereference the module state it is about to free.
+ * fw4 emits `flowtable { devices = { lan1..lan4, wan }; flags offload; }`, and
+ * DSA forwards the resulting block bind from each user port to this conduit, so
+ * all five binds land on one netdev and share a single callback.
  */
-void rtl819x_hwnat_flowtable_register(struct nf_flowtable *ft, rtl819x_flow_lookup_fn lookup)
+static int hwnat_setup_tc_block(struct net_device *dev, struct flow_block_offload *f)
 {
-	mutex_lock(&rtl865x_hal_lock);
-	hwnat_flowtable   = ft;
-	hwnat_flow_lookup = lookup;
-	mutex_unlock(&rtl865x_hal_lock);
-	pr_info("rtl819x hwnat: step-4 timeout-refresh armed (xt_FLOWOFFLOAD flowtable registered)\n");
-}
-EXPORT_SYMBOL_GPL(rtl819x_hwnat_flowtable_register);
+	struct flow_block_cb *block_cb;
 
-void rtl819x_hwnat_flowtable_unregister(void)
-{
-	mutex_lock(&rtl865x_hal_lock);
-	hwnat_flowtable   = NULL;
-	hwnat_flow_lookup = NULL;
-	mutex_unlock(&rtl865x_hal_lock);
-}
-EXPORT_SYMBOL_GPL(rtl819x_hwnat_flowtable_unregister);
+	if (f->binder_type != FLOW_BLOCK_BINDER_TYPE_CLSACT_INGRESS)
+		return -EOPNOTSUPP;
 
-/*
- * Step 4: refresh the software flow's GC timeout so a flow the ASIC is still actively
- * forwarding is not torn down + re-learned every NF_FLOW_TIMEOUT (~30 s). UAF-safe: never
- * touch slot->flow (it may be freed); look the flow up by our by-value ORIGINAL-tuple copy
- * on the module's table under rcu_read_lock. flow_offload_lookup() returns only a still-
- * linked, non-DYING/TEARDOWN flow, and because flow_offload_free() defers with kfree_rcu(),
- * the RCU read-side section pins the flow across the timeout store. Caller holds
- * rtl865x_hal_lock (so both handshake pointers are stable here). No-op until the module
- * has registered.
- */
-static void hwnat_refresh_timeout(struct hwnat_slot *slot)
-{
-	struct flow_offload_tuple_rhash *th;
-	struct flow_offload *flow;
+	f->driver_block_list = &hwnat_block_cb_list;
 
-	if (!hwnat_flow_lookup || !hwnat_flowtable)
-		return;
+	switch (f->command) {
+	case FLOW_BLOCK_BIND:
+		block_cb = flow_block_cb_lookup(f->block, hwnat_flow_block_cb, dev);
+		if (block_cb) {
+			flow_block_cb_incref(block_cb);
+			return 0;
+		}
+		block_cb = flow_block_cb_alloc(hwnat_flow_block_cb, dev, dev, NULL);
+		if (IS_ERR(block_cb))
+			return PTR_ERR(block_cb);
 
-	rcu_read_lock();
-	th = hwnat_flow_lookup(hwnat_flowtable, &slot->orig_tuple);
-	if (th) {
-		flow = container_of(th, struct flow_offload, tuplehash[th->tuple.dir]);
-		flow->timeout = (u32)jiffies + NF_FLOW_TIMEOUT;
+		flow_block_cb_incref(block_cb);
+		flow_block_cb_add(block_cb, f);
+		list_add_tail(&block_cb->driver_list, &hwnat_block_cb_list);
+		return 0;
+	case FLOW_BLOCK_UNBIND:
+		block_cb = flow_block_cb_lookup(f->block, hwnat_flow_block_cb, dev);
+		if (!block_cb)
+			return -ENOENT;
+		if (!flow_block_cb_decref(block_cb)) {
+			flow_block_cb_remove(block_cb, f);
+			list_del(&block_cb->driver_list);
+		}
+		return 0;
+	default:
+		return -EOPNOTSUPP;
 	}
-	rcu_read_unlock();
+}
+
+int rtl819x_hwnat_setup_tc(struct net_device *dev, enum tc_setup_type type,
+			   void *type_data)
+{
+	if (type != TC_SETUP_FT)
+		return -EOPNOTSUPP;
+
+	return hwnat_setup_tc_block(dev, type_data);
 }
 
 /* ------------------------------------------------------------------ aging worker */
@@ -751,7 +939,6 @@ static void hwnat_aging_work_fn(struct work_struct *w)
 			 * is live in silicon. Push its software GC timeout out so the flowtable
 			 * GC doesn't tear it down at 30 s idle and force a software re-learn. */
 			active++;
-			hwnat_refresh_timeout(slot);
 		}
 		slot->last_aging = e.agingTime;
 	}

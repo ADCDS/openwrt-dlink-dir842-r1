@@ -1,0 +1,35 @@
+#!/bin/sh /etc/rc.common
+# ASIC gateway scaffolding.
+#
+# The switch core comes out of bring-up with MSCR = EN_L2 only, so it bridges
+# but does no L3 or L4 processing at all. Reading /proc/rtl865x_gw programs the
+# router scaffolding -- netif MACs, L2/L3 routes, next hops, ACL permits -- and
+# sets EN_L3|EN_L4|EN_IN_ACL. Without it the hardware NAT rows can be installed
+# perfectly and the ASIC will still never look at them, because the L4 stage
+# that would do the lookup is switched off. The 4.14 port did this from
+# rc.local; the DSA port needs it just the same.
+#
+# It has to run AFTER netifd has addressed br-lan and wan, because the
+# programming reads those netdevs' MACs.
+START=97
+USE_PROCD=1
+
+start_service() {
+	[ -e /proc/rtl865x_gw ] || return 0
+
+	# Wait for the L3 interfaces the programming reads its MACs from.
+	local i=0
+	while [ $i -lt 30 ]; do
+		[ -e /sys/class/net/br-lan ] && [ -e /sys/class/net/wan ] && break
+		i=$((i + 1))
+		sleep 1
+	done
+
+	procd_open_instance
+	procd_set_param command /bin/sh -c 'cat /proc/rtl865x_gw >/dev/null'
+	procd_close_instance
+}
+
+service_triggers() {
+	procd_add_reload_trigger network
+}

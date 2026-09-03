@@ -35,12 +35,25 @@ extern bool rtl819x_hwnat_enabled;
 #endif
 
 /*
- * Flow offload entry point. The 4.14 port hooked ndo_flow_offload, a downstream
- * interface that no longer exists; the replacement is ndo_setup_tc(TC_SETUP_FT)
- * feeding a flow_block callback, which is also what DSA user ports forward to
- * their conduit. Until that lands rtl819x_hwnat.c is out of the build and these
- * two calls are no-ops, so the datapath runs entirely in software.
+ * Flow offload entry point.
+ *
+ * The 4.14 port hooked ndo_flow_offload, a downstream interface that no longer
+ * exists. Its replacement is ndo_setup_tc(TC_SETUP_FT), which hands the driver a
+ * flow block; nf_flow_table then offers each NAT flow through that block as a
+ * tc-flower rule. It is also what DSA user ports forward to their conduit, so
+ * one callback on eth0 serves lan1..lan4 and wan together.
  */
+#ifdef CONFIG_RTL819X_HWNAT
+int rtl819x_hwnat_setup_tc(struct net_device *dev, enum tc_setup_type type,
+			   void *type_data);
+#else
+static inline int rtl819x_hwnat_setup_tc(struct net_device *dev,
+					 enum tc_setup_type type,
+					 void *type_data)
+{
+	return -EOPNOTSUPP;
+}
+#endif
 
 /* Lifecycle, driven from rtl819x_eth_open()/rtl819x_eth_stop(). start() arms the
  * offload (aging worker) once the datapath is up; stop() tears down every installed
@@ -55,26 +68,5 @@ void rtl819x_hwnat_stop(void);
 #else
 static inline void rtl819x_hwnat_stop(void) { }
 #endif
-
-/*
- * M7.3 step 4 — software-flow timeout refresh, built-in <-> module handshake.
- *
- * The driver is CONFIG_NET_RTL819X=y but nf_flow_table / xt_FLOWOFFLOAD are =m, so it can
- * neither link the flow table's EXPORT_SYMBOL_GPL'd flow_offload_lookup() nor reach
- * xt_FLOWOFFLOAD's file-static struct nf_flowtable. The linkage is INVERTED: the driver
- * EXPORTs the two functions below and xt_FLOWOFFLOAD's module init/exit hands over
- * {&nf_flowtable, flow_offload_lookup} (see hack-4.14/650-netfilter-add-xt_OFFLOAD-target.patch).
- * Guarded by rtl865x_hal_lock; the aging worker uses them (under RCU) to keep an actively
- * ASIC-forwarded flow's software timeout fresh so it isn't GC'd + re-learned every ~30 s.
- * Structs only forward-declared here (real defs come from <net/netfilter/nf_flow_table.h>,
- * which rtl819x_hwnat.c includes BEFORE this header, so the fwd-decls are harmless no-ops). */
-struct nf_flowtable;
-struct flow_offload_tuple;
-struct flow_offload_tuple_rhash;
-typedef struct flow_offload_tuple_rhash *(*rtl819x_flow_lookup_fn)(
-		struct nf_flowtable *ft, struct flow_offload_tuple *tuple);
-void rtl819x_hwnat_flowtable_register(struct nf_flowtable *ft,
-				      rtl819x_flow_lookup_fn lookup);
-void rtl819x_hwnat_flowtable_unregister(void);
 
 #endif /* _RTL819X_HWNAT_H */
