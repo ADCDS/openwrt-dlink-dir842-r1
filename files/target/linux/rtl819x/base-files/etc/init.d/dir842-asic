@@ -1,35 +1,102 @@
 #!/bin/sh /etc/rc.common
-# ASIC gateway scaffolding.
+# DIR-842 R1 (RTL8197F) — bring the ASIC hardware datapath up at boot, in order.
 #
-# The switch core comes out of bring-up with MSCR = EN_L2 only, so it bridges
-# but does no L3 or L4 processing at all. Reading /proc/rtl865x_gw programs the
-# router scaffolding -- netif MACs, L2/L3 routes, next hops, ACL permits -- and
-# sets EN_L3|EN_L4|EN_IN_ACL. Without it the hardware NAT rows can be installed
-# perfectly and the ASIC will still never look at them, because the L4 stage
-# that would do the lookup is switched off. The 4.14 port did this from
-# rc.local; the DSA port needs it just the same.
+# The order is the whole point of this file. Each step below was measured on the
+# 4.14 port (docs/HWNAT-OFFLOAD.md §8, "Boot ritual") and every one of them still
+# applies under DSA:
 #
-# It has to run AFTER netifd has addressed br-lan and wan, because the
-# programming reads those netdevs' MACs.
+#   0. MAC poll — gw_prog copies the CURRENT netdev MACs into the ASIC netifs. Run
+#      it before netifd has applied the per-unit flash MACs and the ASIC keeps the
+#      fallback constants while Linux moves on; an ASIC-vs-Linux netif MAC mismatch
+#      blackholes the datapath completely.
+#   1. fabric_reset 3 — MEASURED-REQUIRED: without it a fresh boot forwards NOTHING
+#      (100% loss on every path, despite links up, correct VLANs and a gw_prog
+#      readback that says PASS). Level 3 is engine reinit + CPUICR soft reset +
+#      full fabric reset, and it re-arms the gw tables in-kernel, which is why
+#      gw_prog must FOLLOW it.
+#   2. gw_prog (/proc/rtl865x_gw) — netifs, routes, L2 nexthops, ACL ranges, and
+#      MSCR EN_L3|EN_L4|EN_IN_ACL. Without it the switch core is EN_L2 only: it
+#      bridges, but it does no L3 or L4 processing, so hardware NAT rows can be
+#      installed perfectly and never be looked at.
+#      ★ This WIPES the ASIC L2 tables, so the warm-up MUST come after it.
+#   3. warm — the ASIC L2/ARP entries start empty, and cold unicast is not
+#      delivered until traffic has flowed. A few box-originated pings prime them;
+#      without this a freshly booted box reads as 100% packet loss.
+#   4. hwnat on — LAST, strictly after the warm. Arming against cold tables kills
+#      the datapath outright (measured).
+#
+# The 4.14 sequence opened with `swconfig dev switch0 set apply 1` to clear a
+# wedged trunk->jack forwarding state in the external RTL8367S. There is no
+# swconfig under DSA and no userspace equivalent; the switch driver programs that
+# state at probe.
 START=97
-USE_PROCD=1
 
-start_service() {
-	[ -e /proc/rtl865x_gw ] || return 0
+asic_warm_hosts() {
+	local h
+	[ -n "$WARM_HOSTS" ] && { echo "$WARM_HOSTS"; return; }
+	h="$(uci -q get dir842.asic.warm_hosts)"
+	[ -n "$h" ] && { echo "$h"; return; }
+	echo "192.168.0.2 172.16.0.2"
+}
 
-	# Wait for the L3 interfaces the programming reads its MACs from.
+# Router or bridge. Everything gw_prog programs is meaningless on a bridged AP,
+# and one side effect is actively harmful there: gw_prog sets TEACR bit 0, which
+# FREEZES L2/ARP aging. That protects the static nexthop chain in the router
+# datapath; on a bridge it turns a transient wrong L2 row into a permanent one.
+# ⚠ Switching router->bridge needs a REBOOT: nothing clears the aging freeze.
+asic_role() {
+	local r
+	r="$(uci -q get dir842.asic.role)"
+	case "$r" in
+	router|bridge) echo "$r"; return ;;
+	esac
+	if uci -q get network.wan >/dev/null 2>&1; then echo router; else echo bridge; fi
+}
+
+wait_netif() {
 	local i=0
-	while [ $i -lt 30 ]; do
-		[ -e /sys/class/net/br-lan ] && [ -e /sys/class/net/wan ] && break
+	while [ $i -lt 40 ]; do
+		[ -e /sys/class/net/br-lan/address ] && [ -e /sys/class/net/wan/address ] && break
 		i=$((i + 1))
 		sleep 1
 	done
-
-	procd_open_instance
-	procd_set_param command /bin/sh -c 'cat /proc/rtl865x_gw >/dev/null'
-	procd_close_instance
+	sleep 2
 }
 
-service_triggers() {
-	procd_add_reload_trigger network
+asic_program() {
+	if [ "$ROLE" = "router" ]; then
+		echo 3 > /sys/module/rtl819x/parameters/fabric_reset 2>/dev/null
+		sleep 3
+		cat /proc/rtl865x_gw >/dev/null 2>&1
+	else
+		logger -t dir842-asic "bridge role: skipping fabric reset and gw_prog (L2 aging left ENABLED)"
+	fi
+}
+
+asic_warm() {
+	local h i
+	[ "$ROLE" = "router" ] || return 0
+	for i in 1 2 3; do
+		for h in $(asic_warm_hosts); do
+			ping -c2 -W1 "$h" >/dev/null 2>&1
+		done
+		sleep 1
+	done
+}
+
+start() {
+	[ -e /proc/rtl865x_gw ] || return 0
+	ROLE="$(asic_role)"
+	wait_netif
+	asic_program
+	asic_warm
+	if [ "$ROLE" = "router" ]; then
+		echo 1 > /sys/module/rtl819x/parameters/hwnat 2>/dev/null
+	fi
+	logger -t dir842-asic "datapath armed (role=$ROLE hwnat=$(cat /sys/module/rtl819x/parameters/hwnat 2>/dev/null))"
+}
+
+stop() {
+	echo 0 > /sys/module/rtl819x/parameters/hwnat 2>/dev/null
+	logger -t dir842-asic "offload disarmed"
 }
