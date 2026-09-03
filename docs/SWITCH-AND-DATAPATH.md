@@ -1,5 +1,12 @@
 # The switch model and the wired datapath: CPU-tag mode, the RGMII trunk, VLANs and boot-medium endianness
 
+> ⚠️ **Describes the kernel 4.14 / swconfig product on `main`.** On `port/main-6.18` the
+> RTL8367S is driven by mainline `rtl8365mb` over DSA — real per-jack switch ports, no VLAN
+> cascade, no `swconfig`. The CPU-tag hardware mechanism this file documents (the SoC MAC
+> stripping/inserting the 4-byte Realtek tag, the RGMII trunk bring-up, the register-level
+> facts) is unchanged silicon and still applies; the *code* driving it does not. See
+> [`PORT-MAIN-6.18-STATUS.md`](PORT-MAIN-6.18-STATUS.md) for the current model.
+
 How the DIR-842 R1's two cascaded switches are actually driven by the shipped firmware:
 the CPU-tag / port0-router model that replaced the original VID-cascade ("Fork A"), the
 RGMII trunk bring-up and the two ways it was broken, the VLAN/MAC/L2 plumbing, and the

@@ -1,5 +1,13 @@
 # The bench: hardware, wiring, serial, power, build container, and the automation loop
 
+> ⚠️ **On `port/main-6.18`, the physical rig (UART, power plug, loader protocol) below is
+> unchanged and accurate. Two things are not:** the build-container section (§7) describes
+> the `main` branch's Debian-11/Docker/`ggbruno` toolchain — this branch builds natively
+> against `openwrt/openwrt`, no container, see the root README's *Building*; and the loader
+> load/jump address is **`0x82000000`** here, not the `0x81000000` this file quotes — this
+> port moved it up 16 MB once the 5 GHz radio's decompressed kernel outgrew the old budget.
+> `ramboot.sh`/`flash-nor.sh` at the repo root already use the right address.
+
 Everything needed to physically reproduce or resume work on this port: the rig, the console,
 the unattended boot/flash loop, the build environment, and the operational gotchas that cost
 the most time. The bench is not incidental to the result — an unattended power-cycle → catch →

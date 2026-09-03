@@ -1,5 +1,12 @@
 # WiFi: cracking RTL8197F + PCIe, and running two incompatible radios at once
 
+> ⚠️ **Describes the kernel 4.14 product on `main`, which is dual-band.** On
+> `port/main-6.18` only the 5 GHz radio exists — the vendor `rtl8192cd` 2.4 GHz driver has
+> not been ported (M7, not started; see
+> [`PORT-MAIN-6.18-STATUS.md`](PORT-MAIN-6.18-STATUS.md) §6). The PCIe/RTL8822BE bring-up
+> facts below (register addresses, the crystal frequency, the blank-efuse RFE quirk) carried
+> forward into the new port unchanged and are still accurate for the 5 GHz side.
+
 How the 5 GHz RTL8822BE was made to enumerate on a SoC where PCIe had never worked in
 OpenWrt, how the on-SoC 2.4 GHz radio was brought up with the vendor `rtl8192cd` driver,
 and how two radios with no shared abstraction — one mac80211, one WEXT — are kept from

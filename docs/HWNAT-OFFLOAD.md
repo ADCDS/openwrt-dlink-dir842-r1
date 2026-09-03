@@ -1,5 +1,15 @@
 # Hardware NAT offload on the RTL8197F — how it works and how it was solved
 
+> ⚠️ **Describes the kernel 4.14 / `ndo_flow_offload` product on `main`, where this is
+> solved and shipping.** On `port/main-6.18` the offload front end was rebuilt on the
+> current kernel's `ndo_setup_tc(TC_SETUP_FT)` interface, and the ASIC static
+> configuration this file documents (routes, ARP windows, extIP, the numeric-byte-order
+> lesson in §4, the `sel_cpu_reason` trap-reason instrument in §7) was followed and matches
+> exactly — but the datapath does not accelerate anything yet on the new port. This file was
+> the answer key that found and fixed a boot-sequencing bug the new port had reintroduced;
+> see [`PORT-MAIN-6.18-STATUS.md`](PORT-MAIN-6.18-STATUS.md) §4 for the new port's exact,
+> narrower, still-open failure signature.
+
 **Status:** ✅ SOLVED and shipping. The RTL8197F switch core routes *and* source-NATs in
 silicon at gigabit line rate under mainline OpenWrt: **891 Mbit up / 896 Mbit down with
 0.0 % of payload bytes crossing the CPU**, CPU ~0.3 % busy. Believed to be the first

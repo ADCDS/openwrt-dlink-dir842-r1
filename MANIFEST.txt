@@ -1,164 +1,141 @@
-D-Link DIR-842 rev R1 (RTL8197F) OpenWrt port — overlay manifest
-================================================================
-Base:   ggbruno/openwrt @ 8a0ccb93f3431bcf8f5c5d03d4acc2c8e442de67 (branch Realtek)
-        the only OpenWrt tree with RTL819x/RTL8197F target support
-Device: RTL8197F SoC (MIPS 24Kc, mipsel) + on-SoC 2.4 GHz WMAC + RTL8822BE 5 GHz
-        (PCIe, rtw88) + external RTL8367S 5-port GbE switch on one RGMII trunk
-Usage:  ./build.sh   (clones ggbruno, checks out 8a0ccb9, overlays files/, builds)
+D-Link DIR-842 rev R1 (RTL8197F) OpenWrt port — overlay manifest (branch port/main-6.18)
+=========================================================================================
+Base:   openwrt/openwrt @ 928bb37350d20a2a7737e3a3b5329261572ca533 (main, kernel 6.18.44,
+        backports 7.2, mipsel_24kc musl gcc 14.4.0) — mainline `arch/mips/generic`, not a
+        private platform.
+Device: RTL8197F SoC (MIPS 24Kc, mipsel) + RTL8822BE 5 GHz (PCIe, rtw88) + external
+        RTL8367S 5-port GbE switch on mainline DSA (`rtl8365mb`/`tag_rtl8_4`).
+        No 2.4 GHz driver on this branch — see docs/PORT-MAIN-6.18-STATUS.md §6.
+Usage:  ./build.sh   (clones openwrt/openwrt, checks out the pin above, overlays files/,
+                       builds natively — no container)
 
-Every path below is relative to files/ and lands at the same path inside the
-OpenWrt tree. Sizes in bytes.
+Every path below is relative to files/ and lands at the same path inside the OpenWrt
+tree, except the repo-root section. Byte-size annotations are omitted for source trees
+that ship whole (see the vendor-source note); `git log -- <path>` is the authoritative
+size/history record for anything else.
 
-VENDOR SOURCE, REDISTRIBUTED SINCE 2026-08-16 (the 2.4 GHz radio builds from
-this repo; the licensing rationale is in README "Building"):
-  target/linux/realtek/files-4.14/include/net/rtl/*                37 headers
-  target/linux/realtek/files-4.14/drivers/net/wireless/rtl8192cd/* 1117 files
-  Realtek copyright notices preserved intact. The core driver + phydm carry
-  explicit GPLv2 grant headers; MODULE_LICENSE("GPL"); one chip-firmware blob
-  (WlanHAL/Data/8197F/rtl8197Ffw.bin). The two port patches in the repo root
-  remain as the historical record of the 4.14 port (an earlier VENDOR_SDK=
-  import was verified broken and withdrawn 2026-08-02;
-  docs/WIFI-DUAL-BAND.md §9 item 5).
-  Not itemized file-by-file below — the directory trees ship whole.
+VENDOR SOURCE, PRESENT BUT NOT PORTED (M7 — see docs/PORT-MAIN-6.18-STATUS.md §6):
+  target/linux/rtl819x/files-6.18/drivers/net/wireless/rtl8192cd/*   1117 files
+  target/linux/rtl819x/files-6.18/include/net/rtl/*                    41 files
+  target/linux/rtl819x/files-6.18/include/net80211/*                    4 files
+  Carried forward verbatim from `main` in one restructuring commit (`0e95e70`); untouched
+  since. Still targets 4.14-era kernel APIs and will not currently compile — Kconfig-gated
+  off in seed.config. Same redistribution basis as `main` (see root README, *Credits &
+  license*): Realtek copyright notices preserved intact; the core driver + phydm carry
+  explicit GPLv2 grant headers; one chip-firmware blob
+  (rtl8192cd/WlanHAL/Data/8197F/rtl8197Ffw.bin).
 
 REPO ROOT (not part of the overlay)
------------------------------------
-  build.sh                          clone ggbruno + overlay files/ + build
-  seed-m5.config                    the .config this port actually ships
-  feeds.conf                        luci+packages pinned to the openwrt-19.07
-                                    branch (Lua-era LuCI); base is commit-pinned
-  tools/sign-dlink.py               D-Link boot trailer: MD5(key || cvimg) + 00C0FFEE
-  g4-rtl-headers-4.14-port.patch    our 4.14 port of the vendor rtl headers
-                                    (record; applies to the destination layout,
-                                    not wired into build.sh)
-  g3-rtl8192cd-4.14-port.patch      our 4.14 port of the vendor WMAC driver
-                                    (record; only applies to the 8devices-vintage
-                                    tree it was developed on)
-  Dockerfile                        Debian 11 build container (docker build -t owrt-dir842 .)
-  LICENSE                           GPL-2.0
-  README.md / docs/                 reader docs + the engineering record
-  images/                           sha256sums + provenance for the release
-                                    artifacts (the .bin files are release
-                                    assets, not committed)
-  ramboot.sh, flash-nor.sh          bench automation: loader catch -> TFTP ->
-  bootgate.sh, bench-up.sh          RAM-boot / NOR-burn, cold-boot gate, bench
-  bench-wan-emu.sh                  bring-up. ⚠ written for the author's rig
-                                    (serial device, NIC and smart-plug CLI are
-                                    hardcoded/env-overridable) — read them as
-                                    reference procedures, not turnkey tools.
+------------------------------------
+  build.sh                     clone openwrt/openwrt + overlay files/ + build
+  seed.config                  release package set (both radios minus 2.4 GHz, LuCI,
+                                firewall4, PPPoE) — see its own header comment
+  seed-min.config               bring-up set: no LuCI, no wireless, fits a RAM boot
+  tools/overlay-sync.sh         rsync openwrt/target/linux/rtl819x/ back into files/
+                                after in-tree edits (make kernel_oldconfig, quilt)
+  tools/sign-dlink.py           D-Link boot trailer: MD5(key || cvimg) + 00C0FFEE
+  ramboot.sh / flash-nor.sh / bootgate.sh
+                                unattended power-cycle -> catch -> TFTP -> boot/burn
+                                automation over the smart plug + UART; see docs/BENCH.md
+  docs/PORT-MAIN-6.18-STATUS.md the current, authoritative status doc for this branch —
+                                read this before anything else under docs/, which
+                                otherwise describes the kernel-4.14 product on `main`
 
-OVERLAY (files/)
-----------------
-    4774  package/firmware/linux-firmware/qca_ath10k.mk
-    3097  package/kernel/mac80211/patches/realtek/03-rtw8822b-blank-efuse-rfe.patch
-     845  package/kernel/mac80211/patches/realtek/04-rtw88-random-mac-blank-efuse.patch
-    2253  target/linux/generic/files/drivers/mtd/mtdsplit/Kconfig
-     789  target/linux/generic/files/drivers/mtd/mtdsplit/Makefile
-    4673  target/linux/generic/files/drivers/mtd/mtdsplit/mtdsplit_cvimg.c
-   36358  target/linux/generic/files/drivers/net/phy/rtl8366_smi.c
-    5102  target/linux/generic/files/drivers/net/phy/rtl8366_smi.h
-   72552  target/linux/generic/files/drivers/net/phy/rtl8367b.c
-   15122  target/linux/generic/hack-4.14/650-netfilter-add-xt_OFFLOAD-target.patch
-    3437  target/linux/realtek/base-files/etc/board.d/01_leds
-    3421  target/linux/realtek/base-files/etc/board.d/02_network
-    5654  target/linux/realtek/base-files/etc/init.d/dir842-asic
-    755  target/linux/realtek/base-files/etc/rc.local
-     359  target/linux/realtek/base-files/etc/sysctl.d/30-hwnat.conf
-    3738  target/linux/realtek/base-files/etc/uci-defaults/09_wireless-dualband-dir842
-    2861  target/linux/realtek/base-files/etc/uci-defaults/10_wireless-5g-ifname-dir842
-   13952  target/linux/realtek/base-files/etc/uci-defaults/99-dir842-m5
-    9686  target/linux/realtek/base-files/lib/netifd/wireless/rtl8192cd.sh
-    1024  target/linux/realtek/base-files/lib/upgrade/platform.sh
-    6750  target/linux/realtek/dts/GWR1200ACV1.dts
-    8206  target/linux/realtek/dts/RTL8197F.dtsi
-    1994  target/linux/realtek/files-4.14/arch/mips/boot/dts/realtek/RTL8197F.dtsi
-    1685  target/linux/realtek/files-4.14/arch/mips/include/asm/mach-realtek/realtek_mem.h
-   19065  target/linux/realtek/files-4.14/arch/mips/include/asm/mach-rtl8197f/bspchip.h
-   13282  target/linux/realtek/files-4.14/arch/mips/pci/pci-realtek.c
-    3531  target/linux/realtek/files-4.14/arch/mips/realtek/setup.c
-     710  target/linux/realtek/files-4.14/drivers/net/ethernet/rtl819x/Kconfig
-     223  target/linux/realtek/files-4.14/drivers/net/ethernet/rtl819x/Makefile
-   70463  target/linux/realtek/files-4.14/drivers/net/ethernet/rtl819x/rtl819x-eth.c
-   37840  target/linux/realtek/files-4.14/drivers/net/ethernet/rtl819x/rtl819x_hwnat.c
-    3772  target/linux/realtek/files-4.14/drivers/net/ethernet/rtl819x/rtl819x_hwnat.h
-   13380  target/linux/realtek/files-4.14/drivers/net/ethernet/rtl819x/rtl819x_regs.h
-   26589  target/linux/realtek/files-4.14/drivers/net/ethernet/rtl819x/rtl819x_swnic.c
-   12731  target/linux/realtek/files-4.14/drivers/net/ethernet/rtl819x/rtl819x_swnic.h
-   85926  target/linux/realtek/files-4.14/drivers/net/ethernet/rtl819x/rtl865x_asichal.c
-   11370  target/linux/realtek/files-4.14/drivers/net/ethernet/rtl819x/rtl865x_asichal.h
-     800  target/linux/realtek/files-4.14/drivers/net/wireless/rtl8197f/Kconfig
-      82  target/linux/realtek/files-4.14/drivers/net/wireless/rtl8197f/Makefile
-   15330  target/linux/realtek/files-4.14/drivers/net/wireless/rtl8197f/rtl8197f-wmac.c
-   41379  target/linux/realtek/files-4.14/drivers/spi/spi-sheipa.c
-    8171  target/linux/realtek/files-4.14/include/net80211/ieee80211_crypto.h
-   31486  target/linux/realtek/files-4.14/include/net80211/ieee80211.h
-    9905  target/linux/realtek/files-4.14/include/net80211/_ieee80211.h
-   31374  target/linux/realtek/files-4.14/include/net80211/ieee80211_ioctl.h
-   13003  target/linux/realtek/image/Makefile
-     1803  target/linux/realtek/Makefile
-    1528  target/linux/realtek/modules.mk
-     892  target/linux/realtek/patches-4.14/0006-net-add-rtl819x-eth.patch
-     878  target/linux/realtek/patches-4.14/0007-net-wireless-add-rtl8197f-wmac.patch
-    8985  target/linux/realtek/rtl8197f/config-4.14
-    2819  tools/firmware-utils/Makefile
-   15631  tools/firmware-utils/src/cvimg.c
+target/linux/rtl819x/                 the target itself (name distinct from upstream's
+                                       `target/linux/realtek`, the RTL838x/930x switch
+                                       family — different SoCs entirely)
+  Makefile, modules.mk                target definition; FEATURES incl. `pci`
+  rtl8197f/{target.mk,config-6.18}    the one subtarget; kernel .config seed
+  dts/{rtl8197f.dtsi,
+       rtl8197f_dlink_dir-842-r1.dts} SoC + board device trees
+  image/Makefile                     lzma-loader wiring, cvimg/D-Link-trailer recipes,
+                                      DEVICE_PACKAGES; loader entry 0x82000000 (moved up
+                                      16 MB from the 4.14 port's 0x81000000 once the 5 GHz
+                                      radio outgrew the old budget)
+  patches-6.18/
+    001-*                             MACH_REALTEK_RTL819X Kconfig/Makefile wiring
+                                       (select HAVE_PCI, not the 4.14-era HW_HAS_PCI name)
+    002-009                           upstream realtek/patches-6.18 032-01..08, verbatim
+                                       (irq-realtek-rtl helper/multi-parent series)
+    011                               the 8197F irqchip variant (route-value + register-
+                                       order deviations from the RTL838x family this
+                                       driver was written for)
+    012                               GPIO otto variant (native port order)
+    020                               8250_dw serial quirk (RBR/THR at index 9, LCR fixup)
+    030                               spi-sheipa Kconfig/Makefile wiring
+    040-041                           rtl819x-eth + wireless (rtl8197f wmac / rtl8192cd)
+                                       Kconfig/Makefile wiring
+    090                               skbuff panic-caller symbolization (debug aid)
+    095                               regmap: allow register writes over debugfs (bench
+                                       instrument — the only way to read the RTL8367S's
+                                       CPU-port MIB, which has no netdev)
+    700-703                           rtl8365mb: 4-byte CPU tag, indirect-poll timeout,
+                                       per-board SMI clock delay, post-reset settle
+  base-files/
+    etc/board.d/{01_leds,02_network,05_compat-version}
+                                       LED + LAN/WAN wiring, keyed on dlink,dir-842-r1;
+                                       05_compat-version records "2.0" so sysupgrade does
+                                       not refuse itself as a version change
+    etc/config/dir842                 role (router/bridge) + ASIC warm-host config,
+                                       sysupgrade-preserved
+    etc/init.d/dir842-asic             owns boot-time ASIC bring-up (fabric_reset 3 ->
+                                       gw_prog -> warm -> arm hwnat), role-aware
+    etc/uci-defaults/99-dir842        LAN 192.168.0.1/24 + 5 GHz band/channel seed,
+                                       idempotence-guarded
+    lib/upgrade/platform.sh           cr6b magic check (matches BOTH dlink,dir-842-r1 and
+                                       the legacy gwr1200ac-v1 name), REQUIRE_IMAGE_METADATA
+  rtl8192cd-files/lib/netifd/wireless/rtl8192cd.sh
+                                       the M7 netifd handler, deliberately OUTSIDE
+                                       base-files/ until the M7 package installs it — a
+                                       handler describing a driver that never appears
+                                       sends netifd into a 100%-CPU spin with no network
+                                       configuration applied at all
+  files-6.18/
+    arch/mips/generic/board-rtl819x.c  MIPS_MACHINE() board file: prom_putchar, the
+                                       CLKMANAGE swcore-clock force-on, bank-2 timer
+                                       routing, restart handler
+    arch/mips/include/asm/mach-rtl819x/{bspchip.h,rtl819x-sysc.h}
+                                       sysc register accessors (kept old REALTEK_SR_*
+                                       names so pci-realtek.c / the wmac driver compile
+                                       unchanged)
+    arch/mips/pci/pci-realtek.c        PCIe root-complex driver; ported this pass:
+                                       IS_ERR() clock check, of_irq_get() instead of a
+                                       hardcoded MIPS IP number
+    drivers/spi/spi-sheipa.{c,h}       NOR-flash SPI controller, spi-mem exec_op model
+    drivers/net/ethernet/rtl819x/      the CPU-port NIC + ASIC HAL + hardware-NAT front
+                                       end (see below)
+    drivers/net/wireless/rtl8197f/     the on-SoC WMAC platform glue (M7 dependency,
+                                       small — the 2.4 GHz baseband driver itself is the
+                                       untouched vendor tree above)
+    include/net/rtl/*, include/net80211/*
+                                       vendor headers the (unported) 2.4 GHz driver and
+                                       the ASIC HAL both reach into
 
-ANNOTATED OVERLAY (what each piece is for)
-------------------------------------------
-files/  (path-preserving overlay onto the OpenWrt tree)
-  target/linux/realtek/
-    files-4.14/arch/mips/pci/pci-realtek.c
-                  ** The PCIe RC bring-up rewrite ** — vendor reset sequence
-                  reverse-engineered from the stock kernel: PHY digital-reset
-                  release to SR+0x100, device reset = SR+0x50 bit1 (300ms), the
-                  25/40MHz PHY MDIO tuning off the bootstrap reg, and a clean
-                  bail if the link never trains. This is what makes the RTL8822BE
-                  enumerate.
-    files-4.14/arch/mips/include/asm/mach-realtek/realtek_mem.h
-                  Adds REALTEK_SR_MDIORST 0x100 (used by pci-realtek.c).
-    files-4.14/drivers/net/ethernet/rtl819x/{rtl819x-eth.c,rtl819x_swnic.c/.h,
-                  rtl819x_regs.h,Kconfig,Makefile}
-                  The carved RTL8197F NIC driver: mbuf-ring CPU-port DMA, switch
-                  VLAN-membership forwarding, IRQ-driven NAPI + a fast RX watchdog
-                  poll, and the SBFCR/PBFCR flow-control + GDSR congestion drain.
-    files-4.14/drivers/net/ethernet/rtl819x/{rtl865x_asichal.c/.h}
-                  ** The ASIC L3/L4 table engine (M6.6) ** — reverse-engineered
-                  netif/route/nexthop/ARP/L2/NAPT/extIP table access + gw_prog,
-                  the stock-equivalent HW routing/NAT datapath (/proc/rtl865x_gw),
-                  and the /proc/rtl865x_{napt,fabric} diagnostics.
-    files-4.14/drivers/net/ethernet/rtl819x/{rtl819x_hwnat.c/.h}
-                  ** Conntrack-driven hardware NAT offload (M6.6) ** — the
-                  ndo_flow_offload glue that installs/reaps per-flow ASIC NAPT
-                  rows so established flows forward + source-NAT in silicon.
-                  Runtime param rtl819x.hwnat (module default 0, but the shipped
-                  dir842-asic service arms it at boot since R4). MEASURED 891/896 Mbit
-                  at 0.0% of payload bytes through the CPU.
-    generic/files/drivers/net/phy/{rtl8367b.c,rtl8366_smi.c/.h}
-                  RTL8367S swconfig management + a forced-on debugfs for live
-                  8367S register access (the key bring-up diagnostic).
-    dts/RTL8197F.dtsi        pcie0(RTL8822BE)/pcie1(disabled)/pcie_clk=25MHz + eth node.
-    dts/GWR1200ACV1.dts      board dts (console=ttyS0,38400 bootarg).
-    patches-4.14/0006-net-add-rtl819x-eth.patch   Kbuild wiring for the eth driver.
-    rtl8197f/config-4.14     CONFIG_NET_RTL819X + PCI_SUPPORT.
-    Makefile                 FEATURES += pci.
-    image/Makefile           cvimg-kernel-cr6b + dlink-md5-sign image recipes.
-    base-files/etc/uci-defaults/99-dir842-m5
-                  First-boot gateway config: LAN eth0.2 192.168.0.1 + WAN eth0.1
-                  a DHCP-client WAN (both MACs pinned to the ASIC netifs),
-                  the 8367S VID cascade, fw3 flow_offloading_hw, and an OPEN (unencrypted) 5 GHz
-                  AP on the RTL8822BE (pinned wlan MAC — efuse is blank).
-    base-files/etc/{init.d/dir842-asic,rc.local,sysctl.d/30-hwnat.conf}
-                  init.d/dir842-asic (START=97) OWNS boot bring-up since R4:
-                  MAC poll -> swconfig apply -> fabric_reset 3 -> gw_prog ->
-                  L2 warm -> arm hwnat. rc.local is intentionally EMPTY (its
-                  inline copy was removed in R4). sysctl enables
-                  nf_conntrack_acct (so offload can be observed).
-  package/kernel/mac80211/patches/realtek/
-    03-rtw8822b-blank-efuse-rfe.patch     default RFE type 2 on a blank efuse.
-    04-rtw88-random-mac-blank-efuse.patch random MAC when the efuse MAC is invalid.
-  package/firmware/linux-firmware/qca_ath10k.mk
-                  Comments out a dead ath10k board-2.bin download (no ath10k here).
+target/linux/rtl819x/files-6.18/drivers/net/ethernet/rtl819x/
+  rtl819x-eth.c        CPU-port DMA/NIC driver. DSA conduit tag shim (synthesises the
+                       8-byte rtl8_4 wire form the DSA core expects from the 4-byte tag
+                       the SoC MAC actually strips/inserts); the RGMII trunk bring-up now
+                       runs once, from probe, before the switch driver's own reset —
+                       running it from every ndo_open (as ported) raced the switch and
+                       intermittently wedged transmit.
+  rtl819x_swnic.c/.h   TX/RX descriptor rings, the fabric-wedge detectors (RX-stall,
+                       TX-stall, FCS-sample), `txdiag`/`trunk_redo` bench instruments
+  rtl865x_asichal.c/.h ASIC table HAL: netif/route/nexthop/ARP/L2/NAPT/extIP, `gw_prog`
+                       (/proc/rtl865x_gw), the byte-order and boot-ritual lessons carried
+                       forward from the 4.14 investigation
+  rtl819x_hwnat.{c,h}  hardware-NAT front end, rebuilt on ndo_setup_tc(TC_SETUP_FT) +
+                       tc-flower (the 4.14 port's ndo_flow_offload interface is gone from
+                       the kernel) — see docs/PORT-MAIN-6.18-STATUS.md §4 for its current,
+                       narrow failure mode
 
-# Note: files/target/linux/realtek/files-4.14/arch/mips/boot/dts/realtek/
-# RTL8197F.dtsi carries a redundant copy of the eth node; the image compiles the
-# dts/ copy via append-dtb, so the in-kernel one is unused (harmless).
+package/kernel/mac80211/patches/rtl/
+  03-rtw8822b-blank-efuse-rfe.patch     default RFE type 2 on a blank efuse (this board's)
+  05-rtw88-pci-cow-tx-headroom.patch    guarantee TX-descriptor headroom before pushing
+  06-rtw88-8822b-panel-led.patch        drive the panel LED's real GPIO8, not the LED core
+  Same three fixes as the 4.14 port, rebased onto backports 7.2 (line-identical patch
+  sites); the 4.14 set's 04-rtw88-random-mac-blank-efuse.patch is dropped — upstream
+  gained the equivalent fix.
+
+tools/firmware-utils/patches/100-add-cvimg.patch
+  Adds src/cvimg.c (the D-Link cr6b image tool) to the CMake-based firmware-utils build
+  main now uses, replacing the 4.14 tree's Makefile-based integration.

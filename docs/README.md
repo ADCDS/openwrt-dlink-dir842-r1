@@ -1,5 +1,13 @@
 # docs/ — index and reading order
 
+> ⚠️ **On branch `port/main-6.18`, start at
+> [`PORT-MAIN-6.18-STATUS.md`](PORT-MAIN-6.18-STATUS.md), not here.** Everything below
+> describes the kernel 4.14 / swconfig product on `main`. It is still the right place for
+> register-level and hardware background — the new port leaned on it directly, including
+> re-discovering one bug this same directory had already solved and documented — but its
+> status paragraph, and every `main`-branch code reference in the files it indexes, does
+> not describe this branch.
+
 The engineering record for the DIR-842 R1 port: what each subsystem actually does, why it
 is built that way, and which explanations were falsified on the way there. The root
 [`../README.md`](../README.md) is the product-facing entry (status, headline numbers,
