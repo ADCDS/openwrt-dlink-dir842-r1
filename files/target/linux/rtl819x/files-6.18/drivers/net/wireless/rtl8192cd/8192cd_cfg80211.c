@@ -3223,7 +3223,7 @@ static int realtek_start_ap(struct wiphy *wiphy, struct net_device *dev,
 		printk("*** [%s]Under DFS channel, radar detection is active ***\n",priv->dev->name);
 		/* DFS activated after 1 sec; prevent switching channel due to DFS false alarm */
 		if (timer_pending(&priv->DFS_timer))
-			del_timer(&priv->DFS_timer);
+			timer_delete(&priv->DFS_timer);
 		else {
 			init_timer(&priv->DFS_timer);
 			priv->DFS_timer.data = (unsigned long) priv;
@@ -3232,7 +3232,7 @@ static int realtek_start_ap(struct wiphy *wiphy, struct net_device *dev,
 		mod_timer(&priv->DFS_timer, jiffies + RTL_SECONDS_TO_JIFFIES(1));
 
         if (timer_pending(&priv->dfs_det_chk_timer))
-			del_timer(&priv->dfs_det_chk_timer);
+			timer_delete(&priv->dfs_det_chk_timer);
 		else {
 			init_timer(&priv->dfs_det_chk_timer);
 			priv->dfs_det_chk_timer.data = (unsigned long) priv;
@@ -3525,7 +3525,7 @@ static int realtek_start_radar_detection (struct wiphy *wiphy,
 	SwChnl(priv, channel, priv->pmib->dot11nConfigEntry.dot11n2ndChOffset);
 
 	if (timer_pending(&priv->ch_avail_chk_timer))
-		del_timer(&priv->ch_avail_chk_timer);
+		timer_delete(&priv->ch_avail_chk_timer);
 	else {
 		init_timer(&priv->ch_avail_chk_timer);
 		priv->ch_avail_chk_timer.data = (unsigned long) priv;
@@ -3542,7 +3542,7 @@ static int realtek_start_radar_detection (struct wiphy *wiphy,
 
 	/* DFS activated after 5 sec; prevent switching channel due to DFS false alarm */
 	if (timer_pending(&priv->DFS_timer))
-		del_timer(&priv->DFS_timer);
+		timer_delete(&priv->DFS_timer);
 	else {
 		init_timer(&priv->DFS_timer);
 		priv->DFS_timer.data = (unsigned long) priv;
@@ -3551,7 +3551,7 @@ static int realtek_start_radar_detection (struct wiphy *wiphy,
 	mod_timer(&priv->DFS_timer, jiffies + RTL_SECONDS_TO_JIFFIES(5));
 
 	if (timer_pending(&priv->dfs_det_chk_timer))
-		del_timer(&priv->dfs_det_chk_timer);
+		timer_delete(&priv->dfs_det_chk_timer);
 	else {
 		init_timer(&priv->dfs_det_chk_timer);
 		priv->dfs_det_chk_timer.data = (unsigned long) priv;
@@ -3562,7 +3562,7 @@ static int realtek_start_radar_detection (struct wiphy *wiphy,
 	DFS_SetReg(priv);
 
 	if (!priv->pmib->dot11DFSEntry.CAC_enable) {
-		del_timer_sync(&priv->ch_avail_chk_timer);
+		timer_delete_sync(&priv->ch_avail_chk_timer);
 		mod_timer(&priv->ch_avail_chk_timer, jiffies + RTL_MILISECONDS_TO_JIFFIES(200));
 	}
 
@@ -4207,7 +4207,7 @@ void rtk_disable_monitor_mode(struct rtl8192cd_priv *priv)
 {		
 	priv->is_monitor_mode = FALSE;
 	if (timer_pending(&priv->chan_switch_timer))
-		del_timer(&priv->chan_switch_timer);
+		timer_delete(&priv->chan_switch_timer);
 }
 #endif
 
@@ -4697,7 +4697,7 @@ int realtek_remain_on_channel(struct wiphy *wiphy,
 	NLENTER;
 
     if (timer_pending(&priv->p2pPtr->remain_on_ch_timer))
-        del_timer(&priv->p2pPtr->remain_on_ch_timer);
+        timer_delete(&priv->p2pPtr->remain_on_ch_timer);
 
     //rtk_abort_scan(priv);  // abort on going scan
 	memcpy(&priv->p2pPtr->remain_on_ch_channel, channel, sizeof(struct ieee80211_channel));
@@ -4753,7 +4753,7 @@ static int realtek_cancel_remain_on_channel(struct wiphy *wiphy,
     NLENTER;
 
     if(timer_pending(&priv->p2pPtr->remain_on_ch_timer)){
-        del_timer(&priv->p2pPtr->remain_on_ch_timer);
+        timer_delete(&priv->p2pPtr->remain_on_ch_timer);
     }
     NDEBUG("\n");
 
@@ -4763,10 +4763,11 @@ static int realtek_cancel_remain_on_channel(struct wiphy *wiphy,
 	return 0;
 }
 
-void realtek_cfg80211_RemainOnChExpire(unsigned long task_priv)
+void realtek_cfg80211_RemainOnChExpire(struct timer_list *t)
 {
 
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;	
+	struct p2p_context *p2pPtr = timer_container_of(p2pPtr, t, remain_on_ch_timer);
+	struct rtl8192cd_priv *priv = p2pPtr->priv;
     struct wireless_dev *wdev = &priv->wdev;    
 
     priv->pshare->rtk_remain_on_channel=0; // for unlock channel switch    

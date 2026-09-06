@@ -249,8 +249,8 @@ drv_cmd(
 			Argv[0][strlen(Argv[0]) - 1] = '\0';
 	
 		drv_cmd_parser(priv, Argv, Argc, output, out_len);
-	
-		return 0;
+
+		return; /* 6.18 port: drv_cmd returns void */
 
 }
 

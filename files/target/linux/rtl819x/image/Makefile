@@ -107,8 +107,16 @@ define Device/dlink_dir-842-r1
 	DEVICE_COMPAT_MESSAGE := Config cannot be migrated from swconfig to DSA \
 		(eth0.1/eth0.2 became wan/lan1..lan4); sysupgrade with -n
 	# The 2.4 GHz vendor radio (kmod-rtl8192cd) joins this list at M7.
+	# wpad-basic, not wpad-basic-mbedtls: matches main's proven working config.
+	# Neither radio on this hardware supports WPA3/SAE (the vendor rtl8192cd driver
+	# has no SAE support at all; nothing here configures WPA3 on the 5 GHz side
+	# either), so the mbedtls variant's only extra capability is unused -- it just
+	# adds a real dependency (libmbedtls) for nothing. Found 2026-09-03 via an
+	# adversarial review after a dual-radio OOM test wrongly concluded this board
+	# needed a leaner footprint than the working main branch's; this was one of
+	# the concrete, free fixes that review surfaced.
 	DEVICE_PACKAGES := kmod-leds-gpio kmod-gpio-button-hotplug iperf3 \
-		kmod-rtw88-8822be rtl8822be-firmware wpad-basic-mbedtls iw
+		kmod-rtw88-8822be rtl8822be-firmware wpad-basic iw
 	IMAGE/factory.bin := append-kernel | append-fake-rootfs | append-rootfs | \
 		cvimg-kernel-cr6b | cvimg-pad-rootfs | dlink-md5-sign | check-size
 	# sysupgrade MUST sign BEFORE pad-rootfs: pad-rootfs appends the jffs2 'deadc0de'

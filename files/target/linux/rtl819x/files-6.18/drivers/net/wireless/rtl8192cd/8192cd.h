@@ -4155,6 +4155,10 @@ struct priv_shared_info {
 
    /*=for========remain on channel=============*/    
 #endif    /*cfg p2p cfg p2p*/
+	/* 6.18 port: backpointer so timer_container_of(LED_Timer) can recover
+	 * the owning priv -- LED_Timer is embedded here, not in rtl8192cd_priv
+	 * itself, and priv_shared_info had no way back to it before. */
+	struct rtl8192cd_priv		*priv;
 	unsigned int			type;
 	unsigned long			ioaddr;
 #ifdef RTK_129X_PLATFORM
@@ -7017,14 +7021,14 @@ typedef struct _sta_info_2_web {
 			timer_pending(&priv->pshare->mclone_sta[ACTIVE_ID-1].reauth_timer) : \
 					timer_pending(&priv->reauth_timer))
 #define DELETE_REAUTH_TIMER	((ACTIVE_ID > 0) ? \
-			del_timer(&priv->pshare->mclone_sta[ACTIVE_ID-1].reauth_timer) : \
-					del_timer(&priv->reauth_timer))
+			timer_delete(&priv->pshare->mclone_sta[ACTIVE_ID-1].reauth_timer) : \
+					timer_delete(&priv->reauth_timer))
 #define PENDING_REASSOC_TIMER	((ACTIVE_ID > 0) ? \
 			timer_pending(&priv->pshare->mclone_sta[ACTIVE_ID-1].reassoc_timer) : \
 					timer_pending(&priv->reassoc_timer))
 #define DELETE_REASSOC_TIMER	((ACTIVE_ID > 0) ? \
-			del_timer(&priv->pshare->mclone_sta[ACTIVE_ID-1].reassoc_timer) : \
-					del_timer(&priv->reassoc_timer))
+			timer_delete(&priv->pshare->mclone_sta[ACTIVE_ID-1].reassoc_timer) : \
+					timer_delete(&priv->reassoc_timer))
 
 #define MOD_REAUTH_TIMER(t)	((ACTIVE_ID > 0) ? \
 			mod_timer (&priv->pshare->mclone_sta[ACTIVE_ID-1].reauth_timer, jiffies+t) : \
@@ -7052,9 +7056,9 @@ typedef struct _sta_info_2_web {
 #define _AID				(priv->aid)
 #define AID_VAL(res)		(priv->aid=res)
 #define PENDING_REAUTH_TIMER	(timer_pending(&priv->reauth_timer))
-#define DELETE_REAUTH_TIMER	(del_timer(&priv->reauth_timer))
+#define DELETE_REAUTH_TIMER	(timer_delete(&priv->reauth_timer))
 #define PENDING_REASSOC_TIMER	(timer_pending(&priv->reassoc_timer))
-#define DELETE_REASSOC_TIMER	(del_timer(&priv->reassoc_timer))
+#define DELETE_REASSOC_TIMER	(timer_delete(&priv->reassoc_timer))
 #define MOD_REAUTH_TIMER(t)	(mod_timer(&priv->reauth_timer, jiffies+t))
 #define MOD_REASSOC_TIMER(t)	(mod_timer(&priv->reassoc_timer, jiffies+t))
 #endif

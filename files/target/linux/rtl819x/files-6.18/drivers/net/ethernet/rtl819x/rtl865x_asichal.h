@@ -181,7 +181,9 @@ int rtl865x_asic_l3_engine_enable(void);
 extern struct mutex rtl865x_hal_lock;
 
 /* NAPT outbound-row index = HASH1(proto,intIP,intPort,remIP,remPort) (vendor verbatim).
- * With SWTCR1 EnL4WayH=0 the returned 10-bit value IS the physical row index. */
+ * The returned 10-bit value IS the physical row index — rows are addressed flat
+ * 0..1023 REGARDLESS of SWTCR1 EnL4WayH (which this driver sets, 4-way; see the note
+ * at line ~33 and the .c). Inputs are NUMERIC host-order. */
 u32 gw_napt_hash1(u32 isTCP, u32 sip, u32 sport, u32 dip, u32 dport);
 
 /* Thin, lock-free wrappers over the table engine for the L4/NAPT table (type 9).

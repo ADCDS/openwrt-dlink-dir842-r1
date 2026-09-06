@@ -1140,6 +1140,10 @@ struct rtl8192cd_tx_desc_info {
 };
 
 struct rtl8192cd_hw {
+	/* 6.18 port: backpointer so timer_container_of(tpt_timer) can recover
+	 * the owning priv -- same pattern as priv_shared_info's own priv
+	 * field, needed because phw is a separate allocation, not embedded. */
+	struct rtl8192cd_priv		*priv;
 #if defined(CONFIG_USB_HCI) || defined(CONFIG_SDIO_HCI)
 	atomic_t	seq;
 #elif defined(CONFIG_PCI_HCI)

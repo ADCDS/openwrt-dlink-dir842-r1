@@ -1288,14 +1288,14 @@ typedef struct stat_info        _HAL_STA_INFO,*P_HAL_STA_INFO;
 #endif
 
 // TODO: Filen, replace HAL_VIRT_TO_BUS
-#define HAL_VIRT_TO_BUS(ptr)                                    virt_to_bus(ptr)
+#define HAL_VIRT_TO_BUS(ptr)                                    virt_to_phys(ptr)
 #define HAL_VIRT_TO_BUS1(Adapter, ptr, size, direction)         get_physical_addr(Adapter, ptr, size, direction)
 //direction
 #define HAL_PCI_DMA_TODEVICE    PCI_DMA_TODEVICE
 #define HAL_PCI_DMA_FROMDEVICE    PCI_DMA_FROMDEVICE
 
 #ifdef CONFIG_NET_PCI
-#define HAL_CACHE_SYNC_WBACK(Adapter, start, size, direction)   rtl_cache_sync_wback(Adapter, bus_to_virt(start), size, direction)
+#define HAL_CACHE_SYNC_WBACK(Adapter, start, size, direction)   rtl_cache_sync_wback(Adapter, phys_to_virt(start), size, direction)
 #else
 #define HAL_CACHE_SYNC_WBACK(Adapter, start, size, direction)   rtl_cache_sync_wback(Adapter, start, size, direction)
 #endif

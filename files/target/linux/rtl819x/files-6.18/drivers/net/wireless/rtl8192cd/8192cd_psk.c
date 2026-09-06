@@ -156,7 +156,7 @@ extern void AES_UnWRAP(unsigned char *cipher, int cipher_len, unsigned char *kek
 
 static void UpdateGK(struct rtl8192cd_priv *priv);
 static void SendEAPOL(struct rtl8192cd_priv *priv, struct stat_info *pstat, int resend);
-static void ResendTimeout(unsigned long task_psta);
+static void ResendTimeout(struct timer_list *t);
 static void reset_sta_info(struct rtl8192cd_priv *priv, struct stat_info *pstat);
 
 #ifdef CONFIG_IEEE80211R
@@ -1028,6 +1028,11 @@ static void CalcGTK(unsigned char *addr, unsigned char *nonce,
 	memcpy(keyout, tmp, keyoutlen);
 }
 
+/* 6.18 port: <linux/minmax.h> (pulled in transitively) now defines a 2-arg
+ * MIN(a, b) macro that collides with this driver's own, unrelated 3-arg
+ * byte-array comparator of the same name. Undef it so this file's MIN stays
+ * the local function, not the kernel macro. */
+#undef MIN
 static int MIN(unsigned char *ucStr1, unsigned char *ucStr2, unsigned int ulLen)
 {
 	int i;
@@ -2168,7 +2173,7 @@ static void reset_sta_info(struct rtl8192cd_priv *priv, struct stat_info *pstat)
 
 	SMP_LOCK_PSK_RESEND(flags);
 	if (timer_pending(&pInfo->resendTimer)) {
-		del_timer(&pInfo->resendTimer);
+		timer_delete(&pInfo->resendTimer);
 	}
 	SMP_UNLOCK_PSK_RESEND(flags);
 
@@ -2195,9 +2200,8 @@ static void reset_sta_info(struct rtl8192cd_priv *priv, struct stat_info *pstat)
 	pInfo->EAPOLMsgRecvd.Octet = pInfo->eapRecvdBuf;
 	pInfo->EapolKeyMsgRecvd.Octet = pInfo->EAPOLMsgRecvd.Octet + ETHER_HDRLEN + LIB1X_EAPOL_HDRLEN;
 
-	init_timer(&pInfo->resendTimer);
-	pInfo->resendTimer.data = (unsigned long)pstat;
-	pInfo->resendTimer.function = ResendTimeout;
+	timer_setup(&pInfo->resendTimer, ResendTimeout, 0);
+
 
 	pInfo->priv = priv;
 
@@ -2220,9 +2224,10 @@ static void reset_sta_info(struct rtl8192cd_priv *priv, struct stat_info *pstat)
 }
 
 
-static void ResendTimeout(unsigned long task_psta)
+static void ResendTimeout(struct timer_list *t)
 {
-	struct stat_info *pstat = (struct stat_info *)task_psta;
+	WPA_STA_INFO *pInfo = timer_container_of(pInfo, t, resendTimer);
+	struct stat_info *pstat = pInfo->pstat;
 	struct rtl8192cd_priv *priv = pstat->wpa_sta_info->priv;
 #ifdef SMP_SYNC
 	unsigned long flags;
@@ -2329,9 +2334,10 @@ static void ResendTimeout(unsigned long task_psta)
 }
 
 
-static void GKRekeyTimeout(unsigned long task_priv)
+static void GKRekeyTimeout(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	WPA_GLOBAL_INFO *pGblInfo = timer_container_of(pGblInfo, t, GKRekeyTimer);
+	struct rtl8192cd_priv *priv = pGblInfo->priv;
 	unsigned long flags = 0;
 #ifdef SMP_SYNC
 	unsigned long flags2;
@@ -3329,7 +3335,7 @@ static void UpdateGK(struct rtl8192cd_priv *priv)
 		pGblInfo->GkeyReady = FALSE;
 
 		if (timer_pending(&pGblInfo->GKRekeyTimer))
-			del_timer_sync(&pGblInfo->GKRekeyTimer);
+			timer_delete_sync(&pGblInfo->GKRekeyTimer);
 
 		//---- In the case of updating GK to all STAs, only the STA that has finished
 		//---- 4-way handshake is needed to be sent with 2-way handshake
@@ -3653,7 +3659,7 @@ cont_msg:
 			// delete resend timer
 			SMP_LOCK_PSK_RESEND(flags);
 			if (timer_pending(&pStaInfo->resendTimer)){
-				del_timer(&pStaInfo->resendTimer);
+				timer_delete(&pStaInfo->resendTimer);
 			}
 			SMP_UNLOCK_PSK_RESEND(flags);
 			pStaInfo->state = PSK_STATE_PTKINITNEGOTIATING;
@@ -3795,7 +3801,7 @@ cont_msg:
 			// delete resend timer
 			SMP_LOCK_PSK_RESEND(flags);
 			if (timer_pending(&pStaInfo->resendTimer)){
-				del_timer(&pStaInfo->resendTimer);
+				timer_delete(&pStaInfo->resendTimer);
 			}
 			SMP_UNLOCK_PSK_RESEND(flags);
 			LOG_MSG("Open and authenticated\n");
@@ -3935,7 +3941,7 @@ cont_msg:
 			// delete resend timer
 			SMP_LOCK_PSK_RESEND(flags);
 			if (timer_pending(&pStaInfo->resendTimer)) {
-				del_timer(&pStaInfo->resendTimer);
+				timer_delete(&pStaInfo->resendTimer);
 			}
 			SMP_UNLOCK_PSK_RESEND(flags);
 
@@ -4004,7 +4010,7 @@ cont_msg:
 			// delete resend timer
 			SMP_LOCK_PSK_RESEND(flags);
 			if (timer_pending(&pStaInfo->resendTimer)) {
-				del_timer(&pStaInfo->resendTimer);
+				timer_delete(&pStaInfo->resendTimer);
 			}
 			SMP_UNLOCK_PSK_RESEND(flags);
 		
@@ -4161,7 +4167,7 @@ static void ClientEAPOLKeyRecvd(struct rtl8192cd_priv *priv, struct stat_info *p
 
 			SMP_LOCK_PSK_RESEND(flags);
 			if (timer_pending(&pStaInfo->resendTimer)) {
-				del_timer(&pStaInfo->resendTimer);
+				timer_delete(&pStaInfo->resendTimer);
 			}
 			SMP_UNLOCK_PSK_RESEND(flags);
 
@@ -4238,7 +4244,7 @@ static void ClientEAPOLKeyRecvd(struct rtl8192cd_priv *priv, struct stat_info *p
 			/* Refine, make 4-2 only be sent 5 times
 			   to prevent MAYBE some AP keep sending out 4-1 because of incorrect PSK */
 			pStaInfo->clientHndshkProcessing = fourWaystep1;
-			ResendTimeout(pstat);
+			ResendTimeout(&pstat->wpa_sta_info->resendTimer);
 			//ClientSendEAPOL(priv, pstat, 0);	// send msg 2
 		} else {
 			//---- Receive 3rd message ----
@@ -4262,7 +4268,7 @@ static void ClientEAPOLKeyRecvd(struct rtl8192cd_priv *priv, struct stat_info *p
 			// delete resend timer
 			SMP_LOCK_PSK_RESEND(flags);
 			if (timer_pending(&pStaInfo->resendTimer)) {
-				del_timer(&pStaInfo->resendTimer);
+				timer_delete(&pStaInfo->resendTimer);
 			}
 			SMP_UNLOCK_PSK_RESEND(flags);
 
@@ -4394,7 +4400,7 @@ static void ClientEAPOLKeyRecvd(struct rtl8192cd_priv *priv, struct stat_info *p
 
 			/* Refine, make 4-4 only be sent 5 times
 			   to prevent MAYBE some AP keep sending out 4-3 because of incorrect PSK */
-			ResendTimeout(pstat);
+			ResendTimeout(&pstat->wpa_sta_info->resendTimer);
 			//ClientSendEAPOL(priv, pstat, 0);	// send msg 4
 
 			if (toSetKey) {
@@ -4592,9 +4598,8 @@ void psk_init(struct rtl8192cd_priv *priv)
 #endif /* CONFIG_IEEE80211W */
 		pGblInfo->GInitAKeys = TRUE; // david+2006-04-04, fix the issue of re-generating group key
 
-		init_timer(&pGblInfo->GKRekeyTimer);
-		pGblInfo->GKRekeyTimer.data = (unsigned long)priv;
-		pGblInfo->GKRekeyTimer.function = GKRekeyTimeout;
+		timer_setup(&pGblInfo->GKRekeyTimer, GKRekeyTimeout, 0);
+
 	}
 #if 0
 	if (strlen(priv->pmib->dot1180211AuthEntry.dot11PassPhrase) == 64) // hex
@@ -5840,8 +5845,8 @@ int ft_check_ft_auth(struct rtl8192cd_priv *priv, struct stat_info *pstat, unsig
 					if (store_r1kh(priv, pstat->hwaddr, BSSID, r0kh_id, R0KH_ID_LEN, 
 						cur_pmk_r1, pmk_r1_id, keyid, mapPairwise(pstat->wpa_sta_info->UnicastCipher) )) {
 							panic_printk("Error: fail to store r1kh\n");
-						    SMP_UNLOCK_FT_R1KH(flags);							
-							return;
+						    SMP_UNLOCK_FT_R1KH(flags);
+							return -1; /* 6.18 port: ft_check_ft_auth returns int */
 					}
 					/*search rdy exist r1KH*/
 					r1kh = search_r1kh_by_pmkid(priv, pmk_r1_id, 1);

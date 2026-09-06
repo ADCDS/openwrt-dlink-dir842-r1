@@ -377,6 +377,34 @@ int32 New_swNic_rxPending(void)
 
 	return (rr[rxCurr] & DESC_OWNED_BIT) == DESC_RISC_OWNED;
 }
+/*
+ * ★ RUNOUT MUST BE ACKED ON EVERY RX EXIT, NOT JUST THE SUCCESS PATH.
+ *
+ * Established by disassembling the SHIPPED D-Link firmware for this exact board
+ * (DIR_842E_RT8197F 3.0.3, Linux 3.10.90, symbols recovered from its 18269-entry
+ * kallsyms table). Stock's RX path writes `ISR = 0x007F0000` -- all seven runout
+ * bits -- on EVERY exit, and its ISR masks the runout sources on assert
+ * (CONFIG_FINETUNE_RUNOUT_IRQ, inlined at interrupt_isr+0x90) re-arming them only
+ * once the free-skb pool recovers past a compile-time threshold of 128.
+ *
+ * The dangerous state stock is careful to avoid, in its own control flow: it is
+ * legal to leave the tasklet with RUNOUT still masked and no RX pending, and in
+ * that state nothing in the interrupt path will ever re-arm it. Stock's
+ * one_sec_timer force-schedules the RX tasklet every second precisely so that
+ * window can never last.
+ *
+ * This driver arms PKTHDR_DESC_RUNOUT_IE_ALL (see NIC_IIMR in rtl819x-eth.c) but
+ * used to ack it on the RTL_NICRX_OK path ONLY. The ring-empty, allocation-
+ * failure and loop-bound exits all returned with a latched, level-triggered
+ * runout source unacknowledged. Our own equivalent of stock's one-second kick
+ * (rtl819x_rx_timer -> napi_schedule, ~12 ms) runs far more often than stock's,
+ * so the forced-kick half of the design was never the gap -- the ack was.
+ *
+ * Symptom this targets: after sustained forwarded load, frames larger than
+ * ~128 B stop being delivered while small frames keep flowing, rx_packets keeps
+ * advancing, the kernel stays alive, and no wedge detector fires
+ * (docs/M7-LARGE-FRAME-RX-WEDGE.md, docs/RX-STALL-WEDGE.md §5).
+ */
 
 int32 New_swNic_receive(rtl_nicRx_info *info, int retryCount)
 {
@@ -404,6 +432,8 @@ int32 New_swNic_receive(rtl_nicRx_info *info, int retryCount)
 		slot = rr[idx];
 		if ((slot & DESC_OWNED_BIT) == DESC_SWCORE_OWNED) {
 			/* switch core still owns it -> no frame */
+			/* ★ see runout-ack note above New_swNic_receive() */
+			REG32(CPUIISR) = (MBUF_DESC_RUNOUT_IP_ALL | PKTHDR_DESC_RUNOUT_IP_ALL);
 			SMP_UNLOCK_ETH_RECV(flags);
 			return RTL_NICRX_NULL;
 		}
@@ -445,7 +475,12 @@ int32 New_swNic_receive(rtl_nicRx_info *info, int retryCount)
 		/* Allocate the replacement cluster before releasing this one. */
 		nbuf = alloc_rx_buf(&nskb, size_of_cluster, &ndma);
 		if (!nbuf) {
-			/* out of buffers: leave the frame, don't advance */
+			/* out of buffers: leave the frame, don't advance. The
+			 * descriptor stays CPU-owned and we retry next poll --
+			 * but STILL ack runout, or the switch sits on a latched
+			 * level source with no CPU-owned slots behind it. */
+			/* ★ see runout-ack note above New_swNic_receive() */
+			REG32(CPUIISR) = (MBUF_DESC_RUNOUT_IP_ALL | PKTHDR_DESC_RUNOUT_IP_ALL);
 			SMP_UNLOCK_ETH_RECV(flags);
 			return RTL_NICRX_NULL;
 		}
@@ -561,6 +596,8 @@ int32 New_swNic_receive(rtl_nicRx_info *info, int retryCount)
 		return RTL_NICRX_OK;
 	}
 
+	/* ★ loop-bound exit (>256 iterations) -- ack here too. */
+	REG32(CPUIISR) = (MBUF_DESC_RUNOUT_IP_ALL | PKTHDR_DESC_RUNOUT_IP_ALL);
 	SMP_UNLOCK_ETH_RECV(flags);
 	return RTL_NICRX_NULL;
 }

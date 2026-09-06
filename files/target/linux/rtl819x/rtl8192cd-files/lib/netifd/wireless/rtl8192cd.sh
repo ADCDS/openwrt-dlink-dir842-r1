@@ -4,28 +4,42 @@
 
 # ★ THIS FILE MUST ONLY BE INSTALLED ALONGSIDE THE DRIVER IT DRIVES.
 #
-# It lives outside base-files/ deliberately, so nothing installs it yet; the M7
-# kmod-rtl8192cd package will. netifd probes every handler in
+# It lives outside base-files/ deliberately -- and stays outside it even now
+# that it's packaged: modules.mk's KernelPackage/rtl8192cd/install copies it
+# straight into the kmod-rtl8192cd ipkg, so it is only ever present on disk
+# when that kmod was actually selected. netifd probes every handler in
 # /lib/netifd/wireless at startup, and one that describes a driver whose device
 # never appears sends netifd into a 100%-CPU spin in which it applies no
 # configuration at all: no br-lan, no addresses, not even on lo, and every
 # `ubus call network...` hangs. Measured on an image that had the 5 GHz radio
 # but not this driver. Making the script exit early and silently does NOT help
-# -- netifd spins on the empty reply just the same -- so absence is the only
-# safe state.
+# -- netifd spins on the empty reply just the same -- so absence (i.e. never
+# shipping this file via base-files/, only via the kmod's own /install) is the
+# only safe state.
 
 # ★ MANDATORY, and its absence is silent. netifd-wireless.sh ships a NO-OP stub
 #   `add_driver() { return; }` (netifd-wireless.sh:12). The real implementation is
 #   installed only by init_wireless_driver() (netifd-wireless.sh:367), which each
 #   handler must call with "$@". Without this line the `add_driver rtl8192cd` at the
-#   bottom of this file expands to the stub, so netifd's driver probe
-#   (`popen("./rtl8192cd.sh '' dump")`, handler.c:96) reads ZERO bytes, no JSON is
-#   parsed, wireless_add_handler() is never reached, and the driver is never
-#   registered. config_parse_wireless_device() (config.c:332) then fails its
-#   avl_find_element() lookup for type='rtl8192cd' and `return`s WITHOUT LOGGING
-#   ANYTHING -- radio1 simply never becomes a wireless device, so `wifi up`,
-#   `wifi down`, and `ubus call network.wireless status` all ignore it entirely and
-#   wlan0 is never brought up. mac80211.sh:6 has this same call.
+#   bottom of this file expands to the stub, so netifd's driver probe reads ZERO
+#   bytes, no JSON is parsed, wireless_add_handler() is never reached, and the
+#   driver is never registered.
+#
+#   This tree's actual runtime is the ucode netifd (CONFIG_WIFI_SCRIPTS_UCODE=y
+#   by default), not the classic C one -- the probe above is
+#   handler_load()'s blocking `system("./rtl8192cd.sh '' dump ...")`
+#   (package/network/config/netifd/files/lib/netifd/utils.uc:46-54, globbing
+#   every *.sh under /lib/netifd/wireless), and the unregistered-type fallout
+#   is config_init()'s `handler = wireless.handlers[data.type]; if (!handler)
+#   continue;` (package/network/config/wifi-scripts/files/lib/netifd/
+#   wireless.uc:148-150) -- silently skipping a wifi-device whose type has no
+#   registered handler, exactly like the classic C path's avl_find_element()
+#   miss. Both behavioral claims above (blocking probe regardless of UCI
+#   config; unmatched type skipped without logging) verified against this
+#   actual implementation, not assumed from the classic-netifd naming.
+#   radio1 simply never becomes a wireless device, so `wifi up`, `wifi down`,
+#   and `ubus call network.wireless status` all ignore it entirely and wlan0
+#   is never brought up. mac80211.sh:6 has this same init_wireless_driver call.
 init_wireless_driver "$@"
 
 # netifd wireless handler for the Realtek vendor rtl8192cd driver (WEXT build,
@@ -89,6 +103,25 @@ drv_rtl8192cd_init_iface_config() {
 }
 
 drv_rtl8192cd_cleanup() {
+	return 0
+}
+
+# No VLAN / per-station ACL config this driver understands. Both hooks are
+# `eval`'d unconditionally by netifd-wireless.sh's add_driver() (the
+# SYNCHRONOUS "dump" path netifd runs at startup to learn what a handler
+# supports, see the coexistence-spin comment at the top of this file) --
+# leaving them undefined is not fatal (an eval of an unknown name just fails
+# with a "not found" on stderr and the dump continues). mac80211.sh itself
+# only bothers defining the analogous empty stub for cleanup
+# (drv_mac80211_cleanup(){ :; }) and leaves ITS vlan/station-config hooks to
+# that same silent-eval-failure fallback -- so this isn't ported from an
+# existing mac80211.sh precedent for THESE two hooks specifically, just the
+# same harmless-no-op shape applied a little more defensively here.
+drv_rtl8192cd_init_vlan_config() {
+	return 0
+}
+
+drv_rtl8192cd_init_station_config() {
 	return 0
 }
 
@@ -324,3 +357,57 @@ drv_rtl8192cd_teardown() {
 }
 
 add_driver rtl8192cd
+
+# ★ MANDATORY TRAILING NEWLINE — do not delete. This single `echo` is the fix for a
+# netifd 100%-CPU spin that made this whole port unusable, root-caused 2026-09-03 with
+# strace on real hardware.
+#
+# netifd probes every /lib/netifd/wireless/*.sh handler at startup via handler_load()
+# (netifd's own lib/netifd/utils.uc), which does:
+#
+#     system(`./${script} "" "dump" >&${f.fileno()}`);
+#     f.seek();
+#     while (!f.error()) {
+#         let data = trim(f.read("line"));
+#         try { data = json(data); } catch (e) { continue; }
+#         if (type(data) != "object") continue;
+#         cb(script, data);
+#     }
+#
+# The loop's ONLY exit condition is f.error(). Per ucode's own fs module (fs.c:207-216),
+# read("line") at EOF returns null/"" and does NOT set error() — error() only reflects a
+# genuine I/O error. json() on that value throws (documented: "Throws an exception on parse
+# errors ... or premature EOF"), `catch` hits `continue`, and the loop spins forever on the
+# exhausted file. netifd never returns from handler_load(),
+# so it never brings up ANY interface: no br-lan, no DSA ports (they stay administratively
+# down — /sys/class/net/lan1/carrier reads EINVAL), no wireless, and every
+# `ubus wait_for network.interface.lan` times out. Measured: netifd pinned at 83-100% CPU
+# indefinitely (still spinning 30+ minutes after boot) while ubus itself stayed responsive
+# — a pure in-process loop, invisible to `ubus monitor`.
+#
+# The strace signature is unmistakable and is how this was finally caught: a sub-millisecond
+# cycle re-reading utils.uc's OWN SOURCE from byte 0 thousands of times per second (ucode
+# re-reads a module's source to build the source context for each thrown exception — and
+# this loop throws one every iteration).
+#
+# Verified empirically on hardware, in this order:
+#   1. Removing this handler entirely made netifd proceed normally within seconds — br-lan
+#      created and UP with its address, all DSA ports joined, traffic flowing, and
+#      mac80211 radio0 setup finally running for the first time on this port.
+#   2. A MINIMAL 8-LINE DUMMY shell handler (nothing to do with this driver) reproduced the
+#      spin identically. So the trigger is not this handler's content at all: it is that a
+#      classic /bin/sh handler is being probed by handler_load() under the ucode-based
+#      wifi-scripts (CONFIG_WIFI_SCRIPTS_UCODE=y, the default). mac80211.sh does not trip it
+#      because it is itself a ucode script.
+#   3. Building with `# CONFIG_WIFI_SCRIPTS_UCODE is not set` (the classic shell wifi-scripts
+#      variant — both ship in the same package, see its Makefile's files/ vs files-ucode/)
+#      gives a clean boot: br-lan UP with 192.168.0.1/24, netifd idle, ZERO OOM events.
+#
+# This `echo` is therefore belt-and-braces, not the primary fix. The primary fixes are:
+#   (a) files/package/network/config/netifd/files/lib/netifd/utils.uc — an override of
+#       netifd's own utils.uc whose handler_load() breaks explicitly on an empty read
+#       instead of trusting f.error(). This closes the bug class for ANY handler.
+#   (b) CONFIG_WIFI_SCRIPTS_UCODE=n in the seed, matching how the 4.14 product runs.
+# The upstream handler_load() loop is genuinely wrong (EOF is not an error) and is worth
+# reporting upstream.
+echo

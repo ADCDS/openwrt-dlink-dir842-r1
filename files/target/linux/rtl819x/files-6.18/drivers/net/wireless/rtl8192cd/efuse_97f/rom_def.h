@@ -57,7 +57,9 @@ typedef unsigned long long	UINT64;
 typedef signed long long	INT64;
 #endif
 
+#ifndef BIT
 #define BIT(x)	(1 << (x))
+#endif
 
 /* Register Macro */
 #ifndef REG32

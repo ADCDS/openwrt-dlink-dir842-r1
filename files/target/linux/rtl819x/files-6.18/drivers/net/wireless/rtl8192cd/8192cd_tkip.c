@@ -251,7 +251,7 @@ void michael(
 		*(volatile unsigned int *)GDMAISR  = 0xffffffff;
 		*(volatile unsigned int *)GDMAICVL = (l);
 		*(volatile unsigned int *)GDMAICVR = (r);
-		*(volatile unsigned int *)GDMASBP0 = virt_to_bus(message)+CONFIG_LUNA_SLAVE_PHYMEM_OFFSET;
+		*(volatile unsigned int *)GDMASBP0 = virt_to_phys(message)+CONFIG_LUNA_SLAVE_PHYMEM_OFFSET;
 		*(volatile unsigned int *)GDMASBL0 = GDMA_LDB|(num_blocks*4);
 		*(volatile unsigned int *)GDMADBP0 = 0;
 		*(volatile unsigned int *)GDMADBL0 = 0;

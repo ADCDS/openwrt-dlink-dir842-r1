@@ -65,7 +65,7 @@ static inline struct inode *file_inode(struct file *f)
 #endif
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3,10,0)
-void *PDE_DATA(const struct inode *inode)
+void *pde_data(const struct inode *inode)
 {
 	return PDE(inode)->data;
 }
@@ -74,7 +74,7 @@ void *PDE_DATA(const struct inode *inode)
 #define RTK_DECLARE_READ_PROC_FOPS(read_proc) \
 	int read_proc##_open(struct inode *inode, struct file *file) \
 	{ \
-			return(single_open(file, read_proc, PDE_DATA(file_inode(file)))); \
+			return(single_open(file, read_proc, pde_data(file_inode(file)))); \
 	} \
 	struct file_operations read_proc##_fops = { \
 			.open			= read_proc##_open, \
@@ -87,7 +87,7 @@ void *PDE_DATA(const struct inode *inode)
 	static ssize_t write_proc##_write(struct file * file, const char __user * userbuf, \
 		     size_t count, loff_t * off) \
 	{ \
-		return write_proc(file, userbuf,count, PDE_DATA(file_inode(file))); \
+		return write_proc(file, userbuf,count, pde_data(file_inode(file))); \
 	} \
 	struct file_operations write_proc##_fops = { \
 			.write			= write_proc##_write, \
@@ -98,11 +98,11 @@ void *PDE_DATA(const struct inode *inode)
 	static ssize_t read_proc##_write(struct file * file, const char __user * userbuf, \
 		     size_t count, loff_t * off) \
 	{ \
-		return write_proc(file, userbuf,count, PDE_DATA(file_inode(file))); \
+		return write_proc(file, userbuf,count, pde_data(file_inode(file))); \
 	} \
 	int read_proc##_open(struct inode *inode, struct file *file) \
 	{ \
-			return(single_open(file, read_proc, PDE_DATA(file_inode(file)))); \
+			return(single_open(file, read_proc, pde_data(file_inode(file)))); \
 	} \
 	struct file_operations read_proc##_fops = { \
 			.open			= read_proc##_open, \
@@ -5033,7 +5033,7 @@ static int rtl8192cd_proc_vlan_write(struct file *file, const char *buffer,
 		unsigned long count, void *data)
 {
 	#ifdef CONFIG_RTL_PROC_NEW
-	struct net_device *dev = PDE_DATA(file_inode(file));
+	struct net_device *dev = pde_data(file_inode(file));
 	#else
 	struct net_device *dev = (struct net_device *)data;
 	#endif
@@ -7733,7 +7733,7 @@ static int rtl8192cd_proc_psd_scan_write(struct file *file, const char *buffer,
 {
 
 #ifdef CONFIG_RTL_PROC_NEW
-	struct net_device *dev = PDE_DATA(file_inode(file));
+	struct net_device *dev = pde_data(file_inode(file));
 #else
 	struct net_device *dev = (struct net_device *)data;
 #endif
@@ -7893,7 +7893,7 @@ static int proc_set_phydm_cmd(struct file *file, const char *buffer,
 {
 
 #ifdef CONFIG_RTL_PROC_NEW
-    struct net_device *dev = PDE_DATA(file_inode(file));
+    struct net_device *dev = pde_data(file_inode(file));
 #else
     struct net_device *dev = (struct net_device *)data;
 #endif
@@ -7960,7 +7960,7 @@ static int proc_set_vdev_created(struct file *file, const char *buffer,
 {
 	char enable[8] = {0};
 #ifdef CONFIG_RTL_PROC_NEW
-	struct net_device *dev = PDE_DATA(file_inode(file));
+	struct net_device *dev = pde_data(file_inode(file));
 #else
 	struct net_device *dev = (struct net_device *)data;
 #endif

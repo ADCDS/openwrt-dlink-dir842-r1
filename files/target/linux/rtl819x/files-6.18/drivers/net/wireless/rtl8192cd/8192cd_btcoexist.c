@@ -1503,8 +1503,7 @@ u8 rtw_btcoex_sendmsgbysocket(BT_COEX_HAL_ADAPTER *padapter, u8 *msg, u8 msg_siz
 {
 	u8 error;
 	struct msghdr	udpmsg;
-	mm_segment_t	oldfs;
-	struct iovec	iov;
+	struct kvec	iov;
 	struct bt_coex_info *pcoex_info = &padapter->pshare->bt_coex_comm_data.coex_info;
 
 	/* RTW_INFO("%s: msg:%s, force:%s\n", __func__, msg, force == _TRUE?"TRUE":"FALSE"); */
@@ -1527,7 +1526,11 @@ u8 rtw_btcoex_sendmsgbysocket(BT_COEX_HAL_ADAPTER *padapter, u8 *msg, u8 msg_siz
 	 * third parameter for msg_iovlen
 	 * last parameter for iov_len
 	 */
-	iov_iter_init(&udpmsg.msg_iter, WRITE, &iov, 1, msg_size);
+	/* 6.18 port: iov_iter_kvec() (not iov_iter_init()) -- msg/iov is a
+	 * kernel buffer, and iov_iter_init() builds a user-space iterator.
+	 * mm_segment_t/get_fs()/set_fs() were removed entirely; they only
+	 * ever existed to paper over that mismatch for the old iterator. */
+	iov_iter_kvec(&udpmsg.msg_iter, WRITE, &iov, 1, msg_size);
 #else
 	udpmsg.msg_iov	 = &iov;
 	udpmsg.msg_iovlen	= 1;
@@ -1535,15 +1538,12 @@ u8 rtw_btcoex_sendmsgbysocket(BT_COEX_HAL_ADAPTER *padapter, u8 *msg, u8 msg_siz
 	udpmsg.msg_control	= NULL;
 	udpmsg.msg_controllen = 0;
 	udpmsg.msg_flags	= MSG_DONTWAIT | MSG_NOSIGNAL;
-	oldfs = get_fs();
-	set_fs(KERNEL_DS);
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 1, 0))
 	error = sock_sendmsg(pcoex_info->udpsock, &udpmsg);
 #else
 	error = sock_sendmsg(pcoex_info->udpsock, &udpmsg, msg_size);
 #endif
-	set_fs(oldfs);
 	if (error < 0) {
 		RTW_INFO("Error when sendimg msg, error:%d\n", error);
 		return _FAIL;

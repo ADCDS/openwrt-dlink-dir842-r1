@@ -235,7 +235,7 @@ static void rm_check_result(struct rtl8192cd_priv *priv)
         }
         else
         {
-            rm_do_next_measure((unsigned long)priv);
+            rm_do_next_measure(&priv->rm.delay_timer);
         }
     }
     else
@@ -268,7 +268,7 @@ void rm_terminate(struct rtl8192cd_priv *priv)
 {
     int i;
     if (timer_pending(&priv->rm.delay_timer))
-        del_timer_sync(&priv->rm.delay_timer);
+        timer_delete_sync(&priv->rm.delay_timer);
 
     for(i = 0; i < priv->rm.measure_count; i++)
     {
@@ -289,13 +289,13 @@ void rm_terminate(struct rtl8192cd_priv *priv)
 
 
 
-void rm_do_next_measure(unsigned long task_priv)
+void rm_do_next_measure(struct timer_list *t)
 {
 #ifndef SMP_SYNC
     unsigned long flag;
 #endif
     int i;
-    struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+    struct rtl8192cd_priv *priv = timer_container_of(priv, t, rm.delay_timer);
 
 #ifdef SMP_SYNC
     SAVE_INT_AND_CLI(priv->pshare->irq_save);

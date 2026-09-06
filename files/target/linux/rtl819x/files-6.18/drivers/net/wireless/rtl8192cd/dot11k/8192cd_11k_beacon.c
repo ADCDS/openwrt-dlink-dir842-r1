@@ -603,13 +603,13 @@ int rm_parse_beacon_report(struct stat_info *pstat,
     {
         pstat->rm.measure_result = MEASUREMENT_INCAPABLE;
         if (timer_pending(&pstat->rm_timer))
-            del_timer_sync(&pstat->rm_timer);
+            timer_delete_sync(&pstat->rm_timer);
     }
     else if(pframe[len + 3] & BIT2)  /*refused*/
     {
         pstat->rm.measure_result = MEASUREMENT_REFUSED;
         if (timer_pending(&pstat->rm_timer))
-            del_timer_sync(&pstat->rm_timer);
+            timer_delete_sync(&pstat->rm_timer);
     }
 
     return len + element_len + 2;
@@ -880,9 +880,9 @@ enum MEASUREMENT_RESULT rm_terminate_beacon_measure(struct rtl8192cd_priv *priv)
     if(priv->ss_req_ongoing == SSFROM_11K_BEACONREQ)
     {
         if (timer_pending(&priv->ss_timer))
-            del_timer_sync(&priv->ss_timer);
+            timer_delete_sync(&priv->ss_timer);
         priv->rm.force_stop_ss = 1;
-        rtl8192cd_ss_timer((unsigned long)priv);
+        rtl8192cd_ss_timer(&priv->ss_timer);
         priv->rm.force_stop_ss = 0;
         return MEASUREMENT_SUCCEED;
     }
@@ -892,9 +892,9 @@ enum MEASUREMENT_RESULT rm_terminate_beacon_measure(struct rtl8192cd_priv *priv)
     }
 }
 
-void rm_beacon_expire(unsigned long task_pstat)
+void rm_beacon_expire(struct timer_list *t)
 {
-    struct stat_info *pstat = (struct stat_info *)task_pstat;
+    struct stat_info *pstat = timer_container_of(pstat, t, rm_timer);
     
     if(pstat->rm.measure_result == MEASUREMENT_RECEIVED)
     {

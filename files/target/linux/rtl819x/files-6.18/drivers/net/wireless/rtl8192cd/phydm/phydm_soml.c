@@ -117,6 +117,35 @@ phydm_adaptive_soml_callback(
 }
 #endif
 
+
+/*
+ * ★ TIMER-CALLBACK ABI TRAMPOLINE -- see phydm_interface.c's ODM_InitializeTimer().
+ *
+ * On 4.14 the ODM_AP branch of ODM_InitializeTimer() did `pTimer->function =
+ * CallBackFunc; pTimer->data = (unsigned long)pDM_Odm;`, so every phydm timer
+ * callback was handed the ODM structure itself (the `pContext` argument was
+ * ignored outright on the AP path, and every AP caller passes NULL for it).
+ *
+ * 6.18's timer_setup() has no `.data`, so the port casts the callback to
+ * `void (*)(struct timer_list *)`. The cast silences the compiler but does not
+ * change what the callee does: each of these callbacks starts with
+ * `PDM_ODM_T pDM_Odm = (PDM_ODM_T)pDM_VOID;` and then dereferences ODM fields.
+ * It would therefore receive a `struct timer_list *` and read/write ODM members
+ * at wild offsets past a ~40-byte timer object -- silent adjacent-memory
+ * corruption rather than a clean oops, which is why it does not fault
+ * immediately.
+ *
+ * Recover the real ODM pointer with timer_container_of() and hand the callback
+ * exactly what it expects.
+ */
+static void phydm_adaptive_soml_timer_fn(struct timer_list *t)
+{
+	PDM_ODM_T p_dm_odm = timer_container_of(p_dm_odm, t,
+			dm_soml_table.phydm_adaptive_soml_timer);
+
+	phydm_adaptive_soml_callback(p_dm_odm);
+}
+
 void
 phydm_adaptive_soml_timers(
 	IN		PVOID		pDM_VOID,
@@ -129,7 +158,7 @@ phydm_adaptive_soml_timers(
 	if (state == INIT_SOML_TIMMER) {
 
 		ODM_InitializeTimer(p_dm_odm, &(p_dm_soml_table->phydm_adaptive_soml_timer),
-			(void *)phydm_adaptive_soml_callback, NULL, "phydm_adaptive_soml_timer");
+			(void *)phydm_adaptive_soml_timer_fn, NULL, "phydm_adaptive_soml_timer");
 	} else if (state == CANCEL_SOML_TIMMER) {
 
 		ODM_CancelTimer(p_dm_odm, &(p_dm_soml_table->phydm_adaptive_soml_timer));

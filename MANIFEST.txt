@@ -14,13 +14,21 @@ tree, except the repo-root section. Byte-size annotations are omitted for source
 that ship whole (see the vendor-source note); `git log -- <path>` is the authoritative
 size/history record for anything else.
 
-VENDOR SOURCE, PRESENT BUT NOT PORTED (M7 — see docs/PORT-MAIN-6.18-STATUS.md §6):
+VENDOR SOURCE, PORTED AND WORKING END TO END (M7 — see docs/PORT-MAIN-6.18-STATUS.md §6):
   target/linux/rtl819x/files-6.18/drivers/net/wireless/rtl8192cd/*   1117 files
   target/linux/rtl819x/files-6.18/include/net/rtl/*                    41 files
   target/linux/rtl819x/files-6.18/include/net80211/*                    4 files
-  Carried forward verbatim from `main` in one restructuring commit (`0e95e70`); untouched
-  since. Still targets 4.14-era kernel APIs and will not currently compile — Kconfig-gated
-  off in seed.config. Same redistribution basis as `main` (see root README, *Credits &
+  Ported onto 6.18 kernel APIs (timer_setup/timer_container_of, the DMA API, removed
+  proc/set_fs/access_ok shims, macro-collision fixes) on top of the verbatim carry-forward
+  from `main`. Compiles and links clean (zero errors, zero undefined symbols), loads clean
+  on real hardware, and — after a class of timer-callback ABI bugs was found and fixed —
+  beacons an AP that a real client associates to, gets DHCP from, and passes traffic over
+  (22.6 Mbit/s iperf3, 0 retransmits), simultaneously with the 5 GHz radio, with zero OOM
+  kills. Re-verified 2026-09-04: same image found already at 3h20m continuous uptime with
+  both radios still up, closing the earlier "is long-run stability real" open question.
+  Shipped in the release `seed.config` (`CONFIG_PACKAGE_kmod-rtl8192cd=y`, added only after
+  this was proven on hardware); left out of `seed-min.config`, which stays wireless-free to
+  fit a RAM boot. Same redistribution basis as `main` (see root README, *Credits &
   license*): Realtek copyright notices preserved intact; the core driver + phydm carry
   explicit GPLv2 grant headers; one chip-firmware blob
   (rtl8192cd/WlanHAL/Data/8197F/rtl8197Ffw.bin).
@@ -80,8 +88,13 @@ target/linux/rtl819x/                 the target itself (name distinct from upst
                                        sysupgrade-preserved
     etc/init.d/dir842-asic             owns boot-time ASIC bring-up (fabric_reset 3 ->
                                        gw_prog -> warm -> arm hwnat), role-aware
+    etc/init.d/asic-wifi-settle        one-shot, START=99: recovers radio0 (5 GHz, PCIe)
+                                       from a real boot-time race against wifi-scripts —
+                                       `wifi reload` up to 3x if `retry_setup_failed` —
+                                       verified live on a cold boot (2026-09-04)
     etc/uci-defaults/99-dir842        LAN 192.168.0.1/24 + 5 GHz band/channel seed,
-                                       idempotence-guarded
+                                       flow_offloading=1/flow_offloading_hw=0 (bench-
+                                       confirmed default, see docs §4), idempotence-guarded
     lib/upgrade/platform.sh           cr6b magic check (matches BOTH dlink,dir-842-r1 and
                                        the legacy gwr1200ac-v1 name), REQUIRE_IMAGE_METADATA
   rtl8192cd-files/lib/netifd/wireless/rtl8192cd.sh

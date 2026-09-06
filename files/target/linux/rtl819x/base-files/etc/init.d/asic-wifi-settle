@@ -1,0 +1,120 @@
+#!/bin/sh /etc/rc.common
+# DIR-842 R1 — recover a radio that lost the PCIe-probe/wifi-scripts boot race.
+#
+# ★ Found 2026-09-04, re-verifying M4 on a fresh factory-flash boot: `radio0`
+# (the 5 GHz rtw88 PCIe card) sometimes comes up with
+# `ubus call network.wireless status` reporting `"up": false,
+# "retry_setup_failed": true`, while `radio1` (the vendor 2.4 GHz driver, a
+# platform device with no probe race) comes up fine on the very same boot.
+# `logread` shows `wifi-scripts: Bug: PHY is undefined for device` landing
+# right around the PCIe card's own firmware-load log lines — netifd's
+# wifi-scripts asked for the phy before `rtw88_pci`'s probe had finished
+# registering it with `cfg80111`. `iw phy` independently confirms the phy is
+# genuinely there once probe finishes; nothing is missing, just late.
+# `wifi reload <radio>` recovers it immediately (confirmed live, `up: true`
+# within seconds, no reboot). This service is that recovery, automated: a
+# one-shot that waits for `ubus call network.wireless status` to settle, then
+# reloads any device that failed setup instead of leaving a working radio
+# looking dead until someone notices and reloads it by hand.
+#
+# The plan for this port always called for a service exactly like this
+# (referenced elsewhere in this tree's docs as "asic-wifi-settle") but it was
+# never actually written — this file is that missing piece, not a new design.
+#
+# 2026-09-04, SSH-at-boot fix: this service's retry loop (up to ~60s of
+# `wifi reload` attempts) runs on the same single core dropbear (S19) needs
+# for its banner/KEX, so it renices itself down (see start()) to stop hogging
+# the CPU from a concurrent SSH connection attempt. Scheduling-priority only —
+# it does not change the retry/grace timing or the recovery logic below.
+START=99
+
+RETRY_SECONDS=45
+
+settle_status() {
+	ubus -t 5 call network.wireless status 2>/dev/null
+}
+
+# List wifi-device names ("radio0", "radio1", ...) from a `network.wireless
+# status` JSON blob whose device is NOT disabled but IS reporting a failure.
+# No jsonfilter/jq dependency: the status keys are the device names at the top
+# level, and `disabled`/`retry_setup_failed`/`up` are simple booleans a few
+# lines below each — grep/awk over the pretty-printed ubus output is enough
+# and avoids adding a package dependency to this target for one script.
+failed_devices() {
+	awk '
+		/^\t"[a-z0-9]+": \{$/ { dev = $1; gsub(/[":{]/, "", dev); disabled=0; failed=0; up=1; next }
+		/"disabled": true/   { disabled = 1 }
+		/"retry_setup_failed": true/ { failed = 1 }
+		/"up": false/         { up = 0 }
+		/^\t\}/ {
+			if (dev != "" && disabled == 0 && (failed == 1 || up == 0)) print dev
+			dev = ""
+		}
+	'
+}
+
+start() {
+	local i=0 devs dev status
+
+	# See the file header, 2026-09-04: renice ourselves down so the boot-time
+	# `wifi reload` retries below don't starve a concurrent dropbear banner
+	# exchange for CPU. No-op if this busybox build lacks renice.
+	command -v renice >/dev/null 2>&1 && renice -n 15 -p $$ >/dev/null 2>&1
+
+	# Give wifi-scripts a real chance to finish on its own first -- this is a
+	# recovery path for the race, not a replacement for normal startup timing.
+	while [ $i -lt "$RETRY_SECONDS" ]; do
+		status="$(settle_status)"
+		[ -n "$status" ] || { i=$((i + 1)); sleep 1; continue; }
+		devs="$(echo "$status" | failed_devices)"
+		[ -z "$devs" ] && { logger -t asic-wifi-settle "all radios settled cleanly, nothing to do"; return 0; }
+		i=$((i + 1))
+		sleep 1
+	done
+
+	status="$(settle_status)"
+	devs="$(echo "$status" | failed_devices)"
+	if [ -z "$devs" ]; then
+		logger -t asic-wifi-settle "settled during the final check, nothing to do"
+		return 0
+	fi
+
+	# ★ 2026-09-04, learned live on the bench: ONE reload is not always enough --
+	# a run that hit this exact race needed a second cycle (reload, still down,
+	# reload again) before radio0 actually came up. Retry a few times, with a
+	# real pause between attempts, before concluding it is a genuine fault
+	# rather than the boot race this service exists to paper over.
+	local try=1
+	while [ $try -le 3 ]; do
+		for dev in $devs; do
+			logger -t asic-wifi-settle "$dev not up (attempt $try/3, boot-time PHY-probe race) - reloading"
+			wifi reload "$dev" >/dev/null 2>&1
+		done
+		sleep 5
+		status="$(settle_status)"
+		devs="$(echo "$status" | failed_devices)"
+		[ -z "$devs" ] && break
+		try=$((try + 1))
+	done
+
+	if [ -z "$devs" ]; then
+		logger -t asic-wifi-settle "reload recovered all radios (took $try attempt(s))"
+		return 0
+	fi
+
+	# ★ 2026-09-04: a reload can land just after this loop's own check -- observed
+	# radio0 report "still not up" here and then come up on its own a few seconds
+	# later, leaving a misleading "real fault" line in logread for a radio that was
+	# actually fine. Give the last reload a real grace period before crying wolf.
+	local grace=0
+	while [ $grace -lt 15 ]; do
+		sleep 3; grace=$((grace + 3))
+		devs="$(settle_status | failed_devices)"
+		[ -z "$devs" ] && { logger -t asic-wifi-settle "reload recovered all radios (settled ${grace}s after the last reload)"; return 0; }
+	done
+	logger -t asic-wifi-settle "still not up after 3 reload attempts + ${grace}s grace: $devs - likely a real fault, not the boot race this service handles"
+}
+
+stop() {
+	:
+}

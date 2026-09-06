@@ -58,14 +58,12 @@ const UINT8 mesh_PeerLinkStatesTable[][7] =
 
 int init_mesh(DRV_PRIV *priv)
 {
-    init_timer(&priv->mesh_peer_link_timer);
-    priv->mesh_peer_link_timer.data = (unsigned long) priv;
-    priv->mesh_peer_link_timer.function = mesh_peer_link_timer;
+    timer_setup(&priv->mesh_peer_link_timer, mesh_peer_link_timer, 0);
+
 
 #ifdef MESH_BOOTSEQ_AUTH
-    init_timer(&priv->mesh_auth_timer);
-    priv->mesh_auth_timer.data = (unsigned long) priv;
-    priv->mesh_auth_timer.function = mesh_auth_timer;
+    timer_setup(&priv->mesh_auth_timer, mesh_auth_timer, 0);
+
 #endif
 
     priv->mesh_Version = 1;
@@ -338,8 +336,15 @@ int proxyupdate_table_expire(DRV_PRIV* priv)
 
 
 #if defined(RTK_MESH_AODV_STANDALONE_TIMER)
-void mesh_standalone_timer_expire(DRV_PRIV* priv)
+void mesh_standalone_timer_expire(struct timer_list *t)
 {
+    /* 6.18 port: registered against both priv->mesh_expire_timer and
+     * priv->mesh_priv_sc->mesh_expire_timer -- mesh_priv_sc is a pointer to
+     * another full struct rtl8192cd_priv (the other band's interface), not
+     * a different struct type, so timer_container_of() recovers the right
+     * instance either way without needing two separate trampolines. */
+    DRV_PRIV *priv = timer_container_of(priv, t, mesh_expire_timer);
+
     aodv_expire(priv);
     mod_timer(&priv->mesh_expire_timer, jiffies + MESH_AODV_EXPIRE_TO);
 }
@@ -607,7 +612,7 @@ int static mesh_DFS_check(DRV_PRIV *priv, struct rx_frinfo *pfrinfo, UINT32 prec
         {
 
            	if (timer_pending(&priv->DFS_timer))
-    			del_timer(&priv->DFS_timer);
+    			timer_delete(&priv->DFS_timer);
             
 			InsertChannel(priv->NOP_chnl, &priv->NOP_chnl_num, priv->pmib->dot11RFEntry.dot11channel);			
 			RemoveChannel(priv, priv->available_chnl, &priv->available_chnl_num, priv->pmib->dot11RFEntry.dot11channel);
@@ -2302,7 +2307,7 @@ static void mesh_PeerLinkEstablish(DRV_PRIV *priv,  struct stat_info *pstat)
  *
  *	@retval	void
  */
-void mesh_auth_timer(unsigned long pVal)
+void mesh_auth_timer(struct timer_list *t)
 {
 
  
@@ -2310,7 +2315,7 @@ void mesh_auth_timer(unsigned long pVal)
     unsigned long		flags;
 #endif
 
-    DRV_PRIV *priv = (DRV_PRIV *)pVal;
+    DRV_PRIV *priv = timer_container_of(priv, t, mesh_auth_timer);
     struct stat_info	*pstat;
     struct list_head	*phead, *plist, *pprevlist;
 
@@ -2370,12 +2375,12 @@ restart:
  *
  *	@retval	void
  */
-void mesh_peer_link_timer(unsigned long pVal)
+void mesh_peer_link_timer(struct timer_list *t)
 {
 #ifndef SMP_SYNC
     unsigned long		flags;
 #endif
-    DRV_PRIV *priv = (DRV_PRIV *)pVal;
+    DRV_PRIV *priv = timer_container_of(priv, t, mesh_peer_link_timer);
     struct stat_info *pstat;
     struct list_head	*phead, *plist;
 
@@ -3964,9 +3969,9 @@ unsigned int OnAssocRsp_MP(DRV_PRIV *priv, struct rx_frinfo *pfrinfo)
 
     	// now we have successfully join the give bss...
     	if (timer_pending(&priv->reauth_timer))
-    		del_timer_sync(&priv->reauth_timer);
+    		timer_delete_sync(&priv->reauth_timer);
     	if (timer_pending(&priv->reassoc_timer))
-    		del_timer_sync(&priv->reassoc_timer);
+    		timer_delete_sync(&priv->reassoc_timer);
 
     	RESTORE_INT(flags);
 
@@ -5061,7 +5066,7 @@ int mesh_close(DRV_PRIV *priv)
 
 #if defined(RTK_MESH_AODV_STANDALONE_TIMER)
     if (timer_pending(&priv->mesh_expire_timer))
-       del_timer_sync(&priv->mesh_expire_timer);
+       timer_delete_sync(&priv->mesh_expire_timer);
 #endif
 
 

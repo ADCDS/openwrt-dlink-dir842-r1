@@ -26,15 +26,15 @@
 #define DFS_VERSION		"2.0.14"
 
 
-void rtl8192cd_dfs_chk_timer(unsigned long task_priv)
+void rtl8192cd_dfs_chk_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, dfs_chk_timer);
 
 	if (!(priv->drv_state & DRV_STATE_OPEN))
 		return;
 	
 	if (timer_pending(&priv->dfs_chk_timer)){
-		del_timer_sync(&priv->dfs_chk_timer);
+		timer_delete_sync(&priv->dfs_chk_timer);
 	}
 	
 	if (GET_CHIP_VER(priv) == VERSION_8192D)
@@ -99,9 +99,9 @@ void set_CHXX_timer(struct rtl8192cd_priv *priv, unsigned int channel)
 	}
 }
 
-void rtl8192cd_DFS_TXPAUSE_timer(unsigned long task_priv)
+void rtl8192cd_DFS_TXPAUSE_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, DFS_TXPAUSE_timer);
 	unsigned int which_channel;
 
 	printk("rtl8192cd_DFS_TXPAUSE_timer\n");
@@ -111,7 +111,7 @@ void rtl8192cd_DFS_TXPAUSE_timer(unsigned long task_priv)
 	
 	if (priv->available_chnl_num != 0) {
 		if (timer_pending(&priv->DFS_TXPAUSE_timer)) 
-			del_timer_sync(&priv->DFS_TXPAUSE_timer);
+			timer_delete_sync(&priv->DFS_TXPAUSE_timer);
 		
 		printk("rtl8192cd_DFS_TXPAUSE_timer PATH2\n");
 #if defined(UNIVERSAL_REPEATER)
@@ -674,9 +674,9 @@ void dfs_histogram_radar_distinguish(struct rtl8192cd_priv *priv)
 #endif
 }
 
-void rtl8192cd_DFS_timer(unsigned long task_priv)
+void rtl8192cd_DFS_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, DFS_timer);
 	unsigned int dfs_chk = 0;
 	unsigned long throughput = 0;
 	int j;
@@ -825,7 +825,7 @@ void rtl8192cd_DFS_timer(unsigned long task_priv)
 		}
 		
 		if (timer_pending(&priv->dfs_chk_timer)) {
-			del_timer(&priv->dfs_chk_timer);
+			timer_delete(&priv->dfs_chk_timer);
 			if (GET_CHIP_VER(priv) == VERSION_8192D)
 				PHY_SetBBReg(priv, 0xcdc, BIT(8)|BIT(9), 1);
 			PRINT_INFO("DFS CP2. Switch channel!\n");
@@ -840,9 +840,8 @@ void rtl8192cd_DFS_timer(unsigned long task_priv)
 				
 				PRINT_INFO("DFS CP1.\n");
 
-				init_timer(&priv->dfs_chk_timer);
-				priv->dfs_chk_timer.data = (unsigned long) priv;
-				priv->dfs_chk_timer.function = rtl8192cd_dfs_chk_timer;
+				timer_setup(&priv->dfs_chk_timer, rtl8192cd_dfs_chk_timer, 0);
+
 
 				mod_timer(&priv->dfs_chk_timer, jiffies + RTL_SECONDS_TO_JIFFIES(300));
 
@@ -853,7 +852,7 @@ void rtl8192cd_DFS_timer(unsigned long task_priv)
 		priv->pmib->dot11DFSEntry.disable_tx = 1;
 
 		if (timer_pending(&priv->ch_avail_chk_timer)) {
-			del_timer(&priv->ch_avail_chk_timer);
+			timer_delete(&priv->ch_avail_chk_timer);
 			RTL_W8(TXPAUSE, 0xff);
 			/* R4/G3 Path B: see the identical site in 8192cd_osdep.c — the enum and
 			 * the notifier are both RTK_NL80211-only. Hardware write above is kept. */
@@ -1005,9 +1004,9 @@ void rtl8192cd_DFS_timer(unsigned long task_priv)
 		}
 #endif
         if (timer_pending(&priv->DFS_timer))
-            del_timer(&priv->DFS_timer);
+            timer_delete(&priv->DFS_timer);
         if (timer_pending(&priv->dfs_det_chk_timer))
-            del_timer(&priv->dfs_det_chk_timer);
+            timer_delete(&priv->dfs_det_chk_timer);
 
 
 #if !defined(RTK_NL80211)
@@ -1065,9 +1064,9 @@ exit_timer:
 
 
 #ifdef CLIENT_MODE
-void rtl8192cd_dfs_cntdwn_timer(unsigned long task_priv)
+void rtl8192cd_dfs_cntdwn_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, dfs_cntdwn_timer);
 #ifdef SMP_SYNC
 	unsigned long flags;
 #endif
@@ -1085,9 +1084,9 @@ void rtl8192cd_dfs_cntdwn_timer(unsigned long task_priv)
 }
 #endif
 
-void rtl8192cd_ch_avail_chk_timer(unsigned long task_priv)
+void rtl8192cd_ch_avail_chk_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, ch_avail_chk_timer);
 #ifdef SMP_SYNC
 	unsigned long flags;
 #endif
@@ -1149,9 +1148,9 @@ if (GET_CHIP_VER(priv) == VERSION_8192D || GET_CHIP_VER(priv) == VERSION_8881A |
 }
 
 
-void rtl8192cd_ch52_timer(unsigned long task_priv)
+void rtl8192cd_ch52_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, ch52_timer);
 
 	if (!(priv->drv_state & DRV_STATE_OPEN))
 		return;
@@ -1176,9 +1175,9 @@ void rtl8192cd_ch52_timer(unsigned long task_priv)
 #endif
 }
 
-void rtl8192cd_ch56_timer(unsigned long task_priv)
+void rtl8192cd_ch56_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, ch56_timer);
 
 	if (!(priv->drv_state & DRV_STATE_OPEN))
 		return;
@@ -1200,9 +1199,9 @@ void rtl8192cd_ch56_timer(unsigned long task_priv)
 	}
 }
 
-void rtl8192cd_ch60_timer(unsigned long task_priv)
+void rtl8192cd_ch60_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, ch60_timer);
 
 	if (!(priv->drv_state & DRV_STATE_OPEN))
 		return;
@@ -1224,9 +1223,9 @@ void rtl8192cd_ch60_timer(unsigned long task_priv)
 #endif
 }
 
-void rtl8192cd_ch64_timer(unsigned long task_priv)
+void rtl8192cd_ch64_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, ch64_timer);
 
 	if (!(priv->drv_state & DRV_STATE_OPEN))
 		return;
@@ -1248,9 +1247,9 @@ void rtl8192cd_ch64_timer(unsigned long task_priv)
 #endif
 }
 
-void rtl8192cd_ch100_timer(unsigned long task_priv)
+void rtl8192cd_ch100_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, ch100_timer);
 
 	if (!(priv->drv_state & DRV_STATE_OPEN))
 		return;
@@ -1268,9 +1267,9 @@ void rtl8192cd_ch100_timer(unsigned long task_priv)
 	}
 }
 
-void rtl8192cd_ch104_timer(unsigned long task_priv)
+void rtl8192cd_ch104_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, ch104_timer);
 
 	if (!(priv->drv_state & DRV_STATE_OPEN))
 		return;
@@ -1288,9 +1287,9 @@ void rtl8192cd_ch104_timer(unsigned long task_priv)
 #endif
 }
 
-void rtl8192cd_ch108_timer(unsigned long task_priv)
+void rtl8192cd_ch108_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, ch108_timer);
 
 	if (!(priv->drv_state & DRV_STATE_OPEN))
 		return;
@@ -1308,9 +1307,9 @@ void rtl8192cd_ch108_timer(unsigned long task_priv)
 #endif
 }
 
-void rtl8192cd_ch112_timer(unsigned long task_priv)
+void rtl8192cd_ch112_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, ch112_timer);
 
 	if (!(priv->drv_state & DRV_STATE_OPEN))
 		return;
@@ -1328,9 +1327,9 @@ void rtl8192cd_ch112_timer(unsigned long task_priv)
 #endif
 }
 
-void rtl8192cd_ch116_timer(unsigned long task_priv)
+void rtl8192cd_ch116_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, ch116_timer);
 
 	if (!(priv->drv_state & DRV_STATE_OPEN))
 		return;
@@ -1348,9 +1347,9 @@ void rtl8192cd_ch116_timer(unsigned long task_priv)
 #endif
 }
 
-void rtl8192cd_ch120_timer(unsigned long task_priv)
+void rtl8192cd_ch120_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, ch120_timer);
 
 	if (!(priv->drv_state & DRV_STATE_OPEN))
 		return;
@@ -1368,9 +1367,9 @@ void rtl8192cd_ch120_timer(unsigned long task_priv)
 #endif
 }
 
-void rtl8192cd_ch124_timer(unsigned long task_priv)
+void rtl8192cd_ch124_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, ch124_timer);
 
 	if (!(priv->drv_state & DRV_STATE_OPEN))
 		return;
@@ -1388,9 +1387,9 @@ void rtl8192cd_ch124_timer(unsigned long task_priv)
 #endif
 }
 
-void rtl8192cd_ch128_timer(unsigned long task_priv)
+void rtl8192cd_ch128_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, ch128_timer);
 
 	if (!(priv->drv_state & DRV_STATE_OPEN))
 		return;
@@ -1408,9 +1407,9 @@ void rtl8192cd_ch128_timer(unsigned long task_priv)
 #endif
 }
 
-void rtl8192cd_ch132_timer(unsigned long task_priv)
+void rtl8192cd_ch132_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, ch132_timer);
 
 	if (!(priv->drv_state & DRV_STATE_OPEN))
 		return;
@@ -1428,9 +1427,9 @@ void rtl8192cd_ch132_timer(unsigned long task_priv)
 #endif
 }
 
-void rtl8192cd_ch136_timer(unsigned long task_priv)
+void rtl8192cd_ch136_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, ch136_timer);
 
 	if (!(priv->drv_state & DRV_STATE_OPEN))
 		return;
@@ -1448,9 +1447,9 @@ void rtl8192cd_ch136_timer(unsigned long task_priv)
 #endif
 }
 
-void rtl8192cd_ch140_timer(unsigned long task_priv)
+void rtl8192cd_ch140_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, ch140_timer);
 
 	if (!(priv->drv_state & DRV_STATE_OPEN))
 		return;
@@ -1468,9 +1467,9 @@ void rtl8192cd_ch140_timer(unsigned long task_priv)
 #endif
 }
 
-void rtl8192cd_ch144_timer(unsigned long task_priv)
+void rtl8192cd_ch144_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, ch144_timer);
 
 	if (!(priv->drv_state & DRV_STATE_OPEN))
 		return;
@@ -1683,9 +1682,9 @@ void DFS_SwitchChannel(struct rtl8192cd_priv *priv)
 }
 
 
-void rtl8192cd_dfs_det_chk_timer(unsigned long task_priv)
+void rtl8192cd_dfs_det_chk_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, dfs_det_chk_timer);
 	unsigned long throughput = 0;
 	int j;
 

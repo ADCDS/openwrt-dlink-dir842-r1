@@ -880,20 +880,20 @@ static void aes_tx(struct rtl8192cd_priv *priv, UINT8 *key, UINT8 keyid,
 #ifdef RTK_129X_PLATFORM
 	tmpaddr = get_physical_addr(priv, hdr, hdrlen + 8, PCI_DMA_TODEVICE);
 	rtl_cache_sync_wback(priv, tmpaddr, hdrlen + 8, PCI_DMA_TODEVICE);
-	pci_unmap_single(priv->pshare->pdev, tmpaddr, hdrlen + 8, PCI_DMA_TODEVICE);
+	dma_unmap_single(&priv->pshare->pdev->dev, tmpaddr, hdrlen + 8, PCI_DMA_TODEVICE);
 	if (llc) {
 		tmpaddr = get_physical_addr(priv, llc, 8, PCI_DMA_TODEVICE);
 		rtl_cache_sync_wback(priv, tmpaddr, 8, PCI_DMA_TODEVICE);
-		pci_unmap_single(priv->pshare->pdev, tmpaddr, 8, PCI_DMA_TODEVICE);
+		dma_unmap_single(&priv->pshare->pdev->dev, tmpaddr, 8, PCI_DMA_TODEVICE);
 	}
 
 	tmpaddr = get_physical_addr(priv, pframe, plen, PCI_DMA_TODEVICE);
 	rtl_cache_sync_wback(priv, tmpaddr, plen, PCI_DMA_TODEVICE);
-	pci_unmap_single(priv->pshare->pdev, tmpaddr, plen, PCI_DMA_TODEVICE);
+	dma_unmap_single(&priv->pshare->pdev->dev, tmpaddr, plen, PCI_DMA_TODEVICE);
 
 	tmpaddr = get_physical_addr(priv, txmic, 8, PCI_DMA_TODEVICE);
 	rtl_cache_sync_wback(priv, tmpaddr, 8, PCI_DMA_TODEVICE);
-	pci_unmap_single(priv->pshare->pdev, tmpaddr, 8, PCI_DMA_TODEVICE);
+	dma_unmap_single(&priv->pshare->pdev->dev, tmpaddr, 8, PCI_DMA_TODEVICE);
 #elif defined(CONFIG_PCI_HCI)
 	rtl_cache_sync_wback(priv, (unsigned long)hdr, hdrlen + 8, PCI_DMA_TODEVICE);
 	if (llc)

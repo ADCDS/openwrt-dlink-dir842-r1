@@ -1342,7 +1342,7 @@ void mp_start_test(struct rtl8192cd_priv *priv)
 
 	// stop site survey
 	if (timer_pending(&priv->ss_timer))
-		del_timer_sync(&priv->ss_timer);
+		timer_delete_sync(&priv->ss_timer);
 
 	// stop receiving packets
 #ifdef  CONFIG_WLAN_HAL
@@ -5379,9 +5379,9 @@ void mp_dig(struct rtl8192cd_priv *priv, unsigned char *data)
 #else
 #ifdef CONFIG_RTL_92D_SUPPORT
 #ifdef __ECOS
-		del_timer_sync(&priv->pshare->MP_DIGTimer);
+		timer_delete_sync(&priv->pshare->MP_DIGTimer);
 #else
-		del_timer(&priv->pshare->MP_DIGTimer);	
+		timer_delete(&priv->pshare->MP_DIGTimer);	
 #endif
 #endif
 #endif	
@@ -6843,9 +6843,9 @@ int mp_arx(struct rtl8192cd_priv *priv, unsigned char *data)
 #if defined(CONFIG_RTL_92D_SUPPORT)
 		if (timer_pending(&priv->pshare->MP_DIGTimer)) {
 #ifdef __ECOS
-		del_timer_sync(&priv->pshare->MP_DIGTimer);
+		timer_delete_sync(&priv->pshare->MP_DIGTimer);
 #else
-		del_timer(&priv->pshare->MP_DIGTimer);
+		timer_delete(&priv->pshare->MP_DIGTimer);
 #endif
 		}
 #endif

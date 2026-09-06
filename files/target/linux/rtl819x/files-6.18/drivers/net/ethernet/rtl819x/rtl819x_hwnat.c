@@ -83,12 +83,25 @@ MODULE_PARM_DESC(hwnat,
 #define HWNAT_AGING_INTERVAL	(5 * HZ)
 
 /*
- * One installed hardware flow. `flow` is stored ONLY to match the eventual DEL by
- * pointer value — it is never dereferenced after ADD returns (the flow may be freed
- * behind our back, see the file header). `orig_tuple` is a by-value copy of the
- * ORIGINAL-direction conntrack tuple taken while the flow is provably alive (during
- * ADD); Phase-3 step 4 uses it for a UAF-safe flow_offload_lookup()-based timeout
- * refresh. idx_out/idx_in are the two ASIC NAPT row indices we own for this flow.
+ * One installed hardware flow. idx_out/idx_in are the two ASIC NAPT row indices
+ * we own for this flow.
+ *
+ * ★ Corrected 2026-09-04 — this comment used to describe a `flow`/`orig_tuple`
+ * pair and a "Phase-3 step 4" UAF-safe flow_offload_lookup()-based timeout
+ * refresh, neither of which exists in this struct or file any more: they were
+ * part of the pre-TC_SETUP_FT downstream xt_FLOWOFFLOAD handshake (see
+ * `main:files/target/linux/realtek/files-4.14/drivers/net/ethernet/rtl819x/
+ * rtl819x_hwnat.c`'s hwnat_refresh_timeout()) and were removed by the
+ * ndo_flow_offload -> TC_SETUP_FT migration without the comment being updated
+ * — which itself hid a real bug (fixed the same day: see hwnat_flow_stats()
+ * below). The refresh job mainline actually expects is FLOW_CLS_STATS, i.e.
+ * hwnat_flow_stats(): the kernel's own nf_flow_table core polls it and pushes
+ * the flow's software timeout out based on what it reports, roughly once a
+ * flow's remaining time drops under ~90% of its offload timeout. There is no
+ * driver-side push mechanism to reimplement; hwnat_aging_work_fn()'s "push its
+ * software GC timeout out" comment below is the same kind of stale claim —
+ * that function's poll is diagnostic only (the AGE log line, and reaping a
+ * slot whose row the ASIC already auto-deleted), not a keepalive path.
  */
 struct hwnat_slot {
 	struct list_head		list;
@@ -105,13 +118,32 @@ struct hwnat_slot {
 	u16				int_port, rem_port, gport;
 	u16				idx_out;	/* outbound ASIC row */
 	u16				idx_in;		/* inbound  ASIC row */
-	u8				last_aging;	/* last agingTime seen by the worker */
+	u8				last_aging;	/* last idx_out agingTime seen by the worker */
+	u8				last_aging_in;	/* last idx_in  agingTime seen by the worker */
 	u8				is_tcp;
 };
 /* All of the following are protected by rtl865x_hal_lock. */
 static LIST_HEAD(hwnat_flows);
 static DECLARE_BITMAP(hwnat_used, RTL865X_NAPT_ROWS);	/* rows this module owns */
 static bool hwnat_active;				/* datapath up (open) & armed */
+static bool hwnat_flow_hot;	/* >=1 installed flow's ASIC row was hit within the last
+				 * aging poll -- see rtl819x_hwnat_has_hot_flow() below and
+				 * its comment in rtl819x_hwnat.h. */
+static bool hwnat_any_installed;	/* >=1 flow currently has ASIC rows installed. Set the
+				 * instant a slot is added (true from packet 1), cleared only
+				 * when the flow list empties -- see rtl819x_hwnat_any_flow_
+				 * installed(). Unlike hwnat_flow_hot (which needs a 5s aging
+				 * poll to observe a HIT) this closes the timing gap where a
+				 * just-installed or stalled-before-hot flow is momentarily
+				 * invisible to the LARGE-FRAME WEDGE detector's suppression. */
+
+/* Recompute the lock-free hwnat_any_installed snapshot from the actual list.
+ * Self-correcting (no refcount drift): call under rtl865x_hal_lock after ANY
+ * mutation of hwnat_flows. */
+static void hwnat_installed_update(void)
+{
+	WRITE_ONCE(hwnat_any_installed, !list_empty(&hwnat_flows));
+}
 
 static void hwnat_aging_work_fn(struct work_struct *w);
 static DECLARE_DELAYED_WORK(hwnat_aging_work, hwnat_aging_work_fn);
@@ -160,6 +192,7 @@ static void hwnat_flush_locked(void)
 		list_del(&slot->list);
 		kfree(slot);
 	}
+	hwnat_installed_update();
 }
 
 /*
@@ -217,6 +250,37 @@ static int napt_fill_all;
 module_param(napt_fill_all, int, 0644);
 MODULE_PARM_DESC(napt_fill_all, "DIAG: write the outbound NAPT row at all 1024 indices to test whether the index derivation is the fault (0=off)");
 
+/* ★ 2026-09-04: forward-only ASIC offload. The ASIC reverse (WAN->LAN) NAPT row
+ * MATCHES (its aging pins hot) but was dual-capture-measured to DROP ~50% of return
+ * frames on delivery to the LAN jack (peer sent 35, LAN client received 18), which
+ * stalls the forward transfer (client stuck on a stale zero-window). With this set,
+ * we install ONLY the outbound row and clear the inbound slot, so WAN->LAN un-NAT
+ * falls to the software path (NEIGH) -- forward stays silicon-accelerated (bulk),
+ * reverse is just low-volume ACKs on the CPU. Default 0 = install both rows. */
+static int napt_no_reverse;
+module_param(napt_no_reverse, int, 0644);
+MODULE_PARM_DESC(napt_no_reverse, "1 = skip the ASIC reverse (idx_in) row; WAN->LAN un-NAT falls to software (default 0 = install both)");
+
+/* ★ 2026-09-05: the NAPT row's priority field (asic_napt_tcpudp.priValid/.priority,
+ * rtl865x_asichal.h:75) was never set anywhere in this driver -- every ASIC-accelerated
+ * row installs with priValid=0 (priority explicitly marked not-in-use). Found live on
+ * hardware: a bulk LAN->WAN transfer under hw=1 sends an initial burst far faster than
+ * the software-forwarding path ever produces (hardware forwarding's near-zero added
+ * latency lets the sender's TCP window ramp up explosively during slow-start -- captured
+ * at the peer: 515 packets in ~40ms), and a SPECIFIC segment within that burst is
+ * silently dropped and every retransmission of that exact same segment ALSO fails,
+ * repeatedly, permanently stalling the connection even though hundreds of KB on either
+ * side of it were delivered fine. That is the signature of an unprioritized flow losing
+ * arbitration at a shared, momentarily-congested egress queue (this SoC's port0 RGMII
+ * trunk carries every LAN<->WAN routed flow, documented elsewhere in this driver as the
+ * congestion point for exactly this kind of burst) -- not random loss, since the SAME
+ * priority class would lose the SAME arbitration on every retry. Default 0 keeps the
+ * previous (unset) behavior for a quick A/B revert; positive values are written into the
+ * row's `priority` field (masked to the real 3-bit hardware range) with `priValid=1`. */
+static int napt_priority = 7;
+module_param(napt_priority, int, 0644);
+MODULE_PARM_DESC(napt_priority, "NAPT row priValid/priority (0-7, hardware ceiling): 0 or negative = leave priValid unset (previous/default driver behavior); >0 = mark the row priValid=1 with this priority (default 7, highest)");
+
 static int hwnat_program_rows(u32 is_tcp, u32 int_ip, u16 int_port, u16 gport,
 			      u32 rem_ip, u16 rem_port, u16 idx_out, u16 idx_in)
 {
@@ -226,13 +290,15 @@ static int hwnat_program_rows(u32 is_tcp, u32 int_ip, u16 int_port, u16 gport,
 	struct asic_napt_tcpudp e, v;
 	int rc;
 
-	/* ★ KEY BYTE ORDER. The napt_fill_all discriminator proved the INDEX is not the
-	 * fault: with all 1024 rows holding this row the ASIC still reported reason 7
-	 * ("no matched NAPT entry"), i.e. it reaches a row and REJECTS the key. Byte order
-	 * is the prime suspect, and it is precisely where the SDKs diverge -- 3.4.11B+ adds
-	 * htonl()/htons() in l4Driver/rtl865x_nat.c on the hash index and the outbound row
-	 * match, which our 3.4.9.x reference lacks (it computes unswapped at :325-326 while
-	 * swapping at :714-716). 1 = network order (previous behaviour), 0 = host order. */
+	/* ★ KEY BYTE ORDER — settled: HOST order (numeric), napt_key_htonl default 0.
+	 * ⚠ An earlier note here read the napt_fill_all reason=7 as "proof the key byte-order
+	 * is wrong." That is now known to be a CONFOUNDED reading (see the napt_fill_all
+	 * comment below): under the ASIC's actual 4-way+enhanced-hash SWTCR1, filling all
+	 * indices violates hash-consistency, so a persistent reason=7 does not prove the key
+	 * is rejected. Independent, stronger evidence says the key/hash are CORRECT: they are
+	 * byte-identical to the working 4.14 driver and the ASIC was observed matching a
+	 * driver-installed row (reverse hwFwd=1, docs §4). Do not re-swap the byte order;
+	 * reason=7 is an aging/teardown + DSA-context problem, not a key-encoding bug. */
 	memset(&e, 0, sizeof(e));
 	e.intIPAddr  = int_ip;
 	e.intPort    = int_port;
@@ -247,14 +313,26 @@ static int hwnat_program_rows(u32 is_tcp, u32 int_ip, u16 int_port, u16 gport,
 	e.selEIdx    = gport & 0x3ff;
 	e.offset     = gport >> 10;
 	e.TCPFlag    = (napt_tcpflag < 0) ? 0x3 : (napt_tcpflag & 0x7);	/* vendor outbound: 0x2|0x1, nat.c:1142 */
+	if (napt_priority > 0) {
+		e.priValid = 1;
+		e.priority = napt_priority & 0x7;
+	}
 
-	/* ★ DIAGNOSTIC: napt_fill_all writes the OUTBOUND row at EVERY index, which
-	 * separates the two possible causes of the ASIC's "no matched NAPT entry" trap
-	 * (decoded reason 7) in a single shot:
-	 *   - if the trap DISAPPEARS, every index now holds a valid row, so the row
-	 *     CONTENT/key is acceptable to the silicon and our INDEX derivation is wrong;
-	 *   - if the trap PERSISTS, the hardware is reaching a row and rejecting it, so the
-	 *     KEY FIELDS are wrong and no amount of index fixing will help.
+	/* ★ DIAGNOSTIC: napt_fill_all writes the OUTBOUND row at EVERY index, meant to
+	 * separate index-fault from key-fault for the "no matched NAPT entry" trap (reason 7):
+	 *   - trap DISAPPEARS => key/content is fine, our INDEX derivation was wrong;
+	 *   - trap PERSISTS   => hardware reaches a row and rejects the KEY.
+	 * ⚠ 2026-09-04 CONFOUND — this discriminator is NOT valid under the SWTCR1 this ASIC
+	 * actually runs (0x2200 = EnL4WayH=1 4-way + L4EnHash1=1 enhanced-hash). Under 4-way +
+	 * enhanced-hash the silicon very likely VERIFIES hash-consistency (a matched row must
+	 * sit at ITS OWN hash index). Filling all 1024 indices deliberately violates that at
+	 * 1023 of them, so a persistent reason=7 could mean "row is not at its own hash index"
+	 * rather than "key fields wrong" — the two are no longer separated. The clean form of
+	 * this test needs a flat 1-way table (EnL4WayH=0), which clearing wedged the L4
+	 * datapath. Independent evidence says the key is NOT the fault anyway: the hash is
+	 * byte-identical to the working 4.14 driver and the ASIC was observed matching a
+	 * driver-installed row (reverse hwFwd=1). Treat reason=7 as an aging/teardown +
+	 * DSA-datapath-context problem, not an index/key encoding bug. See docs §4.
 	 * Debug only -- it destroys the inbound row and the whole table. */
 	if (napt_fill_all) {
 		u16 i;
@@ -270,6 +348,18 @@ static int hwnat_program_rows(u32 is_tcp, u32 int_ip, u16 int_port, u16 gport,
 	rc = rtl865x_napt_write(idx_out, &e);
 	if (rc)
 		return rc;
+
+	if (napt_no_reverse) {
+		/* Forward-only ASIC: clear the inbound slot so the ASIC has NO reverse
+		 * match there (a stale/prefill row could otherwise false-hit), and let
+		 * WAN->LAN un-NAT fall to the software path. See the param comment above. */
+		rtl865x_napt_clear(idx_in);
+		if (rtl865x_napt_read(idx_out, &v) || !v.valid || v.intIPAddr != int_ip) {
+			rtl865x_napt_clear(idx_out);
+			return -EIO;
+		}
+		return 0;
+	}
 
 	/* Inbound/return row is NOT a TCPFlag-tweaked copy of the outbound row. The ASIC
 	 * treats it as a VERIFICATION row (enhanced-hash1): its offset/selEIdx/selIPIdx
@@ -295,6 +385,10 @@ static int hwnat_program_rows(u32 is_tcp, u32 int_ip, u16 int_port, u16 gport,
 	e.selEIdx  = gw_napt_hash1(is_tcp, rem_ip, rem_port, 0, 0) & 0x3ff;
 	e.selIPIdx = (gport & 0x3ff) >> 6;
 	e.TCPFlag  = 0x2;			/* vendor inbound: 0x2 (unidirectional) | 0x0 (inbound), nat.c:1142 */
+	/* priValid/priority carries over from the memset+outbound-row setup above (this
+	 * struct is reused, not re-zeroed) whenever napt_priority>0 -- the reverse/ACK row
+	 * needs to keep pace with a now-larger forward burst too, not just the outbound row. */
+
 	rc = rtl865x_napt_write(idx_in, &e);
 	if (rc) {
 		rtl865x_napt_clear(idx_out);
@@ -382,17 +476,20 @@ static int hwnat_add_flow(const struct hwnat_rule *r, unsigned long cookie)
 		HWNAT_DECLINE("add: extIP %pI4h != live WAN IP %pI4h (oif=%s)",
 			      &ext_ip, &wan_ip, r->out_dev->name);
 
-	/* The ASIC hashes/keys the ON-WIRE (network-order) header fields. The vendor
-	 * driver installs the outbound row at hash(htonl(intIP),htons(intPort),
-	 * htonl(remIP),htons(remPort)) to match it (sdk-ref l4Driver/rtl865x_nat.c:716;
-	 * the vendor's naptEntry IPs/ports are HOST order -- see the 0xc0a8030b test
-	 * literals in rtl865x_proc_debug.c:1725 and the byte<<24|byte<<16|... compose in
-	 * rtl865x_multipleWan.c:1018 -- and it converts with htonl/htons at the ASIC
-	 * boundary). This is a LITTLE-ENDIAN build (target rtl8197f ARCH:=mipsel,
-	 * CONFIG_CPU_LITTLE_ENDIAN=y), so htonl(host)!=host: feeding host order writes the
-	 * row at a byte-swapped index the ASIC never looks up -> every outbound packet
-	 * misses, traps to the CPU, and the orphan row just ages out (the exact symptom).
-	 * Feed NETWORK order for the index AND for the stored key + G-encoding (below). */
+	/* ★ The ASIC keys and hashes on NUMERIC (host-order) values — proven from the
+	 * stock binary disassembly (docs/HWNAT-OFFLOAD.md §4: `801ae9d4 ror ...` == an
+	 * ntohl the vendor applies so its OWN host-order naptEntry matches the on-wire
+	 * frame; net effect = numeric/host order end to end). int_ip/int_port arrived here
+	 * already host-order (ntohl/ntohs at the FLOW_CLS_REPLACE parse, see the
+	 * napt_key_htonl note above), the stored row key is the same host-order value
+	 * (hwnat_program_rows: e.intIPAddr = int_ip), and the hash index below is computed
+	 * from the same. The A/B `napt_key_htonl` param defaults OFF (host order) because
+	 * that is what was measured to work.
+	 * ⚠ An earlier version of THIS comment said "feed NETWORK order" — that was a
+	 * REFUTED hypothesis (docs/HWNAT-OFFLOAD.md §11.1, RETRACTIONS #21). The index is
+	 * NOT the cause of reason=7: the ASIC has been observed matching a row installed at
+	 * exactly this index on real silicon (hwFwd=1 reason=0000). reason=7 is an
+	 * aging/teardown artifact, not a placement bug. Do not re-swap the byte order. */
 	idx_out = gw_napt_hash1(is_tcp, int_ip, int_port, rem_ip, rem_port);
 	/* Return-path row: the ASIC hashes the INBOUND packet {src=rem, dst=ext:G} to
 	 * locate the reverse row, so it must live at hash(remIP,remPort,extIP,G) -- NOT at
@@ -429,10 +526,14 @@ static int hwnat_add_flow(const struct hwnat_rule *r, unsigned long cookie)
 		goto out_unlock;
 	if (rc > 0)
 		hwnat_flush_locked();
-	/* And the WAN NETIF MAC itself: eth0.1 is destroyed/recreated on ifdown/ifup,
-	 * and a gw_prog run in the down-window programs netif[1] from a stale shadow.
-	 * The nexthop resync below never catches that (it keys on the PEER MAC), so
-	 * compare the live netdev MAC here and reprogram + flush on divergence. */
+	/* And the WAN NETIF MAC itself: rtl865x_wan_netif_mac_sync() heals netif[1]
+	 * against a stale shadow of the "wan" netdev's own MAC (see that function's
+	 * header comment in rtl865x_asichal.c for the corrected, DSA-accurate
+	 * rationale — an earlier version of this comment named the 4.14/swconfig
+	 * "eth0.1" VLAN subinterface, which does not exist on this port). The
+	 * nexthop resync below never catches this on its own (it keys on the PEER
+	 * MAC, not our own), so compare the live netdev MAC here and reprogram +
+	 * flush on divergence. */
 	if (rtl865x_wan_netif_mac_sync() > 0)
 		hwnat_flush_locked();
 	rc = rtl865x_wan_set_nexthop(r->wan_peer_mac, wan_pppoe,
@@ -485,8 +586,10 @@ static int hwnat_add_flow(const struct hwnat_rule *r, unsigned long cookie)
 	slot->idx_out    = idx_out;
 	slot->idx_in     = idx_in;
 	slot->last_aging = RTL865X_NAPT_AGING_RELOAD;
+	slot->last_aging_in = RTL865X_NAPT_AGING_RELOAD;
 	slot->is_tcp     = is_tcp;
 	list_add_tail(&slot->list, &hwnat_flows);
+	hwnat_installed_update();	/* true from packet 1 -> wedge detector sees the flow */
 
 	mutex_unlock(&rtl865x_hal_lock);
 
@@ -516,6 +619,15 @@ static int hwnat_del_cookie(unsigned long cookie)
 	list_for_each_entry_safe(slot, tmp, &hwnat_flows, list) {
 		if (slot->cookie_out != cookie && slot->cookie_in != cookie)
 			continue;
+		/* M5 diag (2026-09-04): was silent. Logged so a bench pass can tell a
+		 * genuine ifdown/flush-driven DEL apart from the kernel core reaping a
+		 * flow FLOW_CLS_STATS just under-reported -- see the long comment in
+		 * hwnat_flow_stats() above. A DEL landing here seconds after this same
+		 * idx_out/idx_in pair showed real hwFwd=1 traffic is the signature of
+		 * the bug that comment describes; one that never did is ordinary GC. */
+		pr_info_ratelimited("rtl819x hwnat: -%s idx_out=%u idx_in=%u cookie=%lu\n",
+				     slot->is_tcp ? "tcp" : "udp", slot->idx_out,
+				     slot->idx_in, cookie);
 		rtl865x_napt_clear(slot->idx_out);
 		rtl865x_napt_clear(slot->idx_in);
 		__clear_bit(slot->idx_out, hwnat_used);
@@ -524,6 +636,7 @@ static int hwnat_del_cookie(unsigned long cookie)
 		kfree(slot);
 		found++;
 	}
+	hwnat_installed_update();
 	mutex_unlock(&rtl865x_hal_lock);
 
 	return found ? 0 : -ENOENT;
@@ -774,7 +887,7 @@ static int hwnat_flow_replace(struct flow_cls_offload *cls)
 
 static int hwnat_flow_stats(struct flow_cls_offload *cls)
 {
-	struct asic_napt_tcpudp e;
+	struct asic_napt_tcpudp e, ein;
 	struct hwnat_slot *slot;
 	u64 lastused = 0;
 
@@ -783,14 +896,40 @@ static int hwnat_flow_stats(struct flow_cls_offload *cls)
 	 * counter that reloads on a hit. Report activity through lastused and
 	 * leave the counters at zero -- which is why conntrack accounting freezes
 	 * on an offloaded flow, exactly as it did on the 4.14 port.
+	 *
+	 * ★ M5 fix (2026-09-04, bench-confirmed): this used to check idx_out ONLY.
+	 * This is the sole path that keeps mainline's nf_flow_table core from
+	 * expiring an offloaded flow -- hwnat_aging_work_fn()'s own 5s poll reads
+	 * BOTH rows and logs them ("hwnat AGE out[]=.. in[]=.." below) but has no
+	 * mechanism of its own to push the kernel's flow->timeout out; the comment
+	 * there claiming it does predates the mainline TC_SETUP_FT rework and is
+	 * stale (the old xt_FLOWOFFLOAD-era hwnat_refresh_timeout() it describes
+	 * was removed with the ndo_flow_offload -> TC_SETUP_FT migration and never
+	 * replaced). So FLOW_CLS_STATS reporting idx_out-only silently starved
+	 * every flow whose *inbound* row was the one taking hits: nf_flow_offload_
+	 * gc_step() sees stale lastused, expires the flow, and our own
+	 * hwnat_del_cookie() wipes both rows out from under still-live hardware
+	 * forwarding. Measured on the bench: sustained LAN->WAN bulk data hashes
+	 * to idx_out and never once showed hwFwd=1, while idx_in (small return
+	 * traffic) DID take real hardware hits (hwFwd=1, isOrig=0 -- a genuine
+	 * ASIC-forwarded copy) for a ~4s window, then the whole flow reverted to
+	 * 100% software-path misses and reinstalled at the SAME indices 99s
+	 * later -- exactly the signature of the kernel core reaping a flow this
+	 * function had wrongly reported as idle. Check either row; a hit on
+	 * either direction is real evidence the flow is alive in silicon.
 	 */
 	mutex_lock(&rtl865x_hal_lock);
 	list_for_each_entry(slot, &hwnat_flows, list) {
+		bool out_hot, in_hot;
+
 		if (slot->cookie_out != cls->cookie && slot->cookie_in != cls->cookie)
 			continue;
-		if (!rtl865x_napt_read(slot->idx_out, &e) && e.valid &&
-		    (e.agingTime >= RTL865X_NAPT_AGING_RELOAD ||
-		     e.agingTime > slot->last_aging))
+		out_hot = !rtl865x_napt_read(slot->idx_out, &e) && e.valid &&
+			  (e.agingTime >= RTL865X_NAPT_AGING_RELOAD ||
+			   e.agingTime > slot->last_aging);
+		in_hot = !rtl865x_napt_read(slot->idx_in, &ein) && ein.valid &&
+			 ein.agingTime >= RTL865X_NAPT_AGING_RELOAD;
+		if (out_hot || in_hot)
 			lastused = jiffies;
 		break;
 	}
@@ -877,15 +1016,23 @@ int rtl819x_hwnat_setup_tc(struct net_device *dev, enum tc_setup_type type,
 /* ------------------------------------------------------------------ aging worker */
 
 /*
- * Runs every HWNAT_AGING_INTERVAL in process context. Two jobs:
- *  - OBSERVE (Phase-3 steps 1-3): read each row's live agingTime (which ticks because
- *    TEACR L4-aging is on), reap rows the ASIC auto-deleted at age-0, count how many are
- *    still hot. Never dereferences slot->flow.
- *  - REFRESH (step 4): for every still-hot row, hwnat_refresh_timeout() pushes the software
- *    flow's GC timeout out (UAF-safe, by orig_tuple under RCU). This is what lets an actively
- *    HW-forwarded flow avoid being GC'd + software-re-learned every ~30 s. The refresh is a
- *    no-op until xt_FLOWOFFLOAD registers its table (see the handshake section above);
- *    without it a long-lived flow just re-learns each GC timeout — correct, only less optimal.
+ * Runs every HWNAT_AGING_INTERVAL in process context. This is DIAGNOSTIC ONLY —
+ * read each row's live agingTime (which ticks because TEACR L4-aging is on), log
+ * both rows' ages, and reap rows the ASIC auto-deleted at age-0 (see the comment
+ * at that branch below). It does NOT keep a flow's software timeout alive; the
+ * `active` counter it computes feeds nothing but a pr_debug summary.
+ *
+ * ★ Corrected 2026-09-04: this comment used to describe a "REFRESH (step 4)"
+ * job — hwnat_refresh_timeout() pushing the software flow's GC timeout out via
+ * a UAF-safe orig_tuple/flow_offload_lookup(), gated on an xt_FLOWOFFLOAD
+ * handshake. None of that exists in this file (it belonged to the pre-
+ * TC_SETUP_FT downstream ndo_flow_offload mechanism 4.14 still uses — see
+ * `main:.../rtl819x_hwnat.c`'s hwnat_refresh_timeout()) and the comment
+ * describing it as still-functional-but-a-no-op was itself wrong: it hid the
+ * fact that NOTHING refreshes the kernel's flow timeout except
+ * hwnat_flow_stats() (FLOW_CLS_STATS), whose idx_out-only check was starving
+ * every flow whose hardware hits landed on idx_in — see the fix and full
+ * account in hwnat_flow_stats() above. Fixed the same day.
  */
 static void hwnat_aging_work_fn(struct work_struct *w)
 {
@@ -928,21 +1075,50 @@ static void hwnat_aging_work_fn(struct work_struct *w)
 			 * attempted (L3 routes the reply before the L4 reverse stage). */
 			struct asic_napt_tcpudp ein;
 			u8 age_in = 0xff;
-			if (!rtl865x_napt_read(slot->idx_in, &ein) && ein.valid)
+			bool in_hot = false, out_hot = false;
+
+			if (!rtl865x_napt_read(slot->idx_in, &ein) && ein.valid) {
 				age_in = ein.agingTime;
+				/* ★ 2026-09-04: the SAME idx_out-vs-idx_in blind spot that was
+				 * fixed in hwnat_flow_stats() (FLOW_CLS_STATS) also lived HERE, in
+				 * the poll that computes hwnat_flow_hot -- the ONLY signal the
+				 * LARGE-FRAME WEDGE detector uses to suppress its false-positive
+				 * fabric+NAPT-table reset. Bench-measured: a sustained LAN->WAN bulk
+				 * flow's hardware hits land on idx_in (small return traffic), while
+				 * idx_out shows cold. Counting idx_out ONLY reported hwnat_flow_hot
+				 * = false for exactly the flow being genuinely hardware-forwarded,
+				 * so the wedge detector fired and level-3-recovery WIPED the live
+				 * NAPT table mid-flow. Count EITHER row hot -- same contract as
+				 * hwnat_flow_stats()'s out_hot||in_hot. */
+				if (age_in >= RTL865X_NAPT_AGING_RELOAD ||
+				    age_in > slot->last_aging_in)
+					in_hot = true;
+				slot->last_aging_in = age_in;
+			}
 			pr_err("hwnat AGE out[%u]=%u in[%u]=%u\n",
 			       slot->idx_out, e.agingTime, slot->idx_in, age_in);
-		}
-		if (e.agingTime >= RTL865X_NAPT_AGING_RELOAD || e.agingTime > slot->last_aging) {
-			/* Row still hot (agingTime at the reload ceiling, or it ticked back UP
-			 * since the last poll = the ASIC reloaded it on a recent hit) => the flow
-			 * is live in silicon. Push its software GC timeout out so the flowtable
-			 * GC doesn't tear it down at 30 s idle and force a software re-learn. */
-			active++;
+
+			out_hot = (e.agingTime >= RTL865X_NAPT_AGING_RELOAD ||
+				   e.agingTime > slot->last_aging);
+			/* Either row hot => the flow is live in silicon. hwnat_flow_hot
+			 * only cares that active > 0, so counting a both-rows-hot slot once
+			 * is all that matters (it is the LARGE-FRAME WEDGE detector's sole
+			 * suppression signal, see rtl819x_hwnat_has_hot_flow() / .h). This
+			 * poll does not and cannot push any kernel-side GC timeout; that is
+			 * hwnat_flow_stats()'s job. */
+			if (out_hot || in_hot)
+				active++;
 		}
 		slot->last_aging = e.agingTime;
 	}
+	hwnat_installed_update();	/* the reap loop above may have emptied the list */
 	mutex_unlock(&rtl865x_hal_lock);
+
+	/* Snapshot for rtl819x_hwnat_has_hot_flow() -- see rtl819x_hwnat.h. Plain
+	 * WRITE_ONCE, no lock: an off-by-one-poll-interval staleness on this value
+	 * is harmless (the wedge check only needs "was something hot recently"),
+	 * matching the READ_ONCE(rtl819x_hwnat_enabled) style already used here. */
+	WRITE_ONCE(hwnat_flow_hot, active > 0);
 
 	if (total)
 		pr_debug("rtl819x hwnat: aging poll — %u flows, %u active, %u reaped\n",
@@ -981,4 +1157,19 @@ void rtl819x_hwnat_stop(void)
 
 	/* Outside the lock (the worker takes it): wait for any in-flight poll to finish. */
 	cancel_delayed_work_sync(&hwnat_aging_work);
+
+	/* Every row is gone (hwnat_flush_locked() above); nothing can be hot now. Set
+	 * this AFTER the cancel_sync so a poll that was already in flight can't race
+	 * back in and re-set it from its own (now-stale) snapshot. */
+	WRITE_ONCE(hwnat_flow_hot, false);
+}
+
+bool rtl819x_hwnat_has_hot_flow(void)
+{
+	return READ_ONCE(hwnat_flow_hot);
+}
+
+bool rtl819x_hwnat_any_flow_installed(void)
+{
+	return READ_ONCE(hwnat_any_installed);
 }

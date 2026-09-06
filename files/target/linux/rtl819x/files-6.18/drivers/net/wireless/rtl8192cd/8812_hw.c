@@ -3663,13 +3663,13 @@ void SwitchChannel(struct rtl8192cd_priv *priv)
  	if (!priv->pmib->dot11DFSEntry.disable_DFS &&
 		(OPMODE & WIFI_AP_STATE)) {
 		if (timer_pending(&priv->DFS_timer))
-			del_timer_sync(&priv->DFS_timer);
+			timer_delete_sync(&priv->DFS_timer);
 
 		if (timer_pending(&priv->ch_avail_chk_timer))
-			del_timer_sync(&priv->ch_avail_chk_timer);
+			timer_delete_sync(&priv->ch_avail_chk_timer);
 
 		if (timer_pending(&priv->dfs_det_chk_timer))
-			del_timer_sync(&priv->dfs_det_chk_timer);
+			timer_delete_sync(&priv->dfs_det_chk_timer);
  	}
 #endif
 
@@ -3762,9 +3762,8 @@ void SwitchChannel(struct rtl8192cd_priv *priv)
 		((priv->pmib->dot11RFEntry.dot11channel >= 100) &&
 		(priv->pmib->dot11RFEntry.dot11channel <= 140)))) {
 
-		init_timer(&priv->ch_avail_chk_timer);
-		priv->ch_avail_chk_timer.data = (unsigned long) priv;
-		priv->ch_avail_chk_timer.function = rtl8192cd_ch_avail_chk_timer;
+		timer_setup(&priv->ch_avail_chk_timer, rtl8192cd_ch_avail_chk_timer, 0);
+
 
 		if ((priv->pmib->dot11StationConfigEntry.dot11RegDomain == DOMAIN_ETSI) &&
 			(IS_METEOROLOGY_CHANNEL(priv->pmib->dot11RFEntry.dot11channel)))
@@ -3772,20 +3771,17 @@ void SwitchChannel(struct rtl8192cd_priv *priv)
 		else
 			mod_timer(&priv->ch_avail_chk_timer, jiffies + CH_AVAIL_CHK_TO);
 
-		init_timer(&priv->DFS_timer);
-		priv->DFS_timer.data = (unsigned long) priv;
-		priv->DFS_timer.function = rtl8192cd_DFS_timer;
+		timer_setup(&priv->DFS_timer, rtl8192cd_DFS_timer, 0);
 
-		init_timer(&priv->DFS_TXPAUSE_timer);
-		priv->DFS_TXPAUSE_timer.data = (unsigned long) priv;
-		priv->DFS_TXPAUSE_timer.function = rtl8192cd_DFS_TXPAUSE_timer;
+
+		timer_setup(&priv->DFS_TXPAUSE_timer, rtl8192cd_DFS_TXPAUSE_timer, 0);
+
 
 		/* DFS activated after 5 sec; prevent switching channel due to DFS false alarm */
 		mod_timer(&priv->DFS_timer, jiffies + RTL_SECONDS_TO_JIFFIES(5));
 
-		init_timer(&priv->dfs_det_chk_timer);
-		priv->dfs_det_chk_timer.data = (unsigned long) priv;
-		priv->dfs_det_chk_timer.function = rtl8192cd_dfs_det_chk_timer;
+		timer_setup(&priv->dfs_det_chk_timer, rtl8192cd_dfs_det_chk_timer, 0);
+
 
 		mod_timer(&priv->dfs_det_chk_timer, jiffies + RTL_MILISECONDS_TO_JIFFIES(priv->pshare->rf_ft_var.dfs_det_period*10));
 

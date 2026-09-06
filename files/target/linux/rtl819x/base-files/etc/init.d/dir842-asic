@@ -29,6 +29,22 @@
 # wedged trunk->jack forwarding state in the external RTL8367S. There is no
 # swconfig under DSA and no userspace equivalent; the switch driver programs that
 # state at probe.
+#
+# 2026-09-04, SSH-at-boot fix: dropbear (S19) is already listening by the time
+# this script (S97) runs, so a slow first `ssh` on a cold boot is this script
+# (plus asic-wifi-settle, S99) hogging the single 500 MHz core while dropbear's
+# banner/KEX tries to run. Two changes here address that:
+#   - This whole script renices itself (see the top of start()) so the CFS
+#     scheduler favors a concurrent SSH handshake over our own polling/ioctl
+#     work. Pure scheduling-priority change, zero effect on what gets programmed
+#     or in what order.
+#   - `dir842.asic.fast_boot` (default OFF) would let fabric_reset use level 1
+#     (engine-only) instead of level 3 at cold boot. It is NOT enabled by
+#     default and should not be enabled without re-running the forwarding bench
+#     first: level 3 is the MEASURED-REQUIRED path documented immediately below
+#     (100% loss on every path without it) and that finding has NOT been
+#     retested since. The knob exists so a lighter path can be tried and
+#     reverted without editing this file. See asic_program() for the guard.
 START=97
 
 asic_warm_hosts() {
@@ -65,8 +81,22 @@ wait_netif() {
 
 asic_program() {
 	if [ "$ROLE" = "router" ]; then
-		echo 3 > /sys/module/rtl819x/parameters/fabric_reset 2>/dev/null
-		sleep 3
+		# ⚠ fast_boot is an OPT-IN, OFF-BY-DEFAULT escape hatch for re-testing
+		# whether a cold boot really needs level 3. It is NOT a validated fast
+		# path: the last time this was measured, level 1 alone left the box
+		# forwarding NOTHING (see the file header and docs/HWNAT-OFFLOAD.md
+		# §8). Only turn it on to re-run that experiment on your own bench,
+		# with full forwarding verification before trusting a boot with it on:
+		#   uci set dir842.asic.fast_boot='1'; uci commit dir842
+		# Revert with fast_boot='0' (or delete the option) if forwarding breaks.
+		if [ "$(uci -q get dir842.asic.fast_boot)" = "1" ]; then
+			logger -t dir842-asic "fast_boot=1: using fabric_reset=1 (engine reinit only), NOT the proven fabric_reset=3 -- unverified, revert with 'uci set dir842.asic.fast_boot=0' if forwarding breaks"
+			echo 1 > /sys/module/rtl819x/parameters/fabric_reset 2>/dev/null
+			sleep 1
+		else
+			echo 3 > /sys/module/rtl819x/parameters/fabric_reset 2>/dev/null
+			sleep 3
+		fi
 		cat /proc/rtl865x_gw >/dev/null 2>&1
 	else
 		logger -t dir842-asic "bridge role: skipping fabric reset and gw_prog (L2 aging left ENABLED)"
@@ -85,6 +115,16 @@ asic_warm() {
 }
 
 start() {
+	# SSH-at-boot fix (2026-09-04): drop this whole script's scheduling
+	# priority so a concurrent dropbear banner/KEX (S19, already listening)
+	# isn't starved by our polling loops and fabric_reset/gw_prog calls.
+	# Children (the `echo`/`cat`/`ping`/`ubus` subshells below) inherit the
+	# nice value at fork, so one renice here covers the whole script. This is
+	# ONLY a CFS scheduling-priority change: it does not alter what gets
+	# programmed, in what order, or how long any single step takes. No-op,
+	# harmlessly, if this busybox build lacks the renice applet.
+	command -v renice >/dev/null 2>&1 && renice -n 15 -p $$ >/dev/null 2>&1
+
 	logger -t dir842-asic "bring-up starting"
 
 	# Wait for the driver's programming interface rather than exiting if it is

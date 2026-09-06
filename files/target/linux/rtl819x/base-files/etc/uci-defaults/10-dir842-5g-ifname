@@ -1,0 +1,142 @@
+#!/bin/sh
+# DIR-842 R1 (RTL8197F) -- pin the 5 GHz (rtw88 / mac80211) wifi-iface to
+# wlan1. Ported from openwrt-4.14's 10_wireless-5g-ifname-dir842, the
+# field-tested fix for a real, previously-hit collision on this exact board.
+#
+# WHY THIS EXISTS (not yet reproduced on port/main-6.18, because kmod-rtl8192cd
+# has never shipped in an image alongside kmod-rtw88 -- see
+# docs/PORT-MAIN-6.18-STATUS.md §6 -- but this is the same root cause the
+# 4.14 product hit, and nothing here has changed to fix it structurally):
+#
+# mac80211.uc derives the interface name from a per-radio counter that starts
+# at 0 with no awareness of any OTHER netdev already on the system
+# (wifi-scripts' mac80211.sh: `ifname="${prefix}${type}${idx:-0}"`, prefix
+# defaults to "wlan"). The on-SoC 2.4 GHz radio is driven by the vendor
+# rtl8192cd driver, which creates a REAL netdev named wlan0 the moment its
+# module loads (AUTOLOAD priority 60, before mac80211 detection typically
+# runs). If the 5 GHz radio's AP interface also lands on index 0, the two
+# collide, and netifd ends up handing hostapd the *vendor's* netdev:
+#
+#   netifd:  radio0: Device setup failed: INTERFACE_CREATION_FAILED
+#   hostapd: nl80211: Could not configure driver mode
+#   hostapd: nl80211 driver initialization failed.
+#
+# ...and the 5 GHz AP never starts, while /sys/class/ieee80211 shows a
+# perfectly healthy, unattached phy. The radio itself is fine -- only the
+# NAME is wrong. Pinning it is the whole fix (verified on the 4.14 product:
+# wlan1 comes up on channel 36 and enters br-lan forwarding state alongside
+# the vendor's wlan0).
+#
+# ORDERING: 09-dir842-2g seeds radio1 (the vendor radio) and runs BEFORE this
+# script, but that seed does NOT itself trigger mac80211 detection -- so
+# whether the mac80211 wifi-device+wifi-iface already exist by the time THIS
+# script runs depends entirely on whether detection has fired yet.
+#
+# On this port that is a genuine race, not a formality. The 4.14 product's
+# /etc/init.d/boot ran the old synchronous `config_generate` before
+# uci-defaults at all, so mac80211 detection was always already done by the
+# time its own copy of this script ran. THIS tree's boot() has no such step
+# (openwrt/package/base-files/files/etc/init.d/boot). mac80211 detection
+# instead happens either (a) via boot()'s own early `/sbin/wifi config` at
+# line 48 -- but that runs BEFORE kmodloader, so on a first/clean boot no
+# wifi kmod is loaded yet and it typically detects nothing -- or (b) via
+# /etc/hotplug.d/ieee80211/10-wifi-detect, fired ASYNCHRONOUSLY by procd off
+# the kernel uevent when kmodloader loads rtw88, with no synchronisation back
+# to boot()'s own linear progress toward uci_apply_defaults. This script can
+# genuinely run before either of those has finished.
+#
+# An earlier version of this script tried to detect that race by checking
+# `! uci -q get wireless.@wifi-iface[0]` and calling `wifi config` only as a
+# fallback when nothing existed yet -- but 09-dir842-2g (numbered to run
+# first) has, by construction, ALREADY created wireless.default_radio1 (a
+# wifi-iface) by the time that line runs, so the precondition was always
+# false and the fallback never fired, on any boot: this pin could silently
+# lose the race and leave radio0 (mac80211) unpinned for that boot, exactly
+# the wlan0/wlan0 collision this script exists to prevent.
+#
+# Fixed by dropping the precondition entirely and always calling
+# `wifi config` here ourselves: it is idempotent (mac80211.uc's
+# radio_exists() matches an existing wifi-device by phy/macaddr/path before
+# creating a new one, so re-running it once detection has already happened
+# is a safe no-op -- package/network/config/wifi-scripts/files/lib/wifi/
+# mac80211.uc) and cheap enough to just always run, synchronously, before
+# the pin pass below. That makes this script self-sufficient against the
+# async hotplug race instead of gambling on it having already resolved by
+# the time uci_apply_defaults gets here.
+#
+# If a mac80211 wifi-iface still doesn't exist afterward (no mac80211
+# hardware in this image), still exit 0 -- see the ★ note below on why failing
+# here is actively dangerous on this board.
+#
+# ★★ DO NOT call `wifi config` from this script, and DO NOT exit non-zero.
+# Both were here originally and both are boot-breaking on this target:
+#
+#   /etc/init.d/boot's boot() runs, in this exact order:
+#       [ -f /etc/board.json ] && /sbin/wifi config   <-- stock, already does this
+#       /sbin/kmodloader
+#       uci_apply_defaults                            <-- WE RUN HERE
+#       sync
+#       /sbin/reload_config                           <-- makes netifd APPLY the
+#                                                         network config
+#
+#   uci_apply_defaults is synchronous and inline. Anything that hangs in one of
+#   these scripts means boot() never reaches /sbin/reload_config, so netifd is
+#   never told to apply /etc/config/network: br-lan gets CREATED (netifd's own
+#   startup config_init does that) but never receives its address, the interface
+#   never enters a firewall zone (so ping is dropped and TCP comes back RST /
+#   "connection refused"), dropbear never starts, and dir842-asic's
+#   `ubus wait_for network.interface.lan` + wait_netif() both time out, logging
+#   "recovery level 3" ~100s in. That was the exact, repeatedly-observed failure
+#   state on this port, and it looked for a long time like a netifd bug.
+#   `wifi config` iterates every /lib/netifd/wireless handler, which is precisely
+#   the code path that hangs here when a classic shell handler is present (see
+#   the rtl8192cd.sh header and docs/PORT-MAIN-6.18-STATUS.md §6) -- so calling it
+#   from inside uci_apply_defaults is exactly the wrong place.
+#   Stock boot() already ran `wifi config` before kmodloader, and the
+#   /etc/hotplug.d/ieee80211 detection re-runs after the modules load, so this
+#   script does not need to trigger detection itself at all.
+#
+#   The old `exit 1` ("keep me queued for next boot") compounded it: a script
+#   that exits non-zero is retried on EVERY subsequent boot, so a hang here
+#   repeats forever instead of being a one-time cost.
+
+. /lib/functions.sh
+
+pinned=0
+
+# Pin by DEVICE TYPE, not by section name: which of radio0/radio1 ends up
+# mac80211 depends on detection order (see 09-dir842-2g's comment on
+# mac80211.uc's free-index walk), and pinning wlan1 onto the VENDOR radio
+# would push mac80211 naming into a WEXT driver that cannot use it. Only ever
+# touch a type='mac80211' radio, and only the first one -- this board has
+# exactly one.
+pin_mac80211_iface() {
+	local sec="$1" dev type cur
+
+	[ "$pinned" = 1 ] && return 0
+
+	config_get dev "$sec" device
+	[ -n "$dev" ] || return 0
+
+	type="$(uci -q get "wireless.$dev.type")"
+	[ "$type" = "mac80211" ] || return 0
+
+	cur="$(uci -q get "wireless.$sec.ifname")"
+	[ "$cur" = "wlan1" ] && { pinned=1; return 0; }
+
+	uci set "wireless.$sec.ifname"='wlan1'
+	pinned=1
+}
+
+config_load wireless
+config_foreach pin_mac80211_iface wifi-iface
+
+# No mac80211 radio in the config yet: exit 0 anyway (see the ★★ note above --
+# never exit non-zero from here). The pin is not required for a correct boot; the
+# hotplug-driven mac80211 detection runs after kmodloader and the collision this
+# guards against only matters once both radios are actually configured. If the
+# pin did not happen this boot, the worst case is that it does not happen at all
+# -- which is strictly better than re-running a boot-blocking script forever.
+[ "$pinned" = 1 ] && uci commit wireless
+
+exit 0

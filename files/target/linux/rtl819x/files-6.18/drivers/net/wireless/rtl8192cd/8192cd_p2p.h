@@ -523,6 +523,9 @@ struct noa_list
 
 #define MAX_P2P_IE_LEN 128
 struct p2p_context {
+	/* 6.18 port: backpointer so timer_container_of() can recover the
+	 * owning priv -- p2pPtr is a separate allocation, not embedded. */
+	struct rtl8192cd_priv		*priv;
 	struct timer_list		p2p_search_timer_t;
 	struct timer_list		p2p_find_timer_t;
 

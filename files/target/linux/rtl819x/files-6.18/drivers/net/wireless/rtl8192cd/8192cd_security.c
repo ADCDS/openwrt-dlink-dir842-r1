@@ -1182,7 +1182,7 @@ int __DOT11_Indicate_MIC_Failure(struct net_device *dev, struct stat_info *pstat
 
 		// Stop Timer (fill a timer before than now)
 		if (timer_pending(&priv->MIC_check_timer))
-			del_timer_sync(&priv->MIC_check_timer);
+			timer_delete_sync(&priv->MIC_check_timer);
 		priv->MIC_timer_on = FALSE;
 
 		// Start Timer to reject assocaiton request from STA, and reject all the packet
@@ -1287,9 +1287,9 @@ int DOT11_Indicate_MIC_Failure(struct net_device *dev, struct stat_info *pstat)
 #endif
 }
 
-void DOT11_Process_MIC_Timerup(unsigned long data)
+void DOT11_Process_MIC_Timerup(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)data;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, MIC_check_timer);
 
 	if (!(priv->drv_state & DRV_STATE_OPEN))
 		return;
@@ -1298,9 +1298,9 @@ void DOT11_Process_MIC_Timerup(unsigned long data)
 	priv->MIC_timer_on = FALSE;
 }
 
-void DOT11_Process_Reject_Assoc_Timerup(unsigned long data)
+void DOT11_Process_Reject_Assoc_Timerup(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)data;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, assoc_reject_timer);
 
 	if (!(priv->drv_state & DRV_STATE_OPEN))
 		return;
@@ -1342,7 +1342,7 @@ void __DOT11_Indicate_MIC_Failure_Clnt(struct rtl8192cd_priv *priv, unsigned cha
 
 		// Stop Timer (fill a timer before than now)
 		if (timer_pending(&priv->MIC_check_timer))
-			del_timer_sync(&priv->MIC_check_timer);
+			timer_delete_sync(&priv->MIC_check_timer);
 		priv->MIC_timer_on = FALSE;
 
 		// Start Timer to reject assocaiton request from STA, and reject all the packet
@@ -2283,7 +2283,7 @@ int rtl8192cd_ioctl_priv_daemonreq(struct net_device *dev, struct iw_point *data
 			HS2_DEBUG_INFO("issue_BSS_TSM_req and set timer to disassoc[%d]ms\n",(tsmreq.Disassoc_timer * 60 * 1000));
 						
            	if (timer_pending(&priv->disassoc_timer))
-        		del_timer_sync(&priv->disassoc_timer);            
+        		timer_delete_sync(&priv->disassoc_timer);            
 			mod_timer(&priv->disassoc_timer, jiffies + RTL_MILISECONDS_TO_JIFFIES(tsmreq.Disassoc_timer * 60 * 1000));
 			}
 			break;
@@ -3168,14 +3168,14 @@ int rtl8192cd_ioctl_priv_daemonreq(struct net_device *dev, struct iw_point *data
 				
 					if(LED_Configuring == 1){
 						if (timer_pending(&priv->pshare->LED_Timer))
-							del_timer_sync(&priv->pshare->LED_Timer);
+							timer_delete_sync(&priv->pshare->LED_Timer);
 						//init another timer for specific function	
 							StartCFGINGTimer();
 						
 					}else{
 						//del another timer that specific function used	
 						if (timer_pending(&LED_TimerCFGING))
-							del_timer_sync(&LED_TimerCFGING);
+							timer_delete_sync(&LED_TimerCFGING);
 						enable_sw_LED(priv, 1);
 					}
 				}

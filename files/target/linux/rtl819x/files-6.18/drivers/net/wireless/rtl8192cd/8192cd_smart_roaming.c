@@ -49,12 +49,12 @@ static void sr_timer_rec_add() {
 
 static void sr_timer_rec_del(){
     if(wlan0_used && (wlan0_deleted == 0)){
-        del_timer_sync(timer_wlan0);
+        timer_delete_sync(timer_wlan0);
         wlan0_used = 0;
         wlan0_deleted = 1;
     }
     if(wlan1_used && (wlan1_deleted == 0)){ 
-        del_timer_sync(timer_wlan1);
+        timer_delete_sync(timer_wlan1);
         wlan1_used = 0;
         wlan1_deleted = 1;
     }
@@ -100,12 +100,12 @@ void timer_ready(struct rtl8192cd_priv *priv)
 void timer_del(struct rtl8192cd_priv *priv)
 {
     if (!strcmp(priv->dev->name, "wlan0")){
-			del_timer_sync(&priv->send_timer_wlan0);
+			timer_delete_sync(&priv->send_timer_wlan0);
 			wlan0_used = 0;
             wlan0_deleted = 1;
     }
     else if (!strcmp(priv->dev->name, "wlan1")){
-			del_timer_sync(&priv->send_timer_wlan1);
+			timer_delete_sync(&priv->send_timer_wlan1);
 		    wlan1_used = 0;
             wlan1_deleted = 1;              
        }

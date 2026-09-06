@@ -112,7 +112,13 @@
 #include <linux/io.h>
 #include <linux/delay.h>
 
-#include <asm/mach-realtek/realtek_mem.h>
+/*
+ * 6.18 port: the 4.14 tree carried these sysc accessors in
+ * <asm/mach-realtek/realtek_mem.h>. They now live in the target's own
+ * mach-rtl819x header, which keeps the SAME names (REALTEK_SR_*, sr_r32(),
+ * sr_w32()) precisely so consumers like this one port across unchanged.
+ */
+#include <asm/mach-rtl819x/rtl819x-sysc.h>
 
 #define WMAC_CHIP_ID_8197F	0x8197f000u
 #define WMAC_CHIP_ID_MASK	0xfffff000u
@@ -137,7 +143,7 @@ struct rtl8197f_wmac {
 
 /*
  * SR (SoC system registers, 0xB8000000) are reached through the tree's existing
- * sr_r32()/sr_w32() macros from <asm/mach-realtek/realtek_mem.h>, which go via
+ * sr_r32()/sr_w32() helpers from <asm/mach-rtl819x/rtl819x-sysc.h>, which go via
  * the shared _sys_membase mapping. Do NOT ioremap this block here: it is shared
  * with the PCIe, IRQ and ethernet drivers, and claiming it would collide.
  */
@@ -318,12 +324,12 @@ static int rtl8197f_wmac_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int rtl8197f_wmac_remove(struct platform_device *pdev)
+/* 6.18: platform_driver::remove returns void (the old int return was ignored). */
+static void rtl8197f_wmac_remove(struct platform_device *pdev)
 {
 	struct rtl8197f_wmac *w = platform_get_drvdata(pdev);
 
 	rtl8197f_wmac_disable(w);
-	return 0;
 }
 
 static const struct of_device_id rtl8197f_wmac_of_match[] = {

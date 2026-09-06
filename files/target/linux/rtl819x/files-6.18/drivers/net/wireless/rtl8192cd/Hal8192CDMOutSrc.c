@@ -485,9 +485,10 @@ void set_DIG_state(struct rtl8192cd_priv *priv, int state)
 #endif
 
 #ifdef CONFIG_RTL_92D_SUPPORT
-void MP_DIG_process(unsigned long task_priv)
+void MP_DIG_process(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct priv_shared_info *pshare = timer_container_of(pshare, t, MP_DIGTimer);
+	struct rtl8192cd_priv *priv = pshare->priv;
 	u4Byte						RXOK_cal, RxPWDBAve;
 	//unsigned int	FA_cnt_ofdm = priv->pshare->ofdm_FA_cnt1 + priv->pshare->ofdm_FA_cnt2 +
 	//                             priv->pshare->ofdm_FA_cnt3 + priv->pshare->ofdm_FA_cnt4;
@@ -4325,9 +4326,9 @@ void set_rssi_cmd(struct rtl8192cd_priv *priv, struct stat_info *pstat)
 
 #if defined(CONFIG_RTL_92D_SUPPORT) || defined(CONFIG_RTL_92C_SUPPORT)
 #ifdef CONFIG_PCI_HCI
-void add_rssi_timer(unsigned long task_priv)
+void add_rssi_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, add_rssi_timer);
 	struct stat_info *pstat = NULL;
 	unsigned int set_timer = 0;
 	unsigned long flags = 0;
@@ -4336,7 +4337,7 @@ void add_rssi_timer(unsigned long task_priv)
 		return;
 
 	if (timer_pending(&priv->add_rssi_timer))
-		del_timer_sync(&priv->add_rssi_timer);
+		timer_delete_sync(&priv->add_rssi_timer);
 
 #ifdef PCIE_POWER_SAVING
 	if ((priv->pwr_state == L2) || (priv->pwr_state == L1))
@@ -4814,9 +4815,10 @@ void dm_SW_AntennaSwitch(struct rtl8192cd_priv *priv, char Step)
 }
 
 
-void dm_SW_AntennaSwitchCallback(unsigned long task_priv)
+void dm_SW_AntennaSwitchCallback(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv*)task_priv;
+	struct priv_shared_info *pshare = timer_container_of(pshare, t, swAntennaSwitchTimer);
+	struct rtl8192cd_priv *priv = pshare->priv;
 #ifndef SMP_SYNC
 	unsigned long flags = 0;
 #endif
@@ -5227,9 +5229,9 @@ int diversity_antenna_select(struct rtl8192cd_priv *priv, unsigned char *data)
 //3 ============================================================
 
 #if defined(CONFIG_RTL_92D_SUPPORT) && defined(CONFIG_RTL_NOISE_CONTROL)
-void dnc_timer(unsigned long task_priv)
+void dnc_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, dnc_timer);
 	struct stat_info *pstat = NULL;
 	unsigned int set_timer = 0;
 	unsigned long flags;
@@ -5238,7 +5240,7 @@ void dnc_timer(unsigned long task_priv)
 		return;
 
 	if (timer_pending(&priv->dnc_timer))
-		del_timer_sync(&priv->dnc_timer);
+		timer_delete_sync(&priv->dnc_timer);
 
 #ifdef PCIE_POWER_SAVING
 	if ((priv->pwr_state == L2) || (priv->pwr_state == L1))
@@ -5317,7 +5319,7 @@ void DetectSTAExistance(struct rtl8192cd_priv *priv, struct tx_rpt *report, stru
 
 			if(CHIP_VER_92X_SERIES(priv) {
 			if (timer_pending(&priv->pshare->rl_recover_timer))
-				del_timer_sync (&priv->pshare->rl_recover_timer);
+				timer_delete_sync (&priv->pshare->rl_recover_timer);
 			mod_timer(&priv->pshare->rl_recover_timer, jiffies + EXPIRE_TO*TFRL_RcvTime);
 			}
 
@@ -8217,9 +8219,10 @@ static void PHY_LCCalibrate_92D(struct rtl8192cd_priv *priv)
 #define		DP_gain_loss	1
 
 
-void rtl8192cd_DPK_timer(unsigned long task_priv)
+void rtl8192cd_DPK_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct priv_shared_info *pshare = timer_container_of(pshare, t, DPKTimer);
+	struct rtl8192cd_priv *priv = pshare->priv;
 
 	if (!(priv->drv_state & DRV_STATE_OPEN))
 		return;

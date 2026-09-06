@@ -84,6 +84,8 @@ int (*send_packet_to_upper_layer)(struct sk_buff *skb) = netif_rx ;
 #include "./8192cd_hw.h"
 #include "./8192cd_headers.h"
 #include "./8192cd_rx.h"
+#include <linux/of.h>
+#include <linux/of_irq.h>
 #include "./8192cd_debug.h"
 
 #if defined(CONFIG_WLAN_HAL)
@@ -1939,7 +1941,7 @@ int_retry_process:
         #ifdef RTK_ATM  
         if(priv->pshare->rf_ft_var.atm_en) {
             if(priv->pshare->atm_swq_use_hw_timer)
-                rtl8192cd_atm_swq_timeout((unsigned long) priv);
+                __rtl8192cd_atm_swq_timeout(priv);
         } else
         #endif //RTK_ATM
         {
@@ -2518,7 +2520,7 @@ retry_process:
 #ifdef RTK_ATM
     	if(priv->pshare->rf_ft_var.atm_en) {
             if(priv->pshare->atm_swq_use_hw_timer)
-        		rtl8192cd_atm_swq_timeout((unsigned long) priv);
+        		__rtl8192cd_atm_swq_timeout(priv);
         }
         else
 #endif
@@ -3578,7 +3580,7 @@ static int rtl8192cd_init_sw(struct rtl8192cd_priv *priv)
 #ifdef CONFIG_NET_PCI
 		if (!IS_PCIBIOS_TYPE)
 #endif
-			phw->ring_dma_addr = virt_to_bus(page_ptr)+CONFIG_LUNA_SLAVE_PHYMEM_OFFSET;
+			phw->ring_dma_addr = virt_to_phys(page_ptr)+CONFIG_LUNA_SLAVE_PHYMEM_OFFSET;
 
 		phw->rx_ring_addr  = phw->ring_dma_addr;
 		phw->tx_ring0_addr = phw->ring_dma_addr + NUM_RX_DESC_IF(priv) * sizeof(struct rx_desc);
@@ -3839,9 +3841,8 @@ static int rtl8192cd_init_sw(struct rtl8192cd_priv *priv)
             if(GET_CHIP_VER(priv) == VERSION_8192C || GET_CHIP_VER(priv) == VERSION_8192D ||
                GET_CHIP_VER(priv) == VERSION_8188C || GET_CHIP_VER(priv) == VERSION_8188E) {
 				priv->pshare->atm_swq_use_hw_timer = 0;
-	            init_timer(&priv->pshare->atm_swq_sw_timer);
-	            priv->pshare->atm_swq_sw_timer.data = (unsigned long) priv;
-				priv->pshare->atm_swq_sw_timer.function = rtl8192cd_atm_swq_timeout;
+	            timer_setup(&priv->pshare->atm_swq_sw_timer, rtl8192cd_atm_swq_timeout, 0);
+
 
             } else 
             #endif
@@ -3856,25 +3857,23 @@ static int rtl8192cd_init_sw(struct rtl8192cd_priv *priv)
         if(GET_CHIP_VER(priv) == VERSION_8192C || GET_CHIP_VER(priv) == VERSION_8192D ||
            GET_CHIP_VER(priv) == VERSION_8188C || GET_CHIP_VER(priv) == VERSION_8188E) {
             priv->pshare->swq_use_hw_timer = 0;
-    		init_timer(&priv->pshare->swq_sw_timer);
-    		priv->pshare->swq_sw_timer.data = (unsigned long) priv;
-    		priv->pshare->swq_sw_timer.function = rtl8192cd_swq_timeout;                    
+    		timer_setup(&priv->pshare->swq_sw_timer, rtl8192cd_swq_timeout, 0);
+                    
         }
         else
         #endif
         {
             priv->pshare->swq_use_hw_timer = 1;
             #ifndef __ECOS
-            tasklet_init(&priv->pshare->swq_tasklet, rtl8192cd_swq_timeout, (unsigned long)priv);
+            tasklet_init(&priv->pshare->swq_tasklet, rtl8192cd_swq_timeout_tasklet, (unsigned long)priv);
             #endif
         }
 #endif
 
 #if defined(SUPPORT_TX_AMSDU) || defined (P2P_SUPPORT)
 		priv->pshare->amsdu_use_hw_timer = 0;
-		init_timer(&priv->pshare->amsdu_sw_timer);
-		priv->pshare->amsdu_sw_timer.data = (unsigned long) priv;
-		priv->pshare->amsdu_sw_timer.function = rtl8192cd_amsdu_timeout;  
+		timer_setup(&priv->pshare->amsdu_sw_timer, rtl8192cd_amsdu_timeout, 0);
+  
 #endif		
 	}
 
@@ -4008,21 +4007,15 @@ static int rtl8192cd_init_sw(struct rtl8192cd_priv *priv)
 /*cfg p2p cfg p2p*/
 #if defined(CONFIG_RTL_P2P_SUPPORT)
     if(priv->p2pPtr){
-        init_timer(&priv->p2pPtr->p2p_search_timer_t);
-        init_timer(&priv->p2pPtr->p2p_find_timer_t);        
-        priv->p2pPtr->p2p_find_timer_t.data = (unsigned long) priv;
-        priv->p2pPtr->p2p_find_timer_t.function = p2p_find_timer;   
-        priv->p2pPtr->p2p_search_timer_t.data = (unsigned long) priv;
-        priv->p2pPtr->p2p_search_timer_t.function = P2P_search_timer;
+        timer_setup(&priv->p2pPtr->p2p_search_timer_t, P2P_search_timer, 0);
+        timer_setup(&priv->p2pPtr->p2p_find_timer_t, p2p_find_timer, 0);
 
         #ifdef RTK_NL80211
-        init_timer(&priv->p2pPtr->remain_on_ch_timer);        
-        priv->p2pPtr->remain_on_ch_timer.data = (unsigned long) priv;
-        priv->p2pPtr->remain_on_ch_timer.function = realtek_cfg80211_RemainOnChExpire;             
+        timer_setup(&priv->p2pPtr->remain_on_ch_timer, realtek_cfg80211_RemainOnChExpire, 0);
+             
 
-        init_timer(&priv->p2pPtr->scan_deny_timer);        
-        priv->p2pPtr->scan_deny_timer.data = (unsigned long) priv;
-        priv->p2pPtr->scan_deny_timer.function = rtk_p2p_scan_deny_expire;                         
+        timer_setup(&priv->p2pPtr->scan_deny_timer, rtk_p2p_scan_deny_expire, 0);
+                         
         #endif //CONFIG_P2P            
     }
 
@@ -5054,9 +5047,8 @@ static int rtl8192cd_init_sw(struct rtl8192cd_priv *priv)
 
 #ifdef DOT11K
     if(priv->pmib->dot11StationConfigEntry.dot11RadioMeasurementActivated) {
-        init_timer(&priv->rm.delay_timer);
-        priv->rm.delay_timer.data = (unsigned long) priv;
-        priv->rm.delay_timer.function = rm_do_next_measure;
+        timer_setup(&priv->rm.delay_timer, rm_do_next_measure, 0);
+
     }
 #endif
 
@@ -5252,7 +5244,7 @@ static int rtl8192cd_stop_sw(struct rtl8192cd_priv *priv)
 	SMP_UNLOCK(flags);
 	if (timer_pending(&priv->frag_to_filter))
 	{
-		del_timer_sync(&priv->frag_to_filter);
+		timer_delete_sync(&priv->frag_to_filter);
 	}
 
 #if defined(RTK_BR_EXT) && defined(EN_EFUSE)
@@ -5274,17 +5266,17 @@ static int rtl8192cd_stop_sw(struct rtl8192cd_priv *priv)
 	{
 #if defined(CONFIG_TCP_ACK_TXAGG) || defined(CONFIG_XMITBUF_TXAGG_ADV)
 		if (timer_pending(&priv->pshare->xmit_check_timer))
-			del_timer_sync(&priv->pshare->xmit_check_timer);
+			timer_delete_sync(&priv->pshare->xmit_check_timer);
 #endif
 #ifdef CONFIG_USB_HCI
 #if defined(CONFIG_RTL_92C_SUPPORT) || (!defined(CONFIG_SUPPORT_USB_INT) || !defined(CONFIG_INTERRUPT_BASED_TXBCN))
 		if (timer_pending(&priv->pshare->beacon_timer))
-			del_timer_sync(&priv->pshare->beacon_timer);
+			timer_delete_sync(&priv->pshare->beacon_timer);
 #endif
 #endif // CONFIG_USB_HCI
 #ifdef CONFIG_SDIO_HCI
 		if (timer_pending(&priv->pshare->beacon_timer))
-			del_timer_sync(&priv->pshare->beacon_timer);
+			timer_delete_sync(&priv->pshare->beacon_timer);
 #endif
 #ifdef TCP_ACK_ACC
 		if (priv->pmib->miscEntry.tcpack_acc){
@@ -5292,23 +5284,23 @@ static int rtl8192cd_stop_sw(struct rtl8192cd_priv *priv)
 				tcpack_acc_cancel_timer(priv);
 			else{
 				if(timer_pending(&priv->tcpack_timer))
-					del_timer_sync(&priv->tcpack_timer);
+					timer_delete_sync(&priv->tcpack_timer);
 			}
 		}
 #endif
 		if (timer_pending(&priv->expire_timer))
-			del_timer_sync(&priv->expire_timer);
+			timer_delete_sync(&priv->expire_timer);
 #ifdef 	SW_ANT_SWITCH
 		if (timer_pending(&priv->pshare->swAntennaSwitchTimer))
-			del_timer_sync(&priv->pshare->swAntennaSwitchTimer);
+			timer_delete_sync(&priv->pshare->swAntennaSwitchTimer);
 #endif		
 		if (timer_pending(&priv->pshare->rc_sys_timer))
-			del_timer_sync(&priv->pshare->rc_sys_timer);
+			timer_delete_sync(&priv->pshare->rc_sys_timer);
 		if (timer_pending(&priv->pshare->rc_sys_timer_cli))
-			del_timer_sync(&priv->pshare->rc_sys_timer_cli);
+			timer_delete_sync(&priv->pshare->rc_sys_timer_cli);
 #if 0
 		if (timer_pending(&priv->pshare->phw->tpt_timer))
-			del_timer_sync(&priv->pshare->phw->tpt_timer);
+			timer_delete_sync(&priv->pshare->phw->tpt_timer);
 #endif
 
 #ifdef USE_OUT_SRC
@@ -5360,12 +5352,12 @@ static int rtl8192cd_stop_sw(struct rtl8192cd_priv *priv)
 
 #if defined(PCIE_POWER_SAVING) || defined(RF_MIMO_SWITCH)
 	if (timer_pending(&priv->ps_timer))
-		del_timer_sync(&priv->ps_timer);
+		timer_delete_sync(&priv->ps_timer);
 #endif
 
 #ifdef SDIO_AP_OFFLOAD
 	if (timer_pending(&priv->pshare->ps_timer))
-		del_timer_sync(&priv->pshare->ps_timer);
+		timer_delete_sync(&priv->pshare->ps_timer);
 #endif
 	
 #ifdef CONFIG_RTK_MESH
@@ -5373,24 +5365,24 @@ static int rtl8192cd_stop_sw(struct rtl8192cd_priv *priv)
 		 * CAUTION !! These statement meshX(virtual interface) ONLY, Maybe modify....
 		 */
 		if (timer_pending(&priv->mesh_peer_link_timer))
-			del_timer_sync(&priv->mesh_peer_link_timer);
+			timer_delete_sync(&priv->mesh_peer_link_timer);
 
 #ifdef MESH_BOOTSEQ_AUTH
 		if (timer_pending(&priv->mesh_auth_timer))
-			del_timer_sync(&priv->mesh_auth_timer);
+			timer_delete_sync(&priv->mesh_auth_timer);
 #endif
 #endif
 
 #if defined(CONFIG_RTL_92D_SUPPORT) && defined(DPK_92D)
 		if (GET_CHIP_VER(priv) == VERSION_8192D){
 			if (timer_pending(&priv->pshare->DPKTimer))
-				del_timer_sync(&priv->pshare->DPKTimer);
+				timer_delete_sync(&priv->pshare->DPKTimer);
 		}
 #endif
 
 #ifdef RTK_ATM
 		if (priv->pshare->atm_swq_use_hw_timer == 0 && timer_pending(&priv->pshare->atm_swq_sw_timer)) {
-            del_timer_sync(&priv->pshare->atm_swq_sw_timer);
+            timer_delete_sync(&priv->pshare->atm_swq_sw_timer);
         }
 #endif 
 
@@ -5402,18 +5394,18 @@ static int rtl8192cd_stop_sw(struct rtl8192cd_priv *priv)
         }
         else {
             if (timer_pending(&priv->pshare->swq_sw_timer))
-                del_timer_sync(&priv->pshare->swq_sw_timer);
+                timer_delete_sync(&priv->pshare->swq_sw_timer);
         }  
 #endif   
 
 #if defined(SUPPORT_TX_AMSDU) || defined (P2P_SUPPORT)
 		if (!priv->pshare->amsdu_use_hw_timer && timer_pending(&priv->pshare->amsdu_sw_timer))
- 	       del_timer_sync(&priv->pshare->amsdu_sw_timer);
+ 	       timer_delete_sync(&priv->pshare->amsdu_sw_timer);
 #endif		
 		
 #if defined(MULTI_STA_REFINE)
 		if (timer_pending(&priv->pshare->PktAging_timer))
-			del_timer_sync(&priv->pshare->PktAging_timer);
+			timer_delete_sync(&priv->pshare->PktAging_timer);
 #endif
 	}
 
@@ -5421,52 +5413,52 @@ static int rtl8192cd_stop_sw(struct rtl8192cd_priv *priv)
 	if (IS_VXD_INTERFACE(priv)){
 		//printk("Try delete ibss beacon timer!! \n");
 		if (timer_pending(&priv->pshare->vxd_ibss_beacon)) 		
-			del_timer_sync(&priv->pshare->vxd_ibss_beacon);
+			timer_delete_sync(&priv->pshare->vxd_ibss_beacon);
 	}
 #endif
 
 	if (timer_pending(&priv->ss_timer))
-		del_timer_sync(&priv->ss_timer);
+		timer_delete_sync(&priv->ss_timer);
 	if (timer_pending(&priv->MIC_check_timer))
-		del_timer_sync(&priv->MIC_check_timer);
+		timer_delete_sync(&priv->MIC_check_timer);
 	if (timer_pending(&priv->assoc_reject_timer))
-		del_timer_sync(&priv->assoc_reject_timer);
+		timer_delete_sync(&priv->assoc_reject_timer);
 #if defined(CONFIG_RTL_92D_SUPPORT) || defined(CONFIG_RTL_92C_SUPPORT)
 	#ifdef CONFIG_PCI_HCI
 	// to avoid add RAtid fail
 	if (timer_pending(&priv->add_RATid_timer))
-		del_timer_sync(&priv->add_RATid_timer);
+		timer_delete_sync(&priv->add_RATid_timer);
 	if (timer_pending(&priv->add_rssi_timer))
-		del_timer_sync(&priv->add_rssi_timer);
+		timer_delete_sync(&priv->add_rssi_timer);
 	#endif
 
 #ifdef CONFIG_PCI_HCI
 	if (timer_pending(&priv->add_ps_timer))
-		del_timer_sync(&priv->add_ps_timer);
+		timer_delete_sync(&priv->add_ps_timer);
 #endif
 #endif
 
 #if defined(CONFIG_RTL_92D_SUPPORT) && defined(CONFIG_RTL_NOISE_CONTROL)
 	if (GET_CHIP_VER(priv) == VERSION_8192D){
 		if (timer_pending(&priv->dnc_timer))
-			del_timer_sync(&priv->dnc_timer);
+			timer_delete_sync(&priv->dnc_timer);
 	}
 #endif
 
 #ifdef CLIENT_MODE
 	if (timer_pending(&priv->reauth_timer))
-		del_timer_sync(&priv->reauth_timer);
+		timer_delete_sync(&priv->reauth_timer);
 	if (timer_pending(&priv->reassoc_timer))
-		del_timer_sync(&priv->reassoc_timer);
+		timer_delete_sync(&priv->reassoc_timer);
 	if (timer_pending(&priv->idle_timer))
-		del_timer_sync(&priv->idle_timer);
+		timer_delete_sync(&priv->idle_timer);
 #endif
 
 
 #ifdef DOT11K
     if(priv->pmib->dot11StationConfigEntry.dot11RadioMeasurementActivated) {
         if (timer_pending(&priv->rm.delay_timer))
-            del_timer_sync(&priv->rm.delay_timer);
+            timer_delete_sync(&priv->rm.delay_timer);
     }
 #endif
 
@@ -5474,7 +5466,7 @@ SMP_LOCK(flags);
 
 #ifdef GBWC
 	if (timer_pending(&priv->GBWC_timer))
-		del_timer_sync(&priv->GBWC_timer);
+		timer_delete_sync(&priv->GBWC_timer);
 	while (CIRC_CNT(priv->GBWC_tx_queue.head, priv->GBWC_tx_queue.tail, NUM_TXPKT_QUEUE))
 	{
 		struct sk_buff *pskb = priv->GBWC_tx_queue.pSkb[priv->GBWC_tx_queue.tail];
@@ -5493,20 +5485,20 @@ SMP_LOCK(flags);
 
 #ifdef RTK_STA_BWC
 	if (timer_pending(&priv->sta_bwc_timer))
-		del_timer_sync(&priv->sta_bwc_timer);
+		timer_delete_sync(&priv->sta_bwc_timer);
 #endif
 
 #ifdef SBWC
 	if (timer_pending(&priv->SBWC_timer))
-		del_timer_sync(&priv->SBWC_timer);
+		timer_delete_sync(&priv->SBWC_timer);
 #endif
 
 	if (timer_pending(&priv->connect_sta_info_timer))
-		del_timer_sync(&priv->connect_sta_info_timer);
+		timer_delete_sync(&priv->connect_sta_info_timer);
 
 #if defined(INCLUDE_WPA_PSK) && !defined(RTK_NL80211)
 	if (timer_pending(&priv->wpa_global_info->GKRekeyTimer))
-		del_timer_sync(&priv->wpa_global_info->GKRekeyTimer);
+		timer_delete_sync(&priv->wpa_global_info->GKRekeyTimer);
 #endif
 
 #ifdef USE_TXQUEUE
@@ -5550,19 +5542,19 @@ SMP_LOCK(flags);
 #ifdef DFS
 		SMP_UNLOCK(flags);
 		if (timer_pending(&priv->DFS_TXPAUSE_timer))
-			del_timer_sync(&priv->DFS_TXPAUSE_timer);
+			timer_delete_sync(&priv->DFS_TXPAUSE_timer);
 
 		if (timer_pending(&priv->DFS_timer))
-			del_timer_sync(&priv->DFS_timer);
+			timer_delete_sync(&priv->DFS_timer);
 
 		if (timer_pending(&priv->ch_avail_chk_timer))
-			del_timer_sync(&priv->ch_avail_chk_timer);
+			timer_delete_sync(&priv->ch_avail_chk_timer);
 
 		if (timer_pending(&priv->dfs_chk_timer))
-			del_timer_sync(&priv->dfs_chk_timer);
+			timer_delete_sync(&priv->dfs_chk_timer);
 
 		if (timer_pending(&priv->dfs_det_chk_timer))
-			del_timer_sync(&priv->dfs_det_chk_timer);
+			timer_delete_sync(&priv->dfs_det_chk_timer);
 
 		/*
 		 *	when we disable the DFS function dynamically, we also remove the channel
@@ -5570,97 +5562,97 @@ SMP_LOCK(flags);
 		 */
 		if (timer_pending(&priv->ch52_timer) &&
 			(priv->pmib->dot11DFSEntry.disable_DFS)) {
-			del_timer_sync(&priv->ch52_timer);
+			timer_delete_sync(&priv->ch52_timer);
 			RemoveChannel(priv, priv->NOP_chnl, &priv->NOP_chnl_num, 52);
 		}
 
 		if (timer_pending(&priv->ch56_timer) &&
 			(priv->pmib->dot11DFSEntry.disable_DFS)) {
-			del_timer_sync(&priv->ch56_timer);
+			timer_delete_sync(&priv->ch56_timer);
 			RemoveChannel(priv, priv->NOP_chnl, &priv->NOP_chnl_num, 56);
 		}
 
 		if (timer_pending(&priv->ch60_timer) &&
 			(priv->pmib->dot11DFSEntry.disable_DFS)) {
-			del_timer_sync(&priv->ch60_timer);
+			timer_delete_sync(&priv->ch60_timer);
 			RemoveChannel(priv, priv->NOP_chnl, &priv->NOP_chnl_num, 60);
 		}
 
 		if (timer_pending(&priv->ch64_timer) &&
 			(priv->pmib->dot11DFSEntry.disable_DFS)) {
-			del_timer_sync(&priv->ch64_timer);
+			timer_delete_sync(&priv->ch64_timer);
 			RemoveChannel(priv, priv->NOP_chnl, &priv->NOP_chnl_num, 64);
 		}
 
 		if (timer_pending(&priv->ch100_timer) &&
 			(priv->pmib->dot11DFSEntry.disable_DFS)) {
-			del_timer_sync(&priv->ch100_timer);
+			timer_delete_sync(&priv->ch100_timer);
 			RemoveChannel(priv, priv->NOP_chnl, &priv->NOP_chnl_num, 100);
 		}
 
 		if (timer_pending(&priv->ch104_timer) &&
 			(priv->pmib->dot11DFSEntry.disable_DFS)) {
-			del_timer_sync(&priv->ch104_timer);
+			timer_delete_sync(&priv->ch104_timer);
 			RemoveChannel(priv, priv->NOP_chnl, &priv->NOP_chnl_num, 104);
 		}
 
 		if (timer_pending(&priv->ch108_timer) &&
 			(priv->pmib->dot11DFSEntry.disable_DFS)) {
-			del_timer_sync(&priv->ch108_timer);
+			timer_delete_sync(&priv->ch108_timer);
 			RemoveChannel(priv, priv->NOP_chnl, &priv->NOP_chnl_num, 108);
 		}
 
 		if (timer_pending(&priv->ch112_timer) &&
 			(priv->pmib->dot11DFSEntry.disable_DFS)) {
-			del_timer_sync(&priv->ch112_timer);
+			timer_delete_sync(&priv->ch112_timer);
 			RemoveChannel(priv, priv->NOP_chnl, &priv->NOP_chnl_num, 112);
 		}
 
 		if (timer_pending(&priv->ch116_timer) &&
 			(priv->pmib->dot11DFSEntry.disable_DFS)) {
-			del_timer_sync(&priv->ch116_timer);
+			timer_delete_sync(&priv->ch116_timer);
 			RemoveChannel(priv, priv->NOP_chnl, &priv->NOP_chnl_num, 116);
 		}
 
 		if (timer_pending(&priv->ch120_timer) &&
 			(priv->pmib->dot11DFSEntry.disable_DFS)) {
-			del_timer_sync(&priv->ch120_timer);
+			timer_delete_sync(&priv->ch120_timer);
 			RemoveChannel(priv, priv->NOP_chnl, &priv->NOP_chnl_num, 120);
 		}
 
 		if (timer_pending(&priv->ch124_timer) &&
 			(priv->pmib->dot11DFSEntry.disable_DFS)) {
-			del_timer_sync(&priv->ch124_timer);
+			timer_delete_sync(&priv->ch124_timer);
 			RemoveChannel(priv, priv->NOP_chnl, &priv->NOP_chnl_num, 124);
 		}
 
 		if (timer_pending(&priv->ch128_timer) &&
 			(priv->pmib->dot11DFSEntry.disable_DFS)) {
-			del_timer_sync(&priv->ch128_timer);
+			timer_delete_sync(&priv->ch128_timer);
 			RemoveChannel(priv, priv->NOP_chnl, &priv->NOP_chnl_num, 128);
 		}
 
 		if (timer_pending(&priv->ch132_timer) &&
 			(priv->pmib->dot11DFSEntry.disable_DFS)) {
-			del_timer_sync(&priv->ch128_timer);
+			timer_delete_sync(&priv->ch128_timer);
 			RemoveChannel(priv, priv->NOP_chnl, &priv->NOP_chnl_num, 128);
 		}
 
 		if (timer_pending(&priv->ch136_timer) &&
 			(priv->pmib->dot11DFSEntry.disable_DFS)) {
-			del_timer_sync(&priv->ch136_timer);
+			timer_delete_sync(&priv->ch136_timer);
 			RemoveChannel(priv, priv->NOP_chnl, &priv->NOP_chnl_num, 136);
 		}
 
 		if (timer_pending(&priv->ch140_timer) &&
 			(priv->pmib->dot11DFSEntry.disable_DFS)) {
-			del_timer_sync(&priv->ch140_timer);
+			timer_delete_sync(&priv->ch140_timer);
 			RemoveChannel(priv, priv->NOP_chnl, &priv->NOP_chnl_num, 140);
 		}
 
 		if (timer_pending(&priv->ch144_timer) &&
 			(priv->pmib->dot11DFSEntry.disable_DFS)) {
-			del_timer_sync(&priv->ch144_timer);
+			timer_delete_sync(&priv->ch144_timer);
 			RemoveChannel(priv, priv->NOP_chnl, &priv->NOP_chnl_num, 144);
 		}
 		SMP_LOCK(flags);
@@ -5785,7 +5777,7 @@ SMP_LOCK(flags);
 #ifdef CONFIG_NET_PCI
 				// if pci bios, then pci_unmap_single and dev_kfree_skb
 				if (IS_PCIBIOS_TYPE)
-					pci_unmap_single(priv->pshare->pdev, phw->rx_infoL[i].paddr, (RX_BUF_LEN - sizeof(struct rx_frinfo)), PCI_DMA_FROMDEVICE);
+					dma_unmap_single(&priv->pshare->pdev->dev, phw->rx_infoL[i].paddr, (RX_BUF_LEN - sizeof(struct rx_frinfo)), PCI_DMA_FROMDEVICE);
 #endif
 				rtl_kfree_skb(priv, (struct sk_buff*)(phw->rx_infoL[i].pbuf), _SKB_RX_);
 			}
@@ -5860,7 +5852,7 @@ SMP_LOCK(flags);
     				if (tx_info[i].buf_pframe[0] && (tx_info[i].buf_type[0] == _SKB_FRAME_TYPE_)) { // should be buf_paddr
 #if defined(CONFIG_NET_PCI) && !defined(USE_RTL8186_SDK)
     					if (IS_PCIBIOS_TYPE && (tx_info[i].buf_len[0]!=0 && tx_info[i].buf_paddr[0]!=0))
-    						pci_unmap_single(priv->pshare->pdev, tx_info[i].buf_paddr[0],(tx_info[i].buf_len[0])&0xffff, PCI_DMA_TODEVICE);
+    						dma_unmap_single(&priv->pshare->pdev->dev, tx_info[i].buf_paddr[0],(tx_info[i].buf_len[0])&0xffff, PCI_DMA_TODEVICE);
 #endif
 #ifdef MP_TEST
     					if ((OPMODE & (WIFI_MP_STATE|WIFI_MP_CTX_BACKGROUND))==(WIFI_MP_STATE|WIFI_MP_CTX_BACKGROUND)) {
@@ -5879,7 +5871,7 @@ SMP_LOCK(flags);
     				if (tx_info[i].pframe && (tx_info[i].type == _SKB_FRAME_TYPE_)) {
 #ifdef CONFIG_NET_PCI
     					if (IS_PCIBIOS_TYPE)
-    						pci_unmap_single(priv->pshare->pdev, tx_info[i].paddr, (tx_info[i].len), PCI_DMA_TODEVICE);
+    						dma_unmap_single(&priv->pshare->pdev->dev, tx_info[i].paddr, (tx_info[i].len), PCI_DMA_TODEVICE);
 #endif
 
 #if 1//def CONFIG_RTL8672
@@ -5931,7 +5923,7 @@ SMP_LOCK(flags);
 				#ifdef NOT_RTK_BSP
 				if (cur_txbd->TXBD_ELE[1].Dword1 != 0)
 				#endif	
-					pci_unmap_single(priv->pshare->pdev, get_desc(cur_txbd->TXBD_ELE[1].Dword1), 128*sizeof(unsigned int), PCI_DMA_TODEVICE);
+					dma_unmap_single(&priv->pshare->pdev->dev, get_desc(cur_txbd->TXBD_ELE[1].Dword1), 128*sizeof(unsigned int), PCI_DMA_TODEVICE);
 		    }
 		} else if(CONFIG_WLAN_NOT_HAL_EXIST)
 #endif
@@ -5943,7 +5935,7 @@ SMP_LOCK(flags);
 					#ifdef NOT_RTK_BSP
 					if (phw->tx_descB->Dword10 != 0)
 					#endif	
-						pci_unmap_single(priv->pshare->pdev, get_desc(phw->tx_descB->Dword10),
+						dma_unmap_single(&priv->pshare->pdev->dev, get_desc(phw->tx_descB->Dword10),
 							128*sizeof(unsigned int), PCI_DMA_TODEVICE);
 				} else
 #endif
@@ -5951,7 +5943,7 @@ SMP_LOCK(flags);
 					#ifdef NOT_RTK_BSP
 					if (phw->tx_descB->Dword8 != 0)
 					#endif	
-						pci_unmap_single(priv->pshare->pdev, get_desc(phw->tx_descB->Dword8), 128*sizeof(unsigned int), PCI_DMA_TODEVICE);
+						dma_unmap_single(&priv->pshare->pdev->dev, get_desc(phw->tx_descB->Dword8), 128*sizeof(unsigned int), PCI_DMA_TODEVICE);
 				}
 		    }
 		}
@@ -7260,9 +7252,10 @@ void rtw_flush_all_tx_mgt_queue(struct rtl8192cd_priv *priv)
 #ifndef CONFIG_POWER_SAVE
 #define ACT_STS(x, y) ((x<<4)|y )
 
-void sdio_power_save_timer(unsigned long task_priv)
+void sdio_power_save_timer(struct timer_list *t)
 {
-        struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+        struct priv_shared_info *pshare = timer_container_of(pshare, t, ps_timer);
+        struct rtl8192cd_priv *priv = pshare->priv;
 	        
         unsigned char act = priv->pshare->ps_ctrl;
         unsigned char sts = priv->pshare->pwr_state;
@@ -7709,7 +7702,13 @@ int rtl8192cd_open(struct net_device *dev)
 	dev->wireless_handlers = (struct iw_handler_def *) &rtl8192cd_iw_handler_def;
 #endif
 
-	memcpy((void *)dev->dev_addr, priv->pmib->dot11OperationEntry.hwaddr, 6);
+	/* ★ 2026-09-05: a raw memcpy into dev->dev_addr leaves the kernel's dev_addr
+	 * shadow (added post-4.14, checked by dev_addr_check()) at its all-zero initial
+	 * value, which trips a "netdevice: wlan0: Incorrect netdev->dev_addr" WARN on
+	 * every open -- observed live on hardware, harmless to the actual MAC but a
+	 * real API-compliance bug. eth_hw_addr_set() is the drop-in replacement that
+	 * keeps the shadow in sync; MACADDRLEN/ETH_ALEN is 6 either way. */
+	eth_hw_addr_set(dev, priv->pmib->dot11OperationEntry.hwaddr);
 
 #ifdef WDS
 	if (dev->base_addr == 0)
@@ -7784,12 +7783,10 @@ int rtl8192cd_open(struct net_device *dev)
         #endif
 
         #if defined(RTK_MESH_AODV_STANDALONE_TIMER)
-		init_timer(&priv->mesh_expire_timer);
+		timer_setup(&priv->mesh_expire_timer, mesh_standalone_timer_expire, 0);
         #ifdef __KERNEL__
         priv->mesh_expire_timer.expires = jiffies+MESH_AODV_EXPIRE_TO;
         #endif
-		priv->mesh_expire_timer.data = (unsigned long) priv;
-		priv->mesh_expire_timer.function = mesh_standalone_timer_expire;
         #ifdef __KERNEL__
 		add_timer(&priv->mesh_expire_timer);
         #else
@@ -7815,12 +7812,10 @@ int rtl8192cd_open(struct net_device *dev)
             #endif
 
             #if defined(RTK_MESH_AODV_STANDALONE_TIMER)
-            init_timer(&priv->mesh_priv_sc->mesh_expire_timer);
+            timer_setup(&priv->mesh_priv_sc->mesh_expire_timer, mesh_standalone_timer_expire, 0);
             #ifdef __KERNEL__
             priv->mesh_priv_sc->mesh_expire_timer.expires = jiffies+MESH_AODV_EXPIRE_TO;
             #endif
-            priv->mesh_priv_sc->mesh_expire_timer.data = (unsigned long) priv->mesh_priv_sc;
-            priv->mesh_priv_sc->mesh_expire_timer.function = mesh_standalone_timer_expire;
             #ifdef __KERNEL__
             add_timer(&priv->mesh_priv_sc->mesh_expire_timer);
             #else
@@ -8703,10 +8698,9 @@ do_hw_init:
 	//memcpy((void *)dev->dev_addr, priv->pmib->dot11OperationEntry.hwaddr, 6);
 
 	// below is for site_survey timer
-	init_timer(&priv->ss_timer);
 #if defined(CONFIG_PCI_HCI)
-	priv->ss_timer.data = (unsigned long) priv;
-	priv->ss_timer.function = rtl8192cd_ss_timer;
+	timer_setup(&priv->ss_timer, rtl8192cd_ss_timer, 0);
+
 #elif defined(CONFIG_USB_HCI) || defined(CONFIG_SDIO_HCI)
 	priv->ss_timer.data = (unsigned long) &priv->ss_timer_event;
 	priv->ss_timer.function = timer_event_timer_fn;
@@ -8722,39 +8716,35 @@ do_hw_init:
 #endif
 
 #ifdef CLIENT_MODE
-	init_timer(&priv->reauth_timer);
 #if defined(CONFIG_PCI_HCI)
-	priv->reauth_timer.data = (unsigned long) priv;
-	priv->reauth_timer.function = rtl8192cd_reauth_timer;
+	timer_setup(&priv->reauth_timer, rtl8192cd_reauth_timer, 0);
+
 #elif defined(CONFIG_USB_HCI) || defined(CONFIG_SDIO_HCI)
 	priv->reauth_timer.data = (unsigned long) &priv->reauth_timer_event;
 	priv->reauth_timer.function = timer_event_timer_fn;
 	INIT_TIMER_EVENT_ENTRY(&priv->reauth_timer_event, rtl8192cd_reauth_timer, (unsigned long)priv);
 #endif
 
-	init_timer(&priv->reassoc_timer);
 #if defined(CONFIG_PCI_HCI)
-	priv->reassoc_timer.data = (unsigned long) priv;
-	priv->reassoc_timer.function = rtl8192cd_reassoc_timer;
+	timer_setup(&priv->reassoc_timer, rtl8192cd_reassoc_timer, 0);
+
 #elif defined(CONFIG_USB_HCI) || defined(CONFIG_SDIO_HCI)
 	priv->reassoc_timer.data = (unsigned long) &priv->reassoc_timer_event;
 	priv->reassoc_timer.function = timer_event_timer_fn;
 	INIT_TIMER_EVENT_ENTRY(&priv->reassoc_timer_event, rtl8192cd_reassoc_timer, (unsigned long)priv);
 #endif
 
-	init_timer(&priv->idle_timer);
 #if defined(CONFIG_PCI_HCI)
-	priv->idle_timer.data = (unsigned long) priv;
-	priv->idle_timer.function = rtl8192cd_idle_timer;
+	timer_setup(&priv->idle_timer, rtl8192cd_idle_timer, 0);
+
 #elif defined(CONFIG_USB_HCI) || defined(CONFIG_SDIO_HCI)
 	priv->idle_timer.data = (unsigned long) &priv->idle_timer_event;
 	priv->idle_timer.function = timer_event_timer_fn;
 	INIT_TIMER_EVENT_ENTRY(&priv->idle_timer_event, rtl8192cd_idle_timer, (unsigned long)priv);
 #endif
 #ifdef DFS
-	init_timer(&priv->dfs_cntdwn_timer);
-	priv->dfs_cntdwn_timer.data = (unsigned long) priv;
-	priv->dfs_cntdwn_timer.function = rtl8192cd_dfs_cntdwn_timer;
+	timer_setup(&priv->dfs_cntdwn_timer, rtl8192cd_dfs_cntdwn_timer, 0);
+
 #endif
 #endif
 
@@ -8764,13 +8754,11 @@ do_hw_init:
 			priv->pshare->mclone_sta[i].timer_data.priv = GET_ROOT(priv);
 			priv->pshare->mclone_sta[i].timer_data.active_id = i+1;
 	    	
-			init_timer(&priv->pshare->mclone_sta[i].reauth_timer);
-			priv->pshare->mclone_sta[i].reauth_timer.data = (unsigned long)&priv->pshare->mclone_sta[i].timer_data;
-			priv->pshare->mclone_sta[i].reauth_timer.function = rtl8192cd_mclone_reauth_timer;
+			timer_setup(&priv->pshare->mclone_sta[i].reauth_timer, rtl8192cd_mclone_reauth_timer, 0);
+
 	
-			init_timer(&priv->pshare->mclone_sta[i].reassoc_timer);
-			priv->pshare->mclone_sta[i].reassoc_timer.data = (unsigned long)&priv->pshare->mclone_sta[i].timer_data;
-			priv->pshare->mclone_sta[i].reassoc_timer.function = rtl8192cd_mclone_reassoc_timer;
+			timer_setup(&priv->pshare->mclone_sta[i].reassoc_timer, rtl8192cd_mclone_reassoc_timer, 0);
+
 			priv->pshare->mclone_sta[i].isTimerInit = 1;
 		}		
 	}
@@ -8778,9 +8766,8 @@ do_hw_init:
 
 	priv->frag_to = 0;
 
-	init_timer(&priv->frag_to_filter);
-	priv->frag_to_filter.data = (unsigned long) priv;
-	priv->frag_to_filter.function = rtl8192cd_frag_timer;
+	timer_setup(&priv->frag_to_filter, rtl8192cd_frag_timer, 0);
+
 
 	mod_timer(&priv->frag_to_filter, jiffies + FRAG_TO);
 
@@ -8805,12 +8792,10 @@ do_hw_init:
 #endif
 		
 #if defined(PCIE_POWER_SAVING) || defined(RF_MIMO_SWITCH)
-		init_timer(&priv->ps_timer);
-		priv->ps_timer.data = (unsigned long) priv;
-#if defined(PCIE_POWER_SAVING)		
-		priv->ps_timer.function = PCIe_power_save_timer;
+#if defined(PCIE_POWER_SAVING)
+		timer_setup(&priv->ps_timer, PCIe_power_save_timer, 0);
 #else
-		priv->ps_timer.function = RF_MIMO_check_timer;
+		timer_setup(&priv->ps_timer, RF_MIMO_check_timer, 0);
 #endif
 
 		mod_timer(&priv->ps_timer, jiffies + POWER_DOWN_T0);
@@ -8818,27 +8803,25 @@ do_hw_init:
 #endif
 
 #ifdef SDIO_AP_OFFLOAD
-		init_timer(&priv->pshare->ps_timer);
-		priv->pshare->ps_timer.data = (unsigned long) priv;
-		priv->pshare->ps_timer.function = sdio_power_save_timer;
+		timer_setup(&priv->pshare->ps_timer, sdio_power_save_timer, 0);
+
 #ifdef MP_TEST
 		if (!priv->pshare->rf_ft_var.mp_specific)
 #endif
 		mod_timer(&priv->pshare->ps_timer, jiffies + POWER_DOWN_T0);
 #endif
 
+#if defined(CONFIG_PCI_HCI)
+		timer_setup(&priv->expire_timer, rtl8192cd_1sec_timer, 0);
+#elif defined(CONFIG_USB_HCI) || defined(CONFIG_SDIO_HCI)
 		init_timer(&priv->expire_timer);
 		priv->expire_timer.data = (unsigned long) priv;
-#if defined(CONFIG_PCI_HCI)
-		priv->expire_timer.function = rtl8192cd_1sec_timer;
-#elif defined(CONFIG_USB_HCI) || defined(CONFIG_SDIO_HCI)
 		priv->expire_timer.function = pre_rtl8192cd_1sec_timer;
 		INIT_TIMER_EVENT_ENTRY(&priv->expire_timer_event, rtl8192cd_1sec_timer, (unsigned long)priv);
 #endif
 #ifdef 	SW_ANT_SWITCH
-		init_timer(&priv->pshare->swAntennaSwitchTimer);
-		priv->pshare->swAntennaSwitchTimer.data = (unsigned long) priv;
-		priv->pshare->swAntennaSwitchTimer.function = dm_SW_AntennaSwitchCallback;
+		timer_setup(&priv->pshare->swAntennaSwitchTimer, dm_SW_AntennaSwitchCallback, 0);
+
 #endif
 #if (BEAMFORMING_SUPPORT == 1)
 		if (priv->pmib->dot11RFEntry.txbf) //eric-mu
@@ -8864,25 +8847,22 @@ do_hw_init:
 				priv->pshare->tcpack_hw_timer_ready = 0;
 				;//tcpack_acc_setup_timer(priv, priv->pmib->miscEntry.tcpack_to*1000);
 			} else {
-				init_timer(&priv->tcpack_timer);
-				priv->tcpack_timer.data = (unsigned long)priv;
-				priv->tcpack_timer.function = check_tcp_ack_timeout;
+				timer_setup(&priv->tcpack_timer, check_tcp_ack_timeout_timerfn, 0);
+
 				mod_timer(&priv->tcpack_timer, jiffies + RTL_SECONDS_TO_JIFFIES(5));
 			}
 		}
 #endif
 
-		init_timer(&priv->pshare->rc_sys_timer);
-		priv->pshare->rc_sys_timer.data = (unsigned long) priv;
-		priv->pshare->rc_sys_timer.function = reorder_ctrl_timeout;
+		timer_setup(&priv->pshare->rc_sys_timer, reorder_ctrl_timeout, 0);
+
 
 		priv->pshare->rc_timer_tick = priv->pmib->reorderCtrlEntry.ReorderCtrlTimeout / RTL_JIFFIES_TO_MICROSECOND;
 		if (priv->pshare->rc_timer_tick == 0)
 			priv->pshare->rc_timer_tick = 1;
 
-		init_timer(&priv->pshare->rc_sys_timer_cli);
-		priv->pshare->rc_sys_timer_cli.data = (unsigned long) priv;
-		priv->pshare->rc_sys_timer_cli.function = reorder_ctrl_timeout_cli;
+		timer_setup(&priv->pshare->rc_sys_timer_cli, reorder_ctrl_timeout_cli, 0);
+
 
 		priv->pshare->rc_timer_tick_cli = priv->pmib->reorderCtrlEntry.ReorderCtrlTimeoutCli / RTL_JIFFIES_TO_MICROSECOND;
 		if (priv->pshare->rc_timer_tick_cli == 0)
@@ -8895,23 +8875,20 @@ do_hw_init:
 #endif
 
 #if 0
-		init_timer(&priv->pshare->phw->tpt_timer);
-		priv->pshare->phw->tpt_timer.data = (unsigned long)priv;
-		priv->pshare->phw->tpt_timer.function = rtl8192cd_tpt_timer;
+		timer_setup(&priv->pshare->phw->tpt_timer, rtl8192cd_tpt_timer, 0);
+
 #endif
 #if defined(CONFIG_RTL_92D_SUPPORT) && defined(DPK_92D)
 		if (GET_CHIP_VER(priv) == VERSION_8192D){
-			init_timer(&priv->pshare->DPKTimer);
-			priv->pshare->DPKTimer.data = (unsigned long) priv;
-			priv->pshare->DPKTimer.function = rtl8192cd_DPK_timer;
+			timer_setup(&priv->pshare->DPKTimer, rtl8192cd_DPK_timer, 0);
+
 		}
 #endif
 
 #if defined(MULTI_STA_REFINE)
 		if (IS_HAL_CHIP(priv) || (GET_CHIP_VER(priv)==VERSION_8812E)){
-			init_timer(&priv->pshare->PktAging_timer);
-			priv->pshare->PktAging_timer.data = (unsigned long) priv;
-			priv->pshare->PktAging_timer.function = TxPktBuf_AgingTimer;
+			timer_setup(&priv->pshare->PktAging_timer, TxPktBuf_AgingTimer, 0);
+
 			mod_timer(&priv->pshare->PktAging_timer, jiffies + RTL_SECONDS_TO_JIFFIES(10));
 		}
 #endif
@@ -8928,29 +8905,25 @@ do_hw_init:
 #endif
 
 	// for MIC check
-	init_timer(&priv->MIC_check_timer);
-	priv->MIC_check_timer.data = (unsigned long) priv;
-	priv->MIC_check_timer.function = DOT11_Process_MIC_Timerup;
-	init_timer(&priv->assoc_reject_timer);
-	priv->assoc_reject_timer.data = (unsigned long) priv;
-	priv->assoc_reject_timer.function = DOT11_Process_Reject_Assoc_Timerup;
+	timer_setup(&priv->MIC_check_timer, DOT11_Process_MIC_Timerup, 0);
+
+	timer_setup(&priv->assoc_reject_timer, DOT11_Process_Reject_Assoc_Timerup, 0);
+
 
 	priv->MIC_timer_on = FALSE;
 	priv->assoc_reject_on = FALSE;
 
 #ifdef GBWC
-	init_timer(&priv->GBWC_timer);
-	priv->GBWC_timer.data = (unsigned long) priv;
-	priv->GBWC_timer.function = rtl8192cd_GBWC_timer;
+	timer_setup(&priv->GBWC_timer, rtl8192cd_GBWC_timer, 0);
+
 
 	if (priv->pmib->gbwcEntry.GBWCMode != GBWC_MODE_DISABLE)
 		mod_timer(&priv->GBWC_timer, jiffies + GBWC_TO);
 #endif
 
 #ifdef RTK_STA_BWC
-	init_timer(&priv->sta_bwc_timer);
-	priv->sta_bwc_timer.data = (unsigned long) priv;
-	priv->sta_bwc_timer.function = rtl8192cd_sta_bwc_timer;
+	timer_setup(&priv->sta_bwc_timer, rtl8192cd_sta_bwc_timer, 0);
+
 
 	if (priv->pshare->rf_ft_var.sta_bwc_en)
 		mod_timer(&priv->sta_bwc_timer, jiffies + RTL_MILISECONDS_TO_JIFFIES(priv->pshare->rf_ft_var.sta_bwc_to));
@@ -8958,17 +8931,15 @@ do_hw_init:
 
 #ifdef SBWC
 	if (OPMODE & WIFI_AP_STATE) {
-		init_timer(&priv->SBWC_timer);
-		priv->SBWC_timer.data = (unsigned long) priv;
-		priv->SBWC_timer.function = rtl8192cd_SBWC_timer;
+		timer_setup(&priv->SBWC_timer, rtl8192cd_SBWC_timer, 0);
+
 		mod_timer(&priv->SBWC_timer, jiffies + SBWC_TO);
 	}
 #endif
 
 	if (OPMODE & WIFI_AP_STATE) {
-		init_timer(&priv->connect_sta_info_timer);
-		priv->connect_sta_info_timer.data = (unsigned long) priv;
-		priv->connect_sta_info_timer.function = rtl8192cd_connect_sta_info_timer;
+		timer_setup(&priv->connect_sta_info_timer, rtl8192cd_connect_sta_info_timer, 0);
+
 		mod_timer(&priv->connect_sta_info_timer, jiffies + CONNECT_STA_INFO_TO);
 	}
 
@@ -8991,32 +8962,27 @@ do_hw_init:
 #ifdef CONFIG_PCI_HCI
 	// to avoid add RAtid fail
 #if defined(CONFIG_RTL_92D_SUPPORT) || defined(CONFIG_RTL_92C_SUPPORT)
-	init_timer(&priv->add_RATid_timer);
-	priv->add_RATid_timer.data = (unsigned long) priv;
-	priv->add_RATid_timer.function = add_RATid_timer;
+	timer_setup(&priv->add_RATid_timer, add_RATid_timer, 0);
 
-	init_timer(&priv->add_rssi_timer);
-	priv->add_rssi_timer.data = (unsigned long) priv;
-	priv->add_rssi_timer.function = add_rssi_timer;
 
-	init_timer(&priv->add_ps_timer);
-	priv->add_ps_timer.data = (unsigned long) priv;
-	priv->add_ps_timer.function = add_ps_timer;
+	timer_setup(&priv->add_rssi_timer, add_rssi_timer, 0);
+
+
+	timer_setup(&priv->add_ps_timer, add_ps_timer, 0);
+
 #endif
 #endif
 
 #if defined(CONFIG_RTL_92D_SUPPORT) && defined(CONFIG_RTL_NOISE_CONTROL)
 	if (GET_CHIP_VER(priv) == VERSION_8192D){
-		init_timer(&priv->dnc_timer);
-		priv->dnc_timer.data = (unsigned long) priv;
-		priv->dnc_timer.function = dnc_timer;
+		timer_setup(&priv->dnc_timer, dnc_timer, 0);
+
 	}
 #endif
 
 #if defined(CONFIG_RTL_92D_SUPPORT) 
-	init_timer(&priv->pshare->MP_DIGTimer);
-	priv->pshare->MP_DIGTimer.data = (unsigned long) priv;
-	priv->pshare->MP_DIGTimer.function = MP_DIG_process;
+	timer_setup(&priv->pshare->MP_DIGTimer, MP_DIG_process, 0);
+
 #endif
 
 #if defined(UNIVERSAL_REPEATER) || defined(MBSSID)
@@ -9080,9 +9046,8 @@ do_hw_init:
 			((priv->pmib->dot11RFEntry.dot11channel >= 100) &&
 			(priv->pmib->dot11RFEntry.dot11channel <= 140)))) {
 			panic_printk("Channel Available Check(ch:%d)\n",priv->pmib->dot11RFEntry.dot11channel);
-			init_timer(&priv->ch_avail_chk_timer);
-			priv->ch_avail_chk_timer.data = (unsigned long) priv;
-			priv->ch_avail_chk_timer.function = rtl8192cd_ch_avail_chk_timer;
+			timer_setup(&priv->ch_avail_chk_timer, rtl8192cd_ch_avail_chk_timer, 0);
+
 
 			if ((priv->pmib->dot11StationConfigEntry.dot11RegDomain == DOMAIN_ETSI) &&
 				(IS_METEOROLOGY_CHANNEL(priv->pmib->dot11RFEntry.dot11channel)))
@@ -9090,27 +9055,24 @@ do_hw_init:
 			else
 				mod_timer(&priv->ch_avail_chk_timer, jiffies + CH_AVAIL_CHK_TO);
 
-			init_timer(&priv->DFS_timer);
-			priv->DFS_timer.data = (unsigned long) priv;
-			priv->DFS_timer.function = rtl8192cd_DFS_timer;
+			timer_setup(&priv->DFS_timer, rtl8192cd_DFS_timer, 0);
 
-			init_timer(&priv->DFS_TXPAUSE_timer);
-			priv->DFS_TXPAUSE_timer.data = (unsigned long) priv;
-			priv->DFS_TXPAUSE_timer.function = rtl8192cd_DFS_TXPAUSE_timer;
+
+			timer_setup(&priv->DFS_TXPAUSE_timer, rtl8192cd_DFS_TXPAUSE_timer, 0);
+
 
 			/* DFS activated after 5 sec; prevent switching channel due to DFS false alarm */
 			mod_timer(&priv->DFS_timer, jiffies + RTL_SECONDS_TO_JIFFIES(5));
 
-			init_timer(&priv->dfs_det_chk_timer);
-			priv->dfs_det_chk_timer.data = (unsigned long) priv;
-			priv->dfs_det_chk_timer.function = rtl8192cd_dfs_det_chk_timer;
+			timer_setup(&priv->dfs_det_chk_timer, rtl8192cd_dfs_det_chk_timer, 0);
+
 
 			mod_timer(&priv->dfs_det_chk_timer, jiffies + RTL_MILISECONDS_TO_JIFFIES(priv->pshare->rf_ft_var.dfs_det_period*10));
 
 			DFS_SetReg(priv);
 
 			if (!priv->pmib->dot11DFSEntry.CAC_enable) {
-				del_timer_sync(&priv->ch_avail_chk_timer);
+				timer_delete_sync(&priv->ch_avail_chk_timer);
 				mod_timer(&priv->ch_avail_chk_timer, jiffies + RTL_MILISECONDS_TO_JIFFIES(200));
 			}
 		}else if(priv->pmib->dot11DFSEntry.disable_tx)
@@ -9315,9 +9277,8 @@ do_hw_init:
 #ifdef __ECOS
 		init_timer(&priv->pshare->vxd_ibss_beacon, (unsigned long)priv, issue_beacon_ibss_vxd);
 #else
-		init_timer(&priv->pshare->vxd_ibss_beacon);
-		priv->pshare->vxd_ibss_beacon.data = (unsigned long) priv;
-		priv->pshare->vxd_ibss_beacon.function = issue_beacon_ibss_vxd;
+		timer_setup(&priv->pshare->vxd_ibss_beacon, issue_beacon_ibss_vxd, 0);
+
 #endif   
 		//mod_timer(&priv->pshare->vxd_ibss_beacon, jiffies + RTL_MILISECONDS_TO_JIFFIES(5000));	
 	} 
@@ -9518,21 +9479,21 @@ free_res:
 #endif
 #if defined(CONFIG_TCP_ACK_TXAGG) || defined(CONFIG_XMITBUF_TXAGG_ADV)
 		if (timer_pending(&priv->pshare->xmit_check_timer))
-			del_timer_sync(&priv->pshare->xmit_check_timer);
+			timer_delete_sync(&priv->pshare->xmit_check_timer);
 #endif
 #ifdef CONFIG_USB_HCI
 #if defined(CONFIG_RTL_92C_SUPPORT) || (!defined(CONFIG_SUPPORT_USB_INT) || !defined(CONFIG_INTERRUPT_BASED_TXBCN))
 		if (timer_pending(&priv->pshare->beacon_timer))
-			del_timer_sync(&priv->pshare->beacon_timer);
+			timer_delete_sync(&priv->pshare->beacon_timer);
 #endif
 #endif // CONFIG_USB_HCI
 #ifdef CONFIG_SDIO_HCI
 		if (timer_pending(&priv->pshare->beacon_timer))
-			del_timer_sync(&priv->pshare->beacon_timer);
+			timer_delete_sync(&priv->pshare->beacon_timer);
 #endif
 #if defined(MULTI_STA_REFINE)
 		if (timer_pending(&priv->pshare->PktAging_timer))
-			del_timer_sync(&priv->pshare->PktAging_timer);
+			timer_delete_sync(&priv->pshare->PktAging_timer);
 #endif
 #ifdef USE_OUT_SRC
 		ODM_StopAllThreads(ODMPTR);
@@ -9662,7 +9623,9 @@ int  rtl8192cd_set_hwaddr(struct net_device *dev, void *addr)
 	ACTIVE_ID = 0;
 #endif
 
-	memcpy(priv->dev->dev_addr, p, 6);
+	/* ★ 2026-09-05: eth_hw_addr_set(), not a raw memcpy -- see the matching note in
+	 * rtl8192cd_open() above; this is the .ndo_set_mac_address path, same bug class. */
+	eth_hw_addr_set(priv->dev, p);
 	memcpy(GET_MY_HWADDR, p, 6);
 #if defined(RTK_NL80211)
 	//brian, for setup MAC address from calibration at flash only during system initialization
@@ -9713,7 +9676,8 @@ int  rtl8192cd_set_hwaddr(struct net_device *dev, void *addr)
 #else // !SDIO_2_PORT
 	if (IS_ROOT_INTERFACE(priv)) {
 		if (GET_VXD_PRIV(priv)) {
-			memcpy(GET_VXD_PRIV(priv)->dev->dev_addr, p, MACADDRLEN);
+			/* ★ 2026-09-05: eth_hw_addr_set(), see the note in rtl8192cd_open(). */
+			eth_hw_addr_set(GET_VXD_PRIV(priv)->dev, p);
 			memcpy(GET_VXD_PRIV(priv)->pmib->dot11OperationEntry.hwaddr, p, MACADDRLEN);
 #if defined(MULTI_MAC_CLONE) && defined(CONFIG_WLAN_HAL)
 			{
@@ -9734,7 +9698,8 @@ int  rtl8192cd_set_hwaddr(struct net_device *dev, void *addr)
 		} else
 #endif
 		{
-			memcpy(GET_ROOT(priv)->dev->dev_addr, p, 6);
+			/* ★ 2026-09-05: eth_hw_addr_set(), see the note in rtl8192cd_open(). */
+			eth_hw_addr_set(GET_ROOT(priv)->dev, p);
 			memcpy(GET_ROOT(priv)->pmib->dot11OperationEntry.hwaddr, p, 6);
 		}
 	}
@@ -9743,13 +9708,14 @@ int  rtl8192cd_set_hwaddr(struct net_device *dev, void *addr)
 
 #ifdef     CONFIG_WLAN_HAL 
 	if (IS_HAL_CHIP(priv)) {
-	    #ifdef CONFIG_WLAN_HAL_8197F		
+	    #ifdef CONFIG_WLAN_HAL_8197F
 		if(!IS_DRV_OPEN(priv)) {
 			RESTORE_INT(flags);
 			SMP_UNLOCK(flags);
-			return;
+			return 0;	/* 6.18 port: rtl8192cd_set_hwaddr() returns int, see
+					 * its other early returns just above in this function */
 		}
-	    #endif		
+	    #endif
 	    GET_HAL_INTERFACE(priv)->GetHwRegHandler(priv, HW_VAR_MAC_IO_ENABLE, (pu1Byte)&bVal);
 	    if ( bVal ) {
 	        GET_HAL_INTERFACE(priv)->SetHwRegHandler(priv, HW_VAR_ETHER_ADDR, (pu1Byte)p);
@@ -9846,7 +9812,7 @@ int rtl8192cd_close(struct net_device *dev)
 	int i;
 
 	if (timer_pending(&priv->ch_avail_chk_timer)) {
-		del_timer(&priv->ch_avail_chk_timer);
+		timer_delete(&priv->ch_avail_chk_timer);
 		RTL_W8(TXPAUSE, 0xff);
 		/* R4/G3 Path B: event_indicate_cfg80211() lives in 8192cd_cfg80211.c and
 		 * CFG80211_RADAR_CAC_ABORTED is declared inside #ifdef RTK_NL80211
@@ -9912,7 +9878,7 @@ int rtl8192cd_close(struct net_device *dev)
 #if defined(PCIE_POWER_SAVING) || defined(RF_MIMO_SWITCH)
 	if (timer_pending(&priv->ps_timer)) {
 		SMP_UNLOCK(flags);
-		del_timer_sync(&priv->ps_timer);
+		timer_delete_sync(&priv->ps_timer);
 		SMP_LOCK(flags);
 	}
 #endif	
@@ -9935,7 +9901,7 @@ int rtl8192cd_close(struct net_device *dev)
 #ifdef CONFIG_POWER_SAVE
 		rtw_lock_suspend(priv);
 #endif
-		del_timer_sync(&priv->pshare->ps_timer);
+		timer_delete_sync(&priv->pshare->ps_timer);
 
 		if (RTW_STS_SUSPEND == priv->pshare->pwr_state)
 			ap_offload_exit(priv);
@@ -10701,69 +10667,53 @@ static void MDL_DEVINIT set_mib_default(struct rtl8192cd_priv *priv)
 #endif
 	{
 #ifdef DFS
-		init_timer(&priv->ch52_timer);
-		priv->ch52_timer.data = (unsigned long) priv;
-		priv->ch52_timer.function = rtl8192cd_ch52_timer;
+		timer_setup(&priv->ch52_timer, rtl8192cd_ch52_timer, 0);
 
-		init_timer(&priv->ch56_timer);
-		priv->ch56_timer.data = (unsigned long) priv;
-		priv->ch56_timer.function = rtl8192cd_ch56_timer;
 
-		init_timer(&priv->ch60_timer);
-		priv->ch60_timer.data = (unsigned long) priv;
-		priv->ch60_timer.function = rtl8192cd_ch60_timer;
+		timer_setup(&priv->ch56_timer, rtl8192cd_ch56_timer, 0);
 
-		init_timer(&priv->ch64_timer);
-		priv->ch64_timer.data = (unsigned long) priv;
-		priv->ch64_timer.function = rtl8192cd_ch64_timer;
 
-		init_timer(&priv->ch100_timer);
-		priv->ch100_timer.data = (unsigned long) priv;
-		priv->ch100_timer.function = rtl8192cd_ch100_timer;
+		timer_setup(&priv->ch60_timer, rtl8192cd_ch60_timer, 0);
 
-		init_timer(&priv->ch104_timer);
-		priv->ch104_timer.data = (unsigned long) priv;
-		priv->ch104_timer.function = rtl8192cd_ch104_timer;
 
-		init_timer(&priv->ch108_timer);
-		priv->ch108_timer.data = (unsigned long) priv;
-		priv->ch108_timer.function = rtl8192cd_ch108_timer;
+		timer_setup(&priv->ch64_timer, rtl8192cd_ch64_timer, 0);
 
-		init_timer(&priv->ch112_timer);
-		priv->ch112_timer.data = (unsigned long) priv;
-		priv->ch112_timer.function = rtl8192cd_ch112_timer;
 
-		init_timer(&priv->ch116_timer);
-		priv->ch116_timer.data = (unsigned long) priv;
-		priv->ch116_timer.function = rtl8192cd_ch116_timer;
+		timer_setup(&priv->ch100_timer, rtl8192cd_ch100_timer, 0);
 
-		init_timer(&priv->ch120_timer);
-		priv->ch120_timer.data = (unsigned long) priv;
-		priv->ch120_timer.function = rtl8192cd_ch120_timer;
 
-		init_timer(&priv->ch124_timer);
-		priv->ch124_timer.data = (unsigned long) priv;
-		priv->ch124_timer.function = rtl8192cd_ch124_timer;
+		timer_setup(&priv->ch104_timer, rtl8192cd_ch104_timer, 0);
 
-		init_timer(&priv->ch128_timer);
-		priv->ch128_timer.data = (unsigned long) priv;
-		priv->ch128_timer.function = rtl8192cd_ch128_timer;
 
-		init_timer(&priv->ch132_timer);
-		priv->ch132_timer.data = (unsigned long) priv;
-		priv->ch132_timer.function = rtl8192cd_ch132_timer;
+		timer_setup(&priv->ch108_timer, rtl8192cd_ch108_timer, 0);
 
-		init_timer(&priv->ch136_timer);
-		priv->ch136_timer.data = (unsigned long) priv;
-		priv->ch136_timer.function = rtl8192cd_ch136_timer;
 
-		init_timer(&priv->ch140_timer);
-		priv->ch140_timer.data = (unsigned long) priv;
-		priv->ch140_timer.function = rtl8192cd_ch140_timer;
+		timer_setup(&priv->ch112_timer, rtl8192cd_ch112_timer, 0);
 
-		init_timer(&priv->ch144_timer);
-		priv->ch144_timer.data = (unsigned long) priv;
-		priv->ch144_timer.function = rtl8192cd_ch144_timer;
+
+		timer_setup(&priv->ch116_timer, rtl8192cd_ch116_timer, 0);
+
+
+		timer_setup(&priv->ch120_timer, rtl8192cd_ch120_timer, 0);
+
+
+		timer_setup(&priv->ch124_timer, rtl8192cd_ch124_timer, 0);
+
+
+		timer_setup(&priv->ch128_timer, rtl8192cd_ch128_timer, 0);
+
+
+		timer_setup(&priv->ch132_timer, rtl8192cd_ch132_timer, 0);
+
+
+		timer_setup(&priv->ch136_timer, rtl8192cd_ch136_timer, 0);
+
+
+		timer_setup(&priv->ch140_timer, rtl8192cd_ch140_timer, 0);
+
+
+		timer_setup(&priv->ch144_timer, rtl8192cd_ch144_timer, 0);
+
 #endif
 
 		if (((priv->pshare->type>>TYPE_SHIFT) & TYPE_MASK) == TYPE_EMBEDDED) {
@@ -11379,7 +11329,7 @@ static int MDL_DEVINIT rtl8192cd_init_one(struct osk_pci_dev *pdev,
 
 #ifdef DROP_RXPKT
 struct rtl8192cd_priv *G5_priv = NULL;
-static void disable_G5_rx_drop(unsigned long data) {
+static void disable_G5_rx_drop(struct timer_list *t) {
 	//printk("Try turning off 5G rx drop\n");
 	if(G5_priv != NULL) {
 		//printk("G5_priv=%p\n", G5_priv);
@@ -11397,8 +11347,7 @@ static void disable_G5_rx_drop(unsigned long data) {
 }
 struct timer_list G5_rx_drop_timer;
 void init_G5_rx_drop_timer(void) {
-	init_timer(&G5_rx_drop_timer);	
-	G5_rx_drop_timer.function = disable_G5_rx_drop;
+	timer_setup(&G5_rx_drop_timer, disable_G5_rx_drop, 0);
 	printk("===========================================\n");
 	printk("G5_rx_drop_timer initialized\n");
 	printk("===========================================\n");
@@ -12068,6 +12017,7 @@ void *rtl8192cd_init_one(struct sdio_func *psdio_func, void *ent, struct _device
 	priv->Eap_packet = Eap_packet;
 #if defined(INCLUDE_WPA_PSK) || defined(WIFI_HAPD) || defined(RTK_NL80211)
 	priv->wpa_global_info = wpa_global_info;
+	wpa_global_info->priv = priv; /* 6.18 port: backpointer for timer_container_of() */
 #endif
 	priv->site_survey = site_survey;
 #ifdef MBSSID
@@ -12120,7 +12070,9 @@ void *rtl8192cd_init_one(struct sdio_func *psdio_func, void *ent, struct _device
 #endif
 	{
 		priv->pshare = pshare;	// david
+		priv->pshare->priv = priv; /* 6.18 port: backpointer for timer_container_of() */
 		priv->pshare->phw = phw;
+		phw->priv = priv; /* 6.18 port: backpointer for timer_container_of() */
 #ifdef USE_DMA_ALLOCATE
 		priv->pshare->hw_dma_phys = dma_phys;
 #endif
@@ -12197,6 +12149,7 @@ void *rtl8192cd_init_one(struct sdio_func *psdio_func, void *ent, struct _device
 /*cfg p2p cfg p2p*/
 #ifdef P2P_SUPPORT  //assign priv->p2pPtr for all interface
     priv->p2pPtr = p2p_context_ptr;
+    p2p_context_ptr->priv = priv; /* 6.18 port: backpointer for timer_container_of() */
 #endif
 	priv->dev = dev;
 
@@ -12328,7 +12281,7 @@ void *rtl8192cd_init_one(struct sdio_func *psdio_func, void *ent, struct _device
 		}
 #endif //#ifdef RTK_129X_PLATFORM
 
-		regs = ioremap_nocache(pciaddr, pmem_len);
+		regs = ioremap(pciaddr, pmem_len); /* 6.18 port: ioremap_nocache() removed, ioremap() is already non-cached */
 		if (!regs) {
 			rc = -EIO;
 #ifdef __LINUX_2_6__
@@ -12727,7 +12680,7 @@ void *rtl8192cd_init_one(struct sdio_func *psdio_func, void *ent, struct _device
 #endif
 			}
 
-            *((volatile unsigned long *)PCI_CONFIG_BASE1) = virt_to_bus((void *)dev->base_addr);
+            *((volatile unsigned long *)PCI_CONFIG_BASE1) = virt_to_phys((void *)dev->base_addr);
 
 #ifdef CONFIG_RTL_8197F //eric-8822 97f
 //#if defined(CONFIG_WLAN_HAL_8822BE) || defined(CONFIG_RTL_8812_SUPPORT)
@@ -12927,7 +12880,54 @@ void *rtl8192cd_init_one(struct sdio_func *psdio_func, void *ent, struct _device
 	else
 #endif
 	{
-		dev->irq = wdev->irq;
+		/*
+		 * ★ RESOLVE THE WMAC INTERRUPT FROM THE DEVICE TREE, NOT THE STATIC
+		 * TABLE. wdev->irq comes from wlan_device[]'s compiled-in
+		 * BSP_WLAN_MAC_IRQ, which is the 4.14-era value 6 -- a bare MIPS CPU
+		 * IP number. That worked when the WMAC line was wired straight to CP0
+		 * IP6, but on 6.18 mti,cpu-interrupt-controller creates a legacy
+		 * domain where virq == hwirq for 0-7, and THIS SoC's Realtek intc
+		 * claims IP6 as one of its four parents (rtl8197f.dtsi:
+		 * intc interrupts = <2>, <4>, <5>, <6>). irq_set_chained_handler_and_
+		 * data() therefore marks virq 6 IRQ_NOREQUEST, and __setup_irq()
+		 * rejects request_irq(6, ...) with -EINVAL.
+		 *
+		 * The driver only logs that failure and keeps going, so the symptom is
+		 * NOT an error: the radio loads, ingests /etc/Wireless/RTL8192CD.dat,
+		 * runs full PHY/RF bring-up ([ODM_software_init], "load efuse ok",
+		 * firmware load, "Default BB Swing=30"), registers its netdevs and even
+		 * joins the bridge in forwarding state -- and then simply never
+		 * interrupts, so it never beacons and tx/rx stay at 0. The giveaway is
+		 * that /proc/interrupts has no wlan line at all. Observed exactly that
+		 * on 2026-09-03.
+		 *
+		 * The correct number is the intc hwirq 29 mapped through the Realtek
+		 * controller (see the wmac node in rtl8197f.dtsi: interrupts = <29 3>).
+		 * Resolve it from the DT node so this tracks the hardware description
+		 * instead of a compiled-in constant; fall back to the table value if
+		 * the node is missing so out-of-tree/older setups behave as before.
+		 */
+		struct device_node *wmac_np;
+		int dt_irq = 0;
+
+		wmac_np = of_find_compatible_node(NULL, NULL,
+						  "realtek,rtl8197f-wmac");
+		if (wmac_np) {
+			dt_irq = irq_of_parse_and_map(wmac_np, 0);
+			of_node_put(wmac_np);
+		}
+
+		if (dt_irq > 0) {
+			if (dt_irq != wdev->irq)
+				printk(KERN_INFO "rtl8192cd: WMAC irq from DT = %d "
+				       "(static table said %d)\n", dt_irq, wdev->irq);
+			dev->irq = dt_irq;
+		} else {
+			printk(KERN_WARNING "rtl8192cd: no realtek,rtl8197f-wmac DT "
+			       "node/irq; falling back to table irq %d -- the radio "
+			       "will initialise but never interrupt\n", wdev->irq);
+			dev->irq = wdev->irq;
+		}
 	}
 
 #ifdef CONFIG_PUMA_UDMA_SUPPORT
@@ -13723,13 +13723,13 @@ register_driver:
 		page_ptr = (unsigned char *)
 			(((unsigned long)&desc_buf[priv->pshare->wlandev_idx]) + (PAGE_SIZE - (((unsigned long)&desc_buf[priv->pshare->wlandev_idx]) & (PAGE_SIZE-1))));
 		phw->ring_buf_len = ((unsigned long)&desc_buf[priv->pshare->wlandev_idx]) + (sizeof(desc_buf)/NUM_WLAN_IFACE) - ((unsigned long)page_ptr);
-		phw->ring_dma_addr = virt_to_bus(page_ptr);
+		phw->ring_dma_addr = virt_to_phys(page_ptr);
 		page_ptr = (unsigned char *)KSEG1ADDR(page_ptr);
 #else
 		page_ptr = (unsigned char *)
 			(((unsigned long)desc_buf) + (PAGE_SIZE - (((unsigned long)desc_buf) & (PAGE_SIZE-1))));
 		phw->ring_buf_len = (unsigned long)desc_buf + sizeof(desc_buf) - (unsigned long)page_ptr;
-		phw->ring_dma_addr = virt_to_bus(page_ptr);
+		phw->ring_dma_addr = virt_to_phys(page_ptr);
 		page_ptr = (unsigned char *)KSEG1ADDR(page_ptr);
 #endif		
 #else
@@ -13737,7 +13737,7 @@ register_driver:
 		if (IS_PCIBIOS_TYPE) {
 			dma_addr_t addr;
 			// Avoid the combination of (64-bit dma_addr_t + big endian) to get invalid phw->ring_dma_addr
-			page_ptr = pci_alloc_consistent(priv->pshare->pdev, DESC_DMA_PAGE_SIZE_IF(priv), &addr);
+			page_ptr = dma_alloc_coherent(&priv->pshare->pdev->dev, DESC_DMA_PAGE_SIZE_IF(priv), &addr, GFP_KERNEL); /* 6.18 port: pci_alloc_consistent() removed */
 			phw->ring_dma_addr = addr;
 		} else
 #endif
@@ -13767,7 +13767,7 @@ register_driver:
 #if defined(NOT_RTK_BSP)
 		phw->ring_dma_addr = phw->ring_dma_addr + page_align_phy;  
 #else
-		phw->ring_dma_addr = virt_to_bus(page_ptr)+CONFIG_LUNA_SLAVE_PHYMEM_OFFSET;
+		phw->ring_dma_addr = virt_to_phys(page_ptr)+CONFIG_LUNA_SLAVE_PHYMEM_OFFSET;
 #endif
 
 #ifdef __MIPSEB__
@@ -14308,7 +14308,7 @@ void rtl8192cd_deinit_one(struct rtl8192cd_priv *priv)
 #ifdef CONFIG_NET_PCI
 		if (IS_PCIBIOS_TYPE) {
 			unsigned long page_align_phy = (PAGE_SIZE - (((unsigned long)priv->pshare->phw->alloc_dma_buf) & (PAGE_SIZE-1)));
-			pci_free_consistent(priv->pshare->pdev, DESC_DMA_PAGE_SIZE_IF(priv), (void*)priv->pshare->phw->alloc_dma_buf,
+			dma_free_coherent(&priv->pshare->pdev->dev, DESC_DMA_PAGE_SIZE_IF(priv), (void*)priv->pshare->phw->alloc_dma_buf, /* 6.18 port: pci_free_consistent() removed */
 				(dma_addr_t)(priv->pshare->phw->ring_dma_addr-page_align_phy));
 		} else
 #endif

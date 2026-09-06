@@ -3162,7 +3162,7 @@ void P2P_1sec_timer(struct rtl8192cd_priv *priv)
 
                 // stop ss_timer
                 if (timer_pending(&priv->ss_timer))
-                    del_timer(&priv->ss_timer);
+                    timer_delete(&priv->ss_timer);
 
 
                 #if defined(__ECOS) && defined(CONFIG_SDIO_HCI)
@@ -6046,9 +6046,10 @@ void rtk_set_scan_deny(struct rtl8192cd_priv *priv,int denyms)
     /*set scan deny*/
 }
 
-void rtk_p2p_scan_deny_expire(unsigned long task_priv)
+void rtk_p2p_scan_deny_expire(struct timer_list *t)
 {
-    struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+    struct p2p_context *p2pPtr = timer_container_of(p2pPtr, t, scan_deny_timer);
+    struct rtl8192cd_priv *priv = p2pPtr->priv;
 
     if (!(priv->drv_state & DRV_STATE_OPEN))
         return;
@@ -6229,10 +6230,11 @@ int P2P_listen(struct rtl8192cd_priv* priv,unsigned char* data)
     return 0;
 }
 
-void P2P_search_timer(unsigned long task_priv)
+void P2P_search_timer(struct timer_list *t)
 {
     int idx=0;
-    struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+    struct p2p_context *p2pPtr = timer_container_of(p2pPtr, t, p2p_search_timer_t);
+    struct rtl8192cd_priv *priv = p2pPtr->priv;
 
     if (!(priv->drv_state & DRV_STATE_OPEN))
         return;
@@ -6277,10 +6279,11 @@ void P2P_search_timer(unsigned long task_priv)
 
 /*P2P discovery related functions*/
 
-void p2p_find_timer(unsigned long task_priv)
+void p2p_find_timer(struct timer_list *t)
 {
 
-    struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+    struct p2p_context *p2pPtr = timer_container_of(p2pPtr, t, p2p_find_timer_t);
+    struct rtl8192cd_priv *priv = p2pPtr->priv;
 
     if (!(priv->drv_state & DRV_STATE_OPEN))
         return;
@@ -6355,7 +6358,7 @@ void p2p_find_timer(unsigned long task_priv)
                 randomX+=1; // 1<= randomX <=3
 
                 if (timer_pending(&priv->p2pPtr->p2p_search_timer_t))
-                    del_timer_sync(&priv->p2pPtr->p2p_search_timer_t);
+                    timer_delete_sync(&priv->p2pPtr->p2p_search_timer_t);
 
                 P2P_DEBUG("\n");
 

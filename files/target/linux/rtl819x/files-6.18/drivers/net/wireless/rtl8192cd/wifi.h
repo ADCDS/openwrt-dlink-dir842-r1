@@ -23,11 +23,17 @@
 #ifndef _WIFI_H_
 #define _WIFI_H_
 
-#ifdef BIT
-//#error	"BIT define occurred earlier elsewhere!\n"
-#undef BIT
+/* 6.18 port: pull in the kernel's own BIT() before this vendor fallback
+ * so it always wins -- see WlanHAL/Include/GeneralDef.h for the full
+ * explanation of why the old unconditional #undef+#define here was a real
+ * bug (it silently corrupted BIT() for every kernel header parsed
+ * afterwards in this translation unit, not just a cosmetic warning). */
+#ifdef __KERNEL__
+#include <linux/bits.h>
 #endif
+#ifndef BIT
 #define BIT(x)	(1 << (x))
+#endif
 
 
 #define WLAN_ETHHDR_LEN		14

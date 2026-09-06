@@ -2964,6 +2964,11 @@ void reorder_ctrl_consumeQ(struct rtl8192cd_priv *priv, struct stat_info *pstat,
 	rc_entry->start_rcv = FALSE;
 }
 
+/* Split out from the timer callbacks below so the RX fast path can call them
+ * directly with its own priv -- see the comment on __reorder_ctrl_timeout(). */
+static void __reorder_ctrl_timeout(struct rtl8192cd_priv *priv);
+static void __reorder_ctrl_timeout_cli(struct rtl8192cd_priv *priv);
+
 #if (!defined(__OSK__)) || (defined(__OSK__) && !defined(CONFIG_RTL6028))
 __MIPS16
 #endif
@@ -2990,11 +2995,11 @@ static int reorder_ctrl_timer_add(struct rtl8192cd_priv *priv, struct stat_info 
 			timeout = priv->pshare->rc_timer[priv->pshare->rc_timer_tail].timeout;
 			if (TSF_LESS(timeout, jiffies) || (timeout == jiffies)) {
 				if (timer_pending(&priv->pshare->rc_sys_timer))
-					del_timer(&priv->pshare->rc_sys_timer);
+					timer_delete(&priv->pshare->rc_sys_timer);
 #ifdef SMP_SYNC
 				spin_unlock(&priv->rc_packet_q_lock);
 #endif
-				reorder_ctrl_timeout((unsigned long)priv);
+				__reorder_ctrl_timeout(priv);
 #ifdef SMP_SYNC
 				spin_lock(&priv->rc_packet_q_lock);
 #endif
@@ -3015,7 +3020,7 @@ static int reorder_ctrl_timer_add(struct rtl8192cd_priv *priv, struct stat_info 
 
 	if (CIRC_CNT(current_idx, priv->pshare->rc_timer_tail, RC_TIMER_NUM) == 0) {
 		if (timer_pending(&priv->pshare->rc_sys_timer))
-			del_timer(&priv->pshare->rc_sys_timer);
+			timer_delete(&priv->pshare->rc_sys_timer);
 		setup_timer = 1;
 	}
 	else if (CIRC_SPACE(current_idx, priv->pshare->rc_timer_tail, RC_TIMER_NUM) == 0) {
@@ -3065,9 +3070,25 @@ __IRAM_WIFI_PRI6
 #elif !defined(WIFI_MIN_IMEM_USAGE)
 __IRAM_IN_865X
 #endif
-void reorder_ctrl_timeout(unsigned long task_priv)
+/*
+ * ★ TWO CALLERS, TWO ABIs -- see the same pattern on rtl8192cd_swq_timeout()
+ * in 8192cd_tx.c. This handler is armed as a real timer, but it is ALSO called
+ * directly from the RX fast path (rtl8192cd_rx_isr) with the current `priv`.
+ * The 4.14 original took an `unsigned long`, so both callers worked.
+ *
+ * Converting the signature to `struct timer_list *` broke the direct caller:
+ * the argument was really a rtl8192cd_priv *, and timer_container_of() then
+ * subtracted offsetof(priv_shared_info, rc_sys_timer) from it, so `pshare` and
+ * every field reached through it was garbage. The loop below runs under
+ * SAVE_INT_AND_CLI() with interrupts off, so garbage window bounds mean an
+ * unbounded spin with interrupts disabled -- a hard kernel wedge.
+ *
+ * Keeping a plain helper also preserves the 4.14 semantics that the direct
+ * caller passes its OWN (possibly per-VAP) priv; recovering priv as
+ * pshare->priv would silently substitute the root interface's priv instead.
+ */
+static void __reorder_ctrl_timeout(struct rtl8192cd_priv *priv)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
 	unsigned int timeout, current_time;
 	struct reorder_ctrl_entry *rc_entry=NULL;
 	struct rtl8192cd_priv *priv_this=NULL;
@@ -3181,6 +3202,14 @@ void reorder_ctrl_timeout(unsigned long task_priv)
 	SMP_UNLOCK_REORDER_CTRL(flags);
 }
 
+/* Timer registration (timer_setup) -- recover priv via the shared-info block. */
+void reorder_ctrl_timeout(struct timer_list *t)
+{
+	struct priv_shared_info *pshare = timer_container_of(pshare, t, rc_sys_timer);
+
+	__reorder_ctrl_timeout(pshare->priv);
+}
+
 
 #if (!defined(__OSK__)) || (defined(__OSK__) && !defined(CONFIG_RTL6028))
 __MIPS16
@@ -3208,11 +3237,11 @@ static int reorder_ctrl_timer_add_cli(struct rtl8192cd_priv *priv, struct stat_i
 			timeout = priv->pshare->rc_timer_cli[priv->pshare->rc_timer_tail_cli].timeout;
 			if (TSF_LESS(timeout, jiffies) || (timeout == jiffies)) {
 				if (timer_pending(&priv->pshare->rc_sys_timer_cli))
-					del_timer(&priv->pshare->rc_sys_timer_cli);
+					timer_delete(&priv->pshare->rc_sys_timer_cli);
 #ifdef SMP_SYNC
 				spin_unlock(&priv->rc_packet_q_lock);
 #endif
-				reorder_ctrl_timeout_cli((unsigned long)priv);
+				__reorder_ctrl_timeout_cli(priv);
 #ifdef SMP_SYNC
 				spin_lock(&priv->rc_packet_q_lock);
 #endif
@@ -3233,7 +3262,7 @@ static int reorder_ctrl_timer_add_cli(struct rtl8192cd_priv *priv, struct stat_i
 
 	if (CIRC_CNT(current_idx, priv->pshare->rc_timer_tail_cli, RC_TIMER_NUM) == 0) {
 		if (timer_pending(&priv->pshare->rc_sys_timer_cli))
-			del_timer(&priv->pshare->rc_sys_timer_cli);
+			timer_delete(&priv->pshare->rc_sys_timer_cli);
 		setup_timer = 1;
 	}
 	else if (CIRC_SPACE(current_idx, priv->pshare->rc_timer_tail_cli, RC_TIMER_NUM) == 0) {
@@ -3282,9 +3311,25 @@ static int reorder_ctrl_timer_add_cli(struct rtl8192cd_priv *priv, struct stat_i
 #ifndef WIFI_MIN_IMEM_USAGE
 __IRAM_IN_865X
 #endif
-void reorder_ctrl_timeout_cli(unsigned long task_priv)
+/*
+ * ★ TWO CALLERS, TWO ABIs -- see the same pattern on rtl8192cd_swq_timeout()
+ * in 8192cd_tx.c. This handler is armed as a real timer, but it is ALSO called
+ * directly from the RX fast path (rtl8192cd_rx_isr) with the current `priv`.
+ * The 4.14 original took an `unsigned long`, so both callers worked.
+ *
+ * Converting the signature to `struct timer_list *` broke the direct caller:
+ * the argument was really a rtl8192cd_priv *, and timer_container_of() then
+ * subtracted offsetof(priv_shared_info, rc_sys_timer_cli) from it, so `pshare` and
+ * every field reached through it was garbage. The loop below runs under
+ * SAVE_INT_AND_CLI() with interrupts off, so garbage window bounds mean an
+ * unbounded spin with interrupts disabled -- a hard kernel wedge.
+ *
+ * Keeping a plain helper also preserves the 4.14 semantics that the direct
+ * caller passes its OWN (possibly per-VAP) priv; recovering priv as
+ * pshare->priv would silently substitute the root interface's priv instead.
+ */
+static void __reorder_ctrl_timeout_cli(struct rtl8192cd_priv *priv)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
 	unsigned int timeout, current_time;
 	struct reorder_ctrl_entry *rc_entry=NULL;
 	struct rtl8192cd_priv *priv_this=NULL;
@@ -3396,6 +3441,14 @@ void reorder_ctrl_timeout_cli(unsigned long task_priv)
 	}
 	RESTORE_INT(flags);
 	SMP_UNLOCK_REORDER_CTRL(flags);
+}
+
+/* Timer registration (timer_setup) -- recover priv via the shared-info block. */
+void reorder_ctrl_timeout_cli(struct timer_list *t)
+{
+	struct priv_shared_info *pshare = timer_container_of(pshare, t, rc_sys_timer_cli);
+
+	__reorder_ctrl_timeout_cli(pshare->priv);
 }
 
 
@@ -6934,7 +6987,7 @@ void rtl88XX_rx_isr(struct rtl8192cd_priv *priv)
         if ( RT_STATUS_SUCCESS != GET_HAL_INTERFACE(priv)->QueryRxDescHandler(priv, q_num, pskb->data, &rx_desc_status) ) {
 #if defined(CONFIG_NET_PCI) && !defined(USE_RTL8186_SDK)
 			if (IS_PCIBIOS_TYPE) {
-				pci_unmap_single(priv->pshare->pdev, phw->rx_infoL[cur_q->cur_host_idx].paddr, (RX_BUF_LEN - sizeof(struct rx_frinfo)), PCI_DMA_FROMDEVICE);
+				dma_unmap_single(&priv->pshare->pdev->dev, phw->rx_infoL[cur_q->cur_host_idx].paddr, (RX_BUF_LEN - sizeof(struct rx_frinfo)), PCI_DMA_FROMDEVICE);
 			}
 #endif
             pfrinfo = NULL;
@@ -6949,7 +7002,7 @@ void rtl88XX_rx_isr(struct rtl8192cd_priv *priv)
 
 #if defined(CONFIG_NET_PCI) && !defined(USE_RTL8186_SDK)
 		if (IS_PCIBIOS_TYPE) {
-			pci_unmap_single(priv->pshare->pdev, phw->rx_infoL[cur_q->cur_host_idx].paddr, rx_desc_status.PKT_LEN, PCI_DMA_FROMDEVICE);
+			dma_unmap_single(&priv->pshare->pdev->dev, phw->rx_infoL[cur_q->cur_host_idx].paddr, rx_desc_status.PKT_LEN, PCI_DMA_FROMDEVICE);
 		}
 #endif
 
@@ -7478,7 +7531,7 @@ void rtl88XX_rx_isr(struct rtl8192cd_priv *priv)
 
 #if defined(CONFIG_NET_PCI) && !defined(USE_RTL8186_SDK)
 			if (IS_PCIBIOS_TYPE) {
-//				pci_unmap_single(priv->pshare->pdev, phw->rx_infoL[cur_q->cur_host_idx].paddr, (RX_BUF_LEN - sizeof(struct rx_frinfo)), PCI_DMA_FROMDEVICE);
+//				dma_unmap_single(&priv->pshare->pdev->dev, phw->rx_infoL[cur_q->cur_host_idx].paddr, (RX_BUF_LEN - sizeof(struct rx_frinfo)), PCI_DMA_FROMDEVICE);
 			}
 #endif
 
@@ -7581,19 +7634,19 @@ rx_reuse:
  
             GET_HAL_INTERFACE(priv)->UpdateRXBDInfoHandler(priv, q_num, cur_q->cur_host_idx, (pu1Byte)pskb, init_rxdesc_88XX, _FALSE);
 			// Remove it because pci_map_single() in get_physical_addr() already performed memory sync.
-            //rtl_cache_sync_wback(priv, (unsigned long)bus_to_virt(phw->rx_infoL[cur_q->cur_host_idx].paddr),
+            //rtl_cache_sync_wback(priv, (unsigned long)phys_to_virt(phw->rx_infoL[cur_q->cur_host_idx].paddr),
             //    RX_BUF_LEN - sizeof(struct rx_frinfo) - offset,
             //    PCI_DMA_FROMDEVICE);
 #else
 #ifdef TRXBD_CACHABLE_REGION
-            memset(bus_to_virt(phw->rx_infoL[cur_q->cur_host_idx].paddr), 0, RX_BUF_LEN - sizeof(struct rx_frinfo) - offset);
-            _dma_cache_wback((unsigned long)(bus_to_virt(phw->rx_infoL[cur_q->cur_host_idx].paddr)-CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), 
+            memset(phys_to_virt(phw->rx_infoL[cur_q->cur_host_idx].paddr), 0, RX_BUF_LEN - sizeof(struct rx_frinfo) - offset);
+            _dma_cache_wback((unsigned long)(phys_to_virt(phw->rx_infoL[cur_q->cur_host_idx].paddr)-CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), 
                 RX_BUF_LEN - sizeof(struct rx_frinfo) - offset);
 
-//            _dma_cache_inv((unsigned long)(bus_to_virt(phw->rx_infoL[cur_q->cur_host_idx].paddr)-CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), 
+//            _dma_cache_inv((unsigned long)(phys_to_virt(phw->rx_infoL[cur_q->cur_host_idx].paddr)-CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), 
 //                RX_BUF_LEN - sizeof(struct rx_frinfo) - offset);
 #else
-            rtl_cache_sync_wback(priv, (unsigned long)bus_to_virt(phw->rx_infoL[cur_q->cur_host_idx].paddr),
+            rtl_cache_sync_wback(priv, (unsigned long)phys_to_virt(phw->rx_infoL[cur_q->cur_host_idx].paddr),
                 RX_BUF_LEN - sizeof(struct rx_frinfo) - offset,
                 PCI_DMA_FROMDEVICE);
 #endif //#ifdef TRXBD_CACHABLE_REGION
@@ -7814,7 +7867,7 @@ void rtl8192cd_rx_isr(struct rtl8192cd_priv *priv)
 				break;
 #if defined(CONFIG_NET_PCI) && !defined(USE_RTL8186_SDK)
 			if (IS_PCIBIOS_TYPE) {
-				pci_unmap_single(priv->pshare->pdev, phw->rx_infoL[tail].paddr, (cmd & RX_PktLenMask), PCI_DMA_FROMDEVICE);
+				dma_unmap_single(&priv->pshare->pdev->dev, phw->rx_infoL[tail].paddr, (cmd & RX_PktLenMask), PCI_DMA_FROMDEVICE);
 			}
 #endif
 
@@ -8448,9 +8501,9 @@ rx_reuse:
 					pdesc->Dword6 = set_desc(phw->rx_infoL[tail].paddr);
 #if defined(CONFIG_NET_PCI) && !defined(USE_RTL8186_SDK)
 					// Remove it because pci_map_single() in get_physical_addr() already performed memory sync.
-					//rtl_cache_sync_wback(priv, (unsigned long)bus_to_virt(phw->rx_infoL[tail].paddr), RX_BUF_LEN - sizeof(struct rx_frinfo)-64, PCI_DMA_FROMDEVICE);
+					//rtl_cache_sync_wback(priv, (unsigned long)phys_to_virt(phw->rx_infoL[tail].paddr), RX_BUF_LEN - sizeof(struct rx_frinfo)-64, PCI_DMA_FROMDEVICE);
 #else
-					rtl_cache_sync_wback(priv, (unsigned long)bus_to_virt(phw->rx_infoL[tail].paddr-CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), RX_BUF_LEN - sizeof(struct rx_frinfo)-64, PCI_DMA_FROMDEVICE);
+					rtl_cache_sync_wback(priv, (unsigned long)phys_to_virt(phw->rx_infoL[tail].paddr-CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), RX_BUF_LEN - sizeof(struct rx_frinfo)-64, PCI_DMA_FROMDEVICE);
 #endif
 					pdesc->Dword0 = set_desc((tail == (NUM_RX_DESC_IF(priv) - 1)? RX_EOR : 0) | RX_OWN | (RX_BUF_LEN - sizeof(struct rx_frinfo)-64));
 					SMP_UNLOCK_SKB(x);

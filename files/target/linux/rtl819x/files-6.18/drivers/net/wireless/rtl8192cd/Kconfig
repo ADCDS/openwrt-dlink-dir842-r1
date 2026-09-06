@@ -3,6 +3,16 @@ config RTL8192CD
 	tristate "Realtek rtl8192cd (vendor) — RTL8197F on-SoC 2.4 GHz + RTL8822BE"
 	depends on SOC_RTL8197F
 	depends on m
+	select WIRELESS_EXT
+	select WEXT_PRIV
+	select WEXT_PROC
+	# 6.18 port: this driver is WEXT-only (Path B, see 8192cd_cfg.h's own
+	# comment). The target Makefile's KCONFIG:=...CONFIG_WIRELESS_EXT=y...
+	# line looks like it forces this, but WIRELESS_EXT has no Kconfig prompt
+	# and is only reachable via select -- a raw =y seed for a prompt-less
+	# symbol is silently dropped by oldconfig/syncconfig, which is exactly
+	# what was happening (net_device.wireless_handlers, guarded by
+	# CONFIG_WIRELESS_EXT, was missing at every use site despite the seed).
 	help
 	  Vendor Realtek rtl8192cd driver, taken from the 8devices GPL release
 	  (SDK v3.4.11e, openwrt-18.06-rtkmipsel-3.18).  This is R4/G3: the

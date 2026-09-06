@@ -480,9 +480,16 @@
 
 #ifdef __LINUX_2_6__
 #ifdef __MIPSEB__
-#ifdef virt_to_bus
-	#undef virt_to_bus
-	#define virt_to_bus			CPHYSADDR
+/* 6.18 port: dead on this board -- RTL8197F is little-endian (__MIPSEL__,
+ * -EL), __MIPSEB__ is never defined here. Left the vendor's original
+ * override in place (this session's bulk virt_to_bus->virt_to_phys rename
+ * touched the identifier here too) rather than deleting live-looking but
+ * inert vendor code; if this ever needs to be true for a big-endian
+ * variant, redefining the real virt_to_phys() the same way BIT() was
+ * fought over elsewhere in this port would reintroduce that exact bug. */
+#ifdef virt_to_phys
+	#undef virt_to_phys
+	#define virt_to_phys			CPHYSADDR
 #endif
 #endif
 #endif
@@ -1548,6 +1555,30 @@ static __inline__ int is_4SS_rate(unsigned char rate)
 
 #ifdef CONFIG_PCI_HCI
 
+#ifdef __LINUX_2_6__
+/* 6.18 port: _dma_cache_inv()/_dma_cache_wback_inv() are MIPS arch-internal
+ * primitives; the kernel deliberately stopped exporting them ("This API
+ * used to be exported; it now is for arch code internal use only", see
+ * arch/mips/include/asm/io.h) -- confirmed via modpost's
+ * "_dma_cache_wback_inv" undefined link error, not just a rename. On this
+ * CONFIG_DMA_NONCOHERENT platform, flush_data_cache_page() (page
+ * granularity, still EXPORT_SYMBOL'd) is the only cache-maintenance
+ * primitive left callable from a module. It always does a combined
+ * writeback+invalidate, which is a safe superset of the invalidate-only
+ * case _dma_cache_inv handled (correct for both DMA directions, just not
+ * maximally efficient for the FROM_DEVICE one). Loop it over every page
+ * touched by [addr, addr+size) for full coverage of ranges that aren't
+ * page-aligned or that cross a page boundary. */
+static __inline__ void rtl819x_flush_dcache_range(unsigned long addr, unsigned int size)
+{
+	unsigned long end = addr + size;
+
+	addr &= PAGE_MASK;
+	for (; addr < end; addr += PAGE_SIZE)
+		flush_data_cache_page(addr);
+}
+#endif
+
 #ifdef __OSK__
 extern __IRAM_WIFI_PRI3 void rtl_cache_sync_wback(struct rtl8192cd_priv *priv, unsigned int start,
 				unsigned int size, int direction);
@@ -1558,29 +1589,41 @@ static __inline__ void rtl_cache_sync_wback(struct rtl8192cd_priv *priv, unsigne
 {
 		if (0 == size) return;	// if the size of cache sync is equal to zero, don't do sync action
 #ifdef __LINUX_2_6__
-		start = CPHYSADDR(start)+CONFIG_LUNA_SLAVE_PHYMEM_OFFSET;//CPHYSADDR is virt_to_bus
+		start = CPHYSADDR(start)+CONFIG_LUNA_SLAVE_PHYMEM_OFFSET;//CPHYSADDR is virt_to_phys
 #endif
 #if defined(CONFIG_NET_PCI) && !defined(USE_RTL8186_SDK)
 		if (IS_PCIBIOS_TYPE) {
 #ifdef __LINUX_2_6__
-			if (direction == PCI_DMA_FROMDEVICE)
-				pci_dma_sync_single_for_cpu(priv->pshare->pdev, start, size, direction);
-			else if (direction == PCI_DMA_TODEVICE)
-				pci_dma_sync_single_for_device(priv->pshare->pdev, start, size, direction);
+			/* 6.18 port: pci_dma_sync_single_for_{cpu,device}() and
+			 * PCI_DMA_{FROM,TO}DEVICE no longer exist as kernel symbols at
+			 * all (removed long before 6.18; the generic dma_sync_single_
+			 * for_{cpu,device}(struct device*, ...) + DMA_{FROM,TO}_DEVICE
+			 * replaced them everywhere in the tree, not just here). This
+			 * path is unreachable on this board: the on-SoC WMAC attaches
+			 * as a platform_device (see files-6.18/drivers/net/wireless/
+			 * rtl8197f/rtl8197f-wmac.c), never a pci_dev, so
+			 * priv->pshare->pdev is never populated and IS_PCIBIOS_TYPE
+			 * cannot be true here -- confirmed dead code for this port,
+			 * fixed only so the header compiles for every translation
+			 * unit that includes it. */
+			if (direction == DMA_FROM_DEVICE)
+				dma_sync_single_for_cpu(&priv->pshare->pdev->dev, start, size, direction);
+			else if (direction == DMA_TO_DEVICE)
+				dma_sync_single_for_device(&priv->pshare->pdev->dev, start, size, direction);
 #else
 			pci_dma_sync_single(priv->pshare->pdev, start, size, direction);
 #endif
 		}
 		else
-			dma_cache_wback_inv((unsigned long)bus_to_virt(start-CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), size);
+			rtl819x_flush_dcache_range((unsigned long)phys_to_virt(start-CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), size);
 #else
 
 #if defined(CONFIG_RTL_8198C) || defined(CONFIG_RTL_8197F)
 		if (direction == PCI_DMA_FROMDEVICE)
-		    _dma_cache_inv((unsigned long)bus_to_virt(start-CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), size);
+		    rtl819x_flush_dcache_range((unsigned long)phys_to_virt(start-CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), size);
 		else
-#endif		
-    		_dma_cache_wback_inv((unsigned long)bus_to_virt(start-CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), size);
+#endif
+    		rtl819x_flush_dcache_range((unsigned long)phys_to_virt(start-CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), size);
 #endif
 }
 #else
@@ -1590,7 +1633,7 @@ static __inline__ void rtl_cache_sync_wback(struct rtl8192cd_priv *priv, unsigne
 		if (0 == size) return;	// if the size of cache sync is equal to zero, don't do sync action
 
 #ifdef __LINUX_2_6__
-		start = virt_to_bus((void*)start);
+		start = virt_to_phys((void*)start);
 		if (direction == PCI_DMA_FROMDEVICE)
 			pci_dma_sync_single_for_cpu(priv->pshare->pdev, start, size, direction);
 		else if (direction == PCI_DMA_TODEVICE)
@@ -1607,10 +1650,10 @@ static __inline__ unsigned long get_physical_addr(struct rtl8192cd_priv *priv, v
 {
 #if defined(CONFIG_NET_PCI) && !defined(USE_RTL8186_SDK)
 	if ((IS_PCIBIOS_TYPE) && (0 != size))
-		return pci_map_single(priv->pshare->pdev, ptr, size, direction);
+		return dma_map_single(&priv->pshare->pdev->dev, ptr, size, direction);
 	else
 #endif
-		return (virt_to_bus(ptr)+CONFIG_LUNA_SLAVE_PHYMEM_OFFSET);
+		return (virt_to_phys(ptr)+CONFIG_LUNA_SLAVE_PHYMEM_OFFSET);
 }
 
 #endif // CONFIG_PCI_HCI
@@ -1631,7 +1674,7 @@ static __inline__ void rtl_cache_sync_wback(struct rtl8192cd_priv *priv, unsigne
 static __inline__ unsigned long get_physical_addr(struct rtl8192cd_priv *priv, void *ptr,
 				unsigned int size, int direction)
 {
-	return virt_to_bus(ptr);
+	return virt_to_phys(ptr);
 }
 
 #endif // CONFIG_USB_HCI || CONFIG_SDIO_HCI
@@ -2661,9 +2704,32 @@ extern pr_fun *ecos_pr_fun;
 		seq_printf(s, "\n");		\
 }
 
+/* ★ 2026-09-05: capped, not the vendor's unconditional `index<len` loop. `len` on
+ * ~40 call sites throughout this file is a runtime struct field (an IE length, a
+ * rate-set count, etc.), not a compile-time constant -- if any of those ever holds
+ * a corrupted/uninitialized value (a struct-layout mismatch from this port, or a
+ * field that legitimately can be left unset on some code path), an unbounded
+ * `for (index=0; index<len; ...)` reading `val[index]` runs far past the real
+ * array and either oopses on unmapped memory or, worse, keeps going through valid
+ * kernel memory for a very long time. Several of these proc handlers run their
+ * entire body under SAVE_INT_AND_CLI()+a spinlock (interrupts AND preemption off),
+ * so a long-but-finite bad loop reads as a hard hang to everything else on this
+ * single-core SoC and can trip the hardware watchdog before it ever reaches
+ * unmapped memory -- matching this port's own documented, unexplained
+ * "reading some vendor proc files hard-wedges the box" hazard. No legitimate use
+ * in this driver ever prints more than a handful of bytes (MAC addresses = 6,
+ * rate sets a few dozen) or, at the outside, one 802.11 information element,
+ * whose length field is one byte wide by spec (max 255) -- so 256 is a real,
+ * generous ceiling, not a functional limit, and a one-time dmesg line makes any
+ * future clamp visible instead of silently truncating output. */
 #define PRINT_ARRAY(val, format, len, line_end) { 	\
-	int index;					\
-	for (index=0; index<len; index++)		\
+	int index; 					\
+	int _print_array_len = (int)(len);		\
+	if (_print_array_len < 0 || _print_array_len > 256) { \
+		pr_err_ratelimited("rtl8192cd: PRINT_ARRAY len=%d out of range, capping at 256 (possible corrupt field)\n", _print_array_len); \
+		_print_array_len = 256;			\
+	}						\
+	for (index=0; index<_print_array_len; index++)	\
 		seq_printf(s, format, val[index]); \
 	if (line_end)					\
 		seq_printf(s, "\n");		\

@@ -483,7 +483,7 @@ static void rtl819x_fabric_full_reset(void)
  *   ip link set eth0 down; ip link set eth0 up           # re-apply, then measure */
 static int trunk_pause = 2;
 module_param(trunk_pause, int, 0644);
-MODULE_PARM_DESC(trunk_pause, "RGMII-trunk 802.3x pause: 2=force OFF (default, A-2 residual fix), 1=force on (bench A/B collapse), 0=leave loader value");
+MODULE_PARM_DESC(trunk_pause, "RGMII-trunk 802.3x pause: 2=force OFF (default, A-2 residual fix), 1=force on (bench A/B collapse), 0=leave loader value, 3=honor incoming pause only (bit16), 4=generate pause only (bit17) -- 3/4 unverified directional experiments, apply live via trunk_redo, no reflash needed");
 
 /*
  * The 8367S half of the trunk-pause fix comes from the DSA driver, which takes
@@ -651,10 +651,35 @@ static void rtl819x_trunk_bringup(void)
 	 * Idempotent (skip + no re-toggle when already in the requested
 	 * state), so self-heal re-runs of rtl865x_start() don't bounce the
 	 * trunk. trunk_pause: 1=enable, 0=don't touch, 2=force-clear. */
-	if (trunk_pause == 1 || trunk_pause == 2) {
+	/* ★ 2026-09-05: two DIRECTIONAL variants added alongside the original all-or-nothing
+	 * 1 (force both)/2 (force-clear both) values, to test whether forced pause is
+	 * genuinely all-or-nothing on this trunk or whether ONE direction can be enabled
+	 * without recreating the original self-throttle collapse (a single LAN<->WAN flow
+	 * crosses this same physical port twice, so pause in the WRONG direction throttles
+	 * both legs of the SAME flow against each other). Found live on hardware: a NAPT-row
+	 * priority fix (see rtl819x_hwnat.c napt_priority) measurably improves but does not
+	 * fully fix a bulk-transfer failure under ASIC hardware-NAT acceleration, consistent
+	 * with an unprioritized flow ALSO losing an occasional packet to genuine egress-queue
+	 * overrun on top of the priority issue — a real backpressure signal in ONE direction
+	 * (accept pause FROM the 8367S when this SoC's own port0 egress queue is congested,
+	 * WITHOUT this SoC generating pause back onto the shared trunk, which is what caused
+	 * the original collapse) is the remaining candidate. Bit assignment within
+	 * PCRP0[17:16] is taken from this file's own "EtxErx" comment above (bit17=Etx=this
+	 * SoC GENERATES pause, bit16=Erx=this SoC HONORS received pause) -- unverified beyond
+	 * that comment, hence two separate values so either bit can be tested live via
+	 * `trunk_redo` without a reflash. 3 = bit16 only (honor incoming pause, generate
+	 * none); 4 = bit17 only (generate pause, honor none) -- offered mainly so 3 isn't
+	 * chosen by unverified guesswork alone. */
+	if (trunk_pause >= 1 && trunk_pause <= 4) {
 		u32 v = REG32(RTL819X_SWCORE_BASE + 0x4104);
-		u32 want = (trunk_pause == 1) ? (v | (3u << 16))
-					      : (v & ~(3u << 16));
+		u32 want;
+
+		switch (trunk_pause) {
+		case 1: want = v | (3u << 16); break;
+		case 3: want = (v & ~(3u << 16)) | (1u << 16); break;
+		case 4: want = (v & ~(3u << 16)) | (1u << 17); break;
+		default: want = v & ~(3u << 16); break;	/* 2 */
+		}
 
 		if (want != v) {
 			REG32(RTL819X_SWCORE_BASE + 0x4104) = want;
@@ -717,10 +742,13 @@ static void rtl865x_start(void)
 	 * frame is classified PACKET_MULTICAST — and the EtherType as 0x0200
 	 * instead of 0x8100, so the 802.1Q untag path below is never taken.
 	 * The frames are received and counted but reach neither the bridge nor
-	 * the IP stack, so the box answers nothing. The fingerprint is
-	 * eth0.2 rx_packets and rx_multicast rising 1:1 while br-lan rx stays
-	 * flat. Vendor does this in its 8197F chip init,
-	 * AsicDriver/rtl865x_asicL2.c:7647.
+	 * the IP stack, so the box answers nothing. The fingerprint (measured on
+	 * the 4.14/swconfig VLAN-cascade model, where the LAN side was the
+	 * eth0.2 subinterface) is eth0.2 rx_packets and rx_multicast rising 1:1
+	 * while br-lan rx stays flat; on this port's DSA model the equivalent
+	 * signature is the individual "lan1".."lan4"/"wan" DSA port netdevs (or
+	 * the raw conduit's eth0 counters) rising while br-lan stays flat. Vendor
+	 * does this in its 8197F chip init, AsicDriver/rtl865x_asicL2.c:7647.
 	 *
 	 * Set bit 1 ONLY. The vendor's line also ORs CF_TXRX_DIV_LX (bit 0) and
 	 * CF_TSO_ID_SEL (bit 4), but every boot that measured 890/900 Mbit of
@@ -880,6 +908,18 @@ static void rtl865x_start(void)
 		 * what "Linux counted it as sent but the switch never transmitted"
 		 * looks like from outside.
 		 */
+		/* ★ VLAN 0 MUST KEEP THE CPU PORT (bit 8) IN ITS MEMBER MASK.
+		 * TRIED AND REVERTED 2026-09-04: narrowing this to 0x01F (jacks only,
+		 * on the theory that a VLAN containing the source CPU port let
+		 * CPU-transmitted frames re-enter and multiply) took the box off the
+		 * network entirely -- it came up, programmed the row correctly
+		 * (`rtl819x vlan[0] ... member=01f untag=01f`) and then sat in
+		 * `recovery level 3` with no LAN reachability, because CPU-destined
+		 * traffic that carries VID 0 has nowhere to go once port 8 is not a
+		 * member. The real fix for the TX side is to stop SENDING VID 0 at
+		 * all -- see the ★ egress-VID derivation note in rtl819x_eth_xmit()
+		 * -- not to cripple this safety row. Port 5 does not exist on this
+		 * board; trimming just that bit (0x11F) is untested but harmless. */
 		sw_add_vlan_fid(0, 0x13F, 0x13F, 0);		  /* ports 0-5 + CPU8, fid0 */
 		sw_add_vlan_fid(RTL865X_VID_LAN, 0x10F, 0x10F, 0); /* jacks 0-3 + CPU8, fid0 */
 		sw_add_vlan_fid(RTL865X_VID_WAN, 0x110, 0x110, 1); /* jack 4    + CPU8, fid1 */
@@ -1037,6 +1077,40 @@ static u32 hang_log_n;
 static int fabric_reset;
 module_param(fabric_reset, int, 0644);
 MODULE_PARM_DESC(fabric_reset, "trigger recovery now: 1=engine 2=+SOFTRST 3=+full fabric reset");
+/*
+ * ★ PCSR0 drain — candidate cure for the ROUTED large-frame wedge (default ON).
+ *
+ * GDSR_PORT_CONG is #defined to PCSR1 (rtl819x_regs.h:206), which covers ports
+ * 4-6 plus the input queues. Ports 0-3 live in PCSR0, and until this knob
+ * existed NOTHING outside the read-only /proc/rtl865x_fabric dump ever read it
+ * -- on either this tree or the 4.14 one.
+ *
+ * Port 0 is the RGMII trunk to the RTL8367S, and on this port EVERY forwarded
+ * frame U-turns on it (ingress VID 2, egress VID 1, same SoC port), because
+ * hardware NAT does not yet accelerate and so 100% of forwarded bytes cross the
+ * CPU. The A-2 comment above rtl865x_start()'s scheduler block predicts this
+ * exact failure for that port, and says the existing drain cannot see it:
+ *
+ *   "sustained max-rate ROUTED bulk ... can latch the fabric into a state where
+ *    multi-descriptor (large) frames die on a routed egress direction while
+ *    small frames pass -- the routed-path sibling of the M6.5 CPU-path
+ *    congestion wedge (the GDSR_PORT_CONG drain can't reach it ...)"
+ *
+ * Measured symptom this targets: after ONE forwarded bulk transfer,
+ * `ping -s 56` goes 0% -> 75% loss and `ping -s 1400` 0% -> 100%, with the
+ * kernel alive and no detector firing.
+ *
+ * ⚠ SPECULATIVE in one respect, stated plainly: that reading PCSR0 *drains*
+ * latched congestion is inferred from PCSR1's documented read-to-drain
+ * behaviour (rtl819x_regs.h:202-205, vendor asicBasic.c:502). It is not
+ * confirmed for PCSR0. The read is idle-safe and side-effect-free on a
+ * diagnostic register, so the cost of being wrong is nil -- but keep it a knob
+ * so it can be A/B'd in one boot rather than one flash.
+ */
+static int pcsr0_drain = 1;
+module_param(pcsr0_drain, int, 0644);
+MODULE_PARM_DESC(pcsr0_drain, "also read PCSR0 (ports 0-3 output-queue congestion) alongside GDSR_PORT_CONG/PCSR1; 1 = on (default), 0 = off for A/B");
+
 static int fabric_autoreset = 3;
 module_param(fabric_autoreset, int, 0644);
 MODULE_PARM_DESC(fabric_autoreset, "wedge detector action: 0=log only, 1/2/3=auto ladder level (default 3)");
@@ -1168,7 +1242,9 @@ static void rtl819x_hang_check(struct rtl819x_eth_priv *priv)
 	 * accumulate to the wedge threshold. Also read it in the napi poll so it
 	 * drains at napi rate exactly when a large-frame burst is arriving.
 	 */
-	REG32(GDSR_PORT_CONG);
+	REG32(GDSR_PORT_CONG);	/* PCSR1: ports 4-6 + input queues */
+	if (pcsr0_drain)
+		REG32(PCSR0);	/* ports 0-3 -- incl. the RGMII trunk the forwarded flow U-turns on */
 
 	/* M7 manual recovery trigger (bench: echo N > .../parameters/fabric_reset). */
 	if (unlikely(fabric_reset)) {
@@ -1204,6 +1280,10 @@ static void rtl819x_hang_check(struct rtl819x_eth_priv *priv)
 		static int fcs_win;
 		static bool fcs_armed, fcs_off_logged;
 		static unsigned long fcs_last_auto;
+		/* large-frame starvation bookkeeping (see the ★ note below) */
+		static unsigned long fcs_prev_rx;
+		static int fcs_starve_hits;
+		int starved;
 
 		/* A-2: 256 ticks ~= 2.5s (was 1024 ~= 10s).  Detection latency is
 		 * dead air — a wedged fabric corrupts ~93% of large frames until
@@ -1218,6 +1298,86 @@ static void rtl819x_hang_check(struct rtl819x_eth_priv *priv)
 			fcs_prev_fail = rtl819x_rx_fcs_fail;
 			fcs_win = 0;
 
+			/* "starved" = this window delivered no large frame at all
+			 * while small-frame RX kept moving, i.e. the box is busy
+			 * receiving but the large-frame path is dead.
+			 *
+			 * ★ 2026-09-04: EXCEPT when hardware NAT offload is actively
+			 * carrying a flow — that makes "no large frames on the CPU
+			 * RX path" the expected, healthy outcome (the ASIC is
+			 * bypassing the CPU on purpose), not a symptom. Bench-
+			 * confirmed false positive: a flow whose NAPT row sat
+			 * genuinely hot (agingTime pinned at the reload ceiling) for
+			 * 5+ continuous seconds still tripped this detector, which
+			 * then fired a level-3 recovery and wiped the offload state
+			 * it should have left alone. Gated at the COUNT, not just the
+			 * final fire check, so starve_hits does not silently accrue
+			 * during a healthy hot period and then fire on stale count
+			 * the instant the flow goes idle. */
+			{
+				unsigned long rx = priv->dev->stats.rx_packets;
+				/* ★ FIX (2026-09-05, SSH-flakiness investigation): "rx !=
+				 * fcs_prev_rx" (ANY change at all, even by one packet) does
+				 * NOT distinguish a wedged fabric from a completely idle,
+				 * healthy box being lightly managed -- an interactive SSH
+				 * session, an occasional ping, ARP/DHCP background chatter
+				 * are ALL "zero large frames, small-frame rx advancing" too,
+				 * since most of a router's life has no bulk transfer running
+				 * at all. Measured live: this falsely fired every ~15-30s
+				 * during nothing more than repeated SSH probing, each firing
+				 * forcing a full disruptive reset (napi_disable/netif_tx_
+				 * disable/fabric reset), which then broke the very SSH
+				 * session probing it -- a self-sustaining false-positive
+				 * feedback loop, not a real wedge. The detector's own history
+				 * (docs/M7-LARGE-FRAME-RX-WEDGE.md) shows it was validated
+				 * against a genuinely wedged box under SUSTAINED bulk load,
+				 * which trivially clears a real packet-rate floor -- so
+				 * requiring one here filters out idle/management-traffic
+				 * trickle without weakening detection of the real wedge. */
+				/* ★ 2026-09-05, raised again: 20 (~8 pkt/s) still fired
+				 * under nothing more than my own SSH/top/ps testing traffic
+				 * (measured rx_pkts=612 climbing at ordinary management
+				 * rates). A genuine wedge in this project's own history
+				 * occurred under real sustained bulk load (~700 Mbit/s
+				 * iperf3) -- hundreds to thousands of pkt/s -- so 100
+				 * (~40 pkt/s) has enormous headroom below a real wedge
+				 * while sitting far above anything routine SSH/config/
+				 * hotplug/wifi-setup traffic can sustain. */
+				#define LARGE_FRAME_STARVE_MIN_PKTS 100	/* ~40 pkt/s over the 2.5s window */
+				/* ★ 2026-09-05, THE ACTUAL BUG: raising the threshold above
+				 * did not stop false fires (measured firing again at
+				 * rx_pkts=511 total -- less than the 800 that 8 windows x
+				 * 100 pkts would require, which is impossible for a real
+				 * sustained rate). rx/fcs_prev_rx are unsigned long; if
+				 * rx_packets ever reads back LOWER than the previous sample
+				 * for any reason (recovery-path re-init, counter/stats
+				 * reset, whatever the exact source), "rx - fcs_prev_rx"
+				 * UNDERFLOWS to a huge value that clears ANY threshold no
+				 * matter how high -- so this was never really a rate check
+				 * once a regression occurred once. Guard it explicitly: a
+				 * regression means the baseline is unknown, not that a
+				 * burst happened, so resync silently and do not count it. */
+				bool drx_valid = rx >= fcs_prev_rx;
+				unsigned long drx = drx_valid ? rx - fcs_prev_rx : 0;
+
+				/* ★ Suppress on BOTH "a row is currently hot" AND "any flow is
+				 * installed at all". has_hot_flow() needs a 5s aging poll to
+				 * observe a HIT, so a just-installed or stalled-before-hot
+				 * offloaded flow is momentarily invisible to it -- exactly the
+				 * window in which "no large frames on CPU RX" is the HEALTHY
+				 * offload signature, not a wedge. any_flow_installed() closes
+				 * that gap (true from packet 1 of install). */
+				if (drx_valid && fcs_armed && !dok && !dfail &&
+				    drx >= LARGE_FRAME_STARVE_MIN_PKTS &&
+				    !rtl819x_hwnat_has_hot_flow() &&
+				    !rtl819x_hwnat_any_flow_installed())
+					fcs_starve_hits++;
+				else
+					fcs_starve_hits = 0;
+				fcs_prev_rx = rx;
+			}
+			starved = fcs_starve_hits;
+
 			if (!fcs_armed) {
 				if (dok >= 2) {
 					fcs_armed = true;
@@ -1227,6 +1387,73 @@ static void rtl819x_hang_check(struct rtl819x_eth_priv *priv)
 					fcs_off_logged = true;
 					pr_err("rtl819x: FCS check unusable on this datapath (%u fails, 0 ok) - wedge detector stays OFF\n",
 					       dfail);
+				}
+			} else if (fcs_armed && !dok && !dfail && starved >= 8) {
+				/* ★ 2026-09-05: raised 4->8 (~10s->~20s) alongside the
+				 * packet-rate floor above -- see that comment. Extra
+				 * margin against routine management-traffic bursts;
+				 * a real sustained-bulk-load wedge clears this easily. */
+				/*
+				 * ★ LARGE-FRAME DELIVERY COLLAPSE — the 6.18 face of
+				 * the wedge documented in docs/M7-LARGE-FRAME-RX-WEDGE.md.
+				 *
+				 * That doc's fix detects the wedge by SOFTWARE FCS: a
+				 * wedged fabric hands up large frames with bad CRCs, so
+				 * dfail climbs and the gate below fires. On this port the
+				 * same wedge presents differently: the large frames are
+				 * not delivered corrupt, they are **not delivered at
+				 * all**. The FCS sampler in rtl819x_swnic.c only runs on
+				 * frames that actually arrive (`if (len > 132)`), so both
+				 * dok and dfail freeze at 0 and the `dfail >= 4` gate
+				 * below is structurally unreachable -- the same blindness
+				 * docs/RX-STALL-WEDGE.md §3 records for the hard stall.
+				 * Measured on hardware 2026-09-04: FABRIC WEDGE fired 0
+				 * times across 121 boots while the box was demonstrably
+				 * wedged.
+				 *
+				 * Fingerprint of the state this catches, taken right
+				 * after a single forwarded bulk transfer:
+				 *     ping -s 56   -> 75% loss
+				 *     ping -s 1400 -> 100% loss
+				 * versus 0%/0% on the same box moments earlier. Small
+				 * frames still flow, which is exactly why rx_packets
+				 * keeps advancing and every existing detector stays
+				 * silent (that doc's TL;DR predicts this).
+				 *
+				 * Declare only when ALL of:
+				 *   - armed: we have previously seen good large frames,
+				 *     so this datapath really can deliver them;
+				 *   - zero large frames delivered, good OR bad, for four
+				 *     consecutive ~2.5 s windows (~10 s);
+				 *   - rx_packets still advancing, i.e. small frames ARE
+				 *     arriving. That is what distinguishes a wedge from
+				 *     an idle box, and it is strictly better than keying
+				 *     on TX, because it proves the receive path is live
+				 *     and only the large-frame half is dead;
+				 *   - no hwnat flow was hit within the last aging poll
+				 *     (rtl819x_hwnat_has_hot_flow(), checked where
+				 *     starve_hits is counted just above, not here) --
+				 *     working hardware offload produces this exact
+				 *     signature on purpose and must not be reported as
+				 *     the disease it is actually the cure for.
+				 */
+				fcs_starve_hits = 0;
+				pr_err("rtl819x: LARGE-FRAME WEDGE detected (no large frames delivered in ~10s while small-frame RX advances)%s\n",
+				       fabric_autoreset ? " - auto recovery" : " - set fabric_reset=3 to recover");
+				if (fabric_autoreset &&
+				    (!fcs_last_auto ||
+				     time_after(jiffies, fcs_last_auto + 5 * HZ))) {
+					fcs_last_auto = jiffies | 1;
+					/* ★ Non-destructive while a flow is offloaded: level 3
+					 * wipes the whole NAPT table (rtl819x_hwnat_stop ->
+					 * hwnat_flush_locked), destroying the very acceleration
+					 * this is supposed to protect. The vendor's own runtime
+					 * recovery is light (ring rebuild, no FULL_RST/SRAM wipe);
+					 * only U-Boot ever full-resets. Cap at level 2 (soft reset,
+					 * no table wipe) unless nothing is offloaded. */
+					fabric_reset_mode = rtl819x_hwnat_any_flow_installed()
+						? min_t(int, fabric_autoreset, 2) : fabric_autoreset;
+					schedule_work(&priv->hang_work);
 				}
 			} else if (dfail >= 4 && dfail >= 4 * dok) {
 				pr_err("rtl819x: FABRIC WEDGE detected (large-frame FCS fail=%u ok=%u in 10s)%s\n",
@@ -1244,7 +1471,12 @@ static void rtl819x_hang_check(struct rtl819x_eth_priv *priv)
 				    (!fcs_last_auto ||
 				     time_after(jiffies, fcs_last_auto + 5 * HZ))) {
 					fcs_last_auto = jiffies | 1;
-					fabric_reset_mode = fabric_autoreset;
+					/* Same non-destructive cap as the LARGE-FRAME branch above:
+					 * don't wipe live NAPT rows for a genuine FCS-fail wedge while
+					 * a flow is offloaded -- a soft reset clears the fabric hang
+					 * without tearing down the ASIC table. */
+					fabric_reset_mode = rtl819x_hwnat_any_flow_installed()
+						? min_t(int, fabric_autoreset, 2) : fabric_autoreset;
 					schedule_work(&priv->hang_work);
 				}
 			}
@@ -1508,7 +1740,8 @@ static bool rtl819x_dsa_tag_rx(struct sk_buff *skb, unsigned int port)
  * or a negative value if this frame is not tagged (something sent straight
  * through the conduit rather than a DSA user port).
  */
-static int rtl819x_dsa_tag_tx(struct sk_buff *skb)
+static int rtl819x_dsa_tag_tx(struct sk_buff *skb,
+			      u8 saved[RTL819X_DSA_TAG_LEN])
 {
 	__be16 *tag;
 
@@ -1529,11 +1762,46 @@ static int rtl819x_dsa_tag_tx(struct sk_buff *skb)
 	{
 		int mask = ntohs(tag[3]) & 0x7ff;
 
+		/* Keep a verbatim copy so rtl819x_dsa_tag_tx_undo() can put the
+		 * frame back exactly as the tagger built it -- see the ★ comment
+		 * on that function. Copy rather than re-synthesise: the tagger
+		 * also sets the KEEP bit in tag[2], which we do not reconstruct. */
+		memcpy(saved, tag, RTL819X_DSA_TAG_LEN);
+
 		memmove(skb->data + RTL819X_DSA_TAG_LEN, skb->data, 2 * ETH_ALEN);
 		skb_pull(skb, RTL819X_DSA_TAG_LEN);
 
 		return mask;
 	}
+}
+
+/*
+ * ★ Put back exactly what rtl819x_dsa_tag_tx() removed.
+ *
+ * ndo_start_xmit() MUST NOT leave an skb modified if it hands it back with
+ * NETDEV_TX_BUSY: the qdisc requeues that skb unchanged and retries it on the
+ * CONDUIT, so the DSA tagger does not run again. Without this undo, the retry
+ * arrives here already stripped, rtl819x_dsa_tag_tx() reads offset 12, finds
+ * the frame's real EtherType instead of ETH_P_REALTEK, returns -EINVAL, and
+ * rtl819x_eth_xmit() FREES the packet and bumps tx_dropped.
+ *
+ * That destroys one packet on every ring-full event. The conduit TX ring only
+ * fills when an external sender offers more than the box can forward, which is
+ * exactly the sustained-forwarded-bulk case -- and there the stop/wake cycle
+ * runs at NAPI rate, so the loss lands around 0.4%. Well above the ~0.25% at
+ * which Mathis-law TCP throughput collapses, which is why this shows up as
+ * "connects, then 0.00 Bytes with cwnd collapsed to 1.41 KB" rather than as a
+ * clean failure. The 4.14 driver had no TX-side tag surgery and so never had
+ * this hazard (v414 rtl819x-eth.c takes len before touching the skb).
+ *
+ * skb_push() always has room because we pulled these same 8 bytes moments ago.
+ */
+static void rtl819x_dsa_tag_tx_undo(struct sk_buff *skb,
+				    const u8 saved[RTL819X_DSA_TAG_LEN])
+{
+	skb_push(skb, RTL819X_DSA_TAG_LEN);
+	memmove(skb->data, skb->data + RTL819X_DSA_TAG_LEN, 2 * ETH_ALEN);
+	memcpy(skb->data + 2 * ETH_ALEN, saved, RTL819X_DSA_TAG_LEN);
 }
 
 static int rtl819x_eth_poll(struct napi_struct *napi, int budget)
@@ -1546,7 +1814,9 @@ static int rtl819x_eth_poll(struct napi_struct *napi, int budget)
 	/* Drain switch-fabric congestion at napi rate (see rtl819x_hang_check): under
 	 * a large-frame burst napi runs hot, so this is where the congestion would
 	 * otherwise build to the wedge threshold. A pure read; idle-safe. */
-	REG32(GDSR_PORT_CONG);
+	REG32(GDSR_PORT_CONG);	/* PCSR1: ports 4-6 + input queues */
+	if (pcsr0_drain)
+		REG32(PCSR0);	/* ports 0-3 -- incl. the RGMII trunk the forwarded flow U-turns on */
 
 	/* Reclaim finished Tx descriptors and unblock the queue. */
 	New_swNic_txDone(0);
@@ -1590,6 +1860,15 @@ static int rtl819x_eth_poll(struct napi_struct *napi, int budget)
 
 		skb->protocol = eth_type_trans(skb, dev);
 		/*
+		 * This whole block is the pre-DSA (4.14/swconfig VLAN-cascade)
+		 * fallback path, reached only when !netdev_uses_dsa(dev) above —
+		 * dead on this port, which always registers DSA netdevs, kept here
+		 * only for whatever non-DSA build might still compile this file.
+		 * The "eth0.1"/"eth0.2" 802.1q subinterface names below are that old
+		 * model's; they carry no meaning on this port and are not looked up
+		 * anywhere near this code (8021q's own VID-based demux does the
+		 * naming, this file never calls dev_get_by_name() here).
+		 *
 		 * M6.6 cascade: frames arrive UNTAGGED (8367S untags the trunk) with
 		 * the source jack in info.pid (CPU-tag). Derive the VID from the jack
 		 * (jacks 0-3 = LAN vid2, jack4 = WAN vid1) and re-attach it as a
@@ -1697,9 +1976,10 @@ static netdev_tx_t rtl819x_eth_xmit(struct sk_buff *skb, struct net_device *dev)
 	dma_addr_t dma;
 	unsigned int len;
 	int dsa_ports = -1;
+	u8 dsa_tag[RTL819X_DSA_TAG_LEN];
 
 	if (netdev_uses_dsa(dev)) {
-		dsa_ports = rtl819x_dsa_tag_tx(skb);
+		dsa_ports = rtl819x_dsa_tag_tx(skb, dsa_tag);
 		if (unlikely(dsa_ports < 0)) {
 			dev_kfree_skb_any(skb);
 			dev->stats.tx_dropped++;
@@ -1740,9 +2020,12 @@ static netdev_tx_t rtl819x_eth_xmit(struct sk_buff *skb, struct net_device *dev)
 	nicTx.portlist = (dsa_ports >= 0 && !dsa_tx_flood) ? (dsa_ports & 0x3F)
 							  : 0x3F;
 	/*
-	 * VID from the netdev's hwaccel VLAN tag — eth0.2 (LAN) -> VID 2,
-	 * eth0.1 (WAN) -> VID 1 (the M6.6 Fork A VLAN plan); an untagged frame
-	 * (bare eth0) defaults to the LAN VID. The trunk ports egress tagged
+	 * The `else if` branch below (non-DSA) is the same pre-DSA fallback as
+	 * the RX-side block above — dead on this port, which always takes
+	 * `dsa_ports >= 0`. VID from the netdev's hwaccel VLAN tag — eth0.2
+	 * (LAN) -> VID 2, eth0.1 (WAN) -> VID 1 (the M6.6 Fork A VLAN plan); an
+	 * untagged frame (bare eth0) defaults to the LAN VID. The trunk ports
+	 * egress tagged
 	 * (rtl865x_start) so the external RTL8367S routes each frame to the
 	 * correct jack by VID.
 	 * Bug #13 requirement: ph_vlanId must name a VID whose SoC VLAN member
@@ -1752,6 +2035,35 @@ static netdev_tx_t rtl819x_eth_xmit(struct sk_buff *skb, struct net_device *dev)
 	 * fallback, the stale M6.2 vid 9, has had NO VLAN table entry since
 	 * Fork A, so untagged bare-eth0 TX rode a VID with a 0/garbage member
 	 * mask and an unknown tag downstream.
+	 */
+	/*
+	 * ★ VID 0 ON THE DSA TX PATH IS LOAD-BEARING -- do NOT "fix" it to a
+	 * per-destination VID without re-measuring. TRIED AND REFUTED 2026-09-04.
+	 *
+	 * The theory was sound on paper: on the 4.14/swconfig datapath the 802.1Q
+	 * VID was the only thing that selected the egress jack (VID 1 member
+	 * 0x110 -> WAN jack, VID 2 member 0x10F -> LAN jacks), the 0x3F portlist
+	 * being a permissive superset -- the driver's own note above says
+	 * narrowing the portlist is INEFFECTIVE because the switch floods CPU
+	 * frames by VLAN membership. The DSA rewrite sends VID 0 instead
+	 * (dsa_tx_vid defaults to 0) against a VLAN 0 row whose member mask
+	 * 0x13F covers ports 0-5 AND CPU port 8, so on paper nothing narrows CPU
+	 * egress and the source port is itself a member.
+	 *
+	 * Deriving the VID from the port the tagger named --
+	 *     nicTx.vid = (dsa_ports & BIT(4)) ? RTL865X_VID_WAN : RTL865X_VID_LAN
+	 * -- was built, flashed and measured: the box came up, programmed the
+	 * VLAN rows correctly, and then sat in `recovery level 3` with no LAN
+	 * reachability at all. Narrowing the VLAN 0 member mask to 0x01F instead
+	 * (see the ★ note at the sw_add_vlan_fid() calls) failed the same way.
+	 * Both are reverted.
+	 *
+	 * So under the CPU-tag/DSA model the switch is NOT selecting egress by
+	 * VLAN membership the way it did for swconfig VLAN-tagged trunk frames,
+	 * and VID 0 is what keeps CPU-transmitted frames deliverable. Whatever is
+	 * dropping forwarded bulk (see docs/PORT-MAIN-6.18-STATUS.md §4 -- the SoC
+	 * transmits ~23900 frames while the WAN jack egresses ~15, with zero jack
+	 * ifOutDiscards and zero peer rx_errors) is NOT this.
 	 */
 	if (dsa_ports >= 0)
 		nicTx.vid = dsa_tx_vid;
@@ -1763,6 +2075,11 @@ static netdev_tx_t rtl819x_eth_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	if (New_swNic_send(skb, (void *)(uintptr_t)dma, len, &nicTx) != 0) {
 		dma_unmap_single(dev->dev.parent, dma, len, DMA_TO_DEVICE);
+		/* Hand the skb back EXACTLY as it arrived -- see the ★ comment on
+		 * rtl819x_dsa_tag_tx_undo(). Requeued frames are retried on the
+		 * conduit without re-running the tagger. */
+		if (dsa_ports >= 0)
+			rtl819x_dsa_tag_tx_undo(skb, dsa_tag);
 		netif_stop_queue(dev);
 		return NETDEV_TX_BUSY;
 	}

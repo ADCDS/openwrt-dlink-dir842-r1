@@ -171,6 +171,7 @@ phydm_dynamic_ant_weighting(
 }
 
 
+VOID
 phydm_hwsetting_8197f(
 	IN		PDM_ODM_T		pDM_Odm
 	)
@@ -182,6 +183,7 @@ phydm_hwsetting_8197f(
 /*DSC(double side band) = 0 or 3*/
 /*LSC(left side band) = 1*/
 /*USC(right side band) = 2*/
+VOID
 phydm_api_primary_cca(
 	IN		PDM_ODM_T		pDM_Odm,
 	IN		u8				DSC_LSC_USC

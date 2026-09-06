@@ -19,3 +19,17 @@ config asic 'asic'
 
 	# ⚠ Changing role router->bridge requires a REBOOT, not just a restart:
 	# nothing in bridge role can clear the ASIC's frozen L2 aging (TEACR bit0).
+
+	# Cold-boot fabric_reset level. Leave unset/'0' (the default): boot uses
+	# the PROVEN level 3 (full fabric reset). Level 3 is not just cautious —
+	# it is MEASURED-REQUIRED (see dir842-asic's header comment and
+	# docs/HWNAT-OFFLOAD.md §8): a lighter level was tried and left the box
+	# forwarding NOTHING despite links up and a passing gw_prog readback.
+	# option fast_boot '1'
+	#
+	# Setting fast_boot='1' switches to level 1 (engine reinit only), which is
+	# lighter and unblocks CPU for SSH sooner, but is UNVERIFIED at cold boot
+	# since that last measurement. Only enable it to re-run that experiment
+	# yourself, and confirm forwarding end-to-end (not just a gw_prog PASS)
+	# before trusting a boot with it on. Revert by unsetting it or restoring
+	# '0'.

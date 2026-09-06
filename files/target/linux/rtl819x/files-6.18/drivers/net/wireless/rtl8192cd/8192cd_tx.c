@@ -5846,11 +5846,11 @@ void rtl8192cd_signin_txdesc_8812(struct rtl8192cd_priv *priv, struct tx_insn *t
 		if (i != 0) {
 			pdesc->Dword0 |= set_desc(TX_OWN);
 #ifndef USE_RTL8186_SDK
-			rtl_cache_sync_wback(priv, (unsigned long)bus_to_virt(dma_txhead[*tx_head] - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
+			rtl_cache_sync_wback(priv, (unsigned long)phys_to_virt(dma_txhead[*tx_head] - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
 #endif
 		}
 
-		flush_addr[flush_num]  = (unsigned long)bus_to_virt(get_desc(pdesc->Dword10));
+		flush_addr[flush_num]  = (unsigned long)phys_to_virt(get_desc(pdesc->Dword10));
 		flush_len[flush_num++] = (get_desc(pdesc->Dword7) & TX_TxBufSizeMask);
 
 		/*
@@ -5979,10 +5979,10 @@ void rtl8192cd_signin_txdesc_8812(struct rtl8192cd_priv *priv, struct tx_insn *t
 #endif
 
 #ifndef USE_RTL8186_SDK
-		rtl_cache_sync_wback(priv, (unsigned long)bus_to_virt(dma_txhead[*tx_head] - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
+		rtl_cache_sync_wback(priv, (unsigned long)phys_to_virt(dma_txhead[*tx_head] - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
 #endif
 
-		flush_addr[flush_num] = (unsigned long)bus_to_virt(get_desc(pndesc->Dword10));
+		flush_addr[flush_num] = (unsigned long)phys_to_virt(get_desc(pndesc->Dword10));
 		flush_len[flush_num++] = get_desc(pndesc->Dword7) & TX_TxBufSizeMask;
 
 #ifdef OSK_LOW_TX_DESC
@@ -6116,10 +6116,10 @@ void rtl8192cd_signin_txdesc_8812(struct rtl8192cd_priv *priv, struct tx_insn *t
 							    txcfg->privacy);
 				}
 #ifndef USE_RTL8186_SDK
-				rtl_cache_sync_wback(priv, (unsigned long)bus_to_virt(dma_txhead[*tx_head] - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
+				rtl_cache_sync_wback(priv, (unsigned long)phys_to_virt(dma_txhead[*tx_head] - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
 #endif
 
-				flush_addr[flush_num]  = (unsigned long)bus_to_virt(get_desc(picvdesc->Dword10) - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET);
+				flush_addr[flush_num]  = (unsigned long)phys_to_virt(get_desc(picvdesc->Dword10) - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET);
 				flush_len[flush_num++] = (get_desc(picvdesc->Dword7) & TX_TxBufSizeMask);
 
 #ifdef OSK_LOW_TX_DESC
@@ -6193,10 +6193,10 @@ void rtl8192cd_signin_txdesc_8812(struct rtl8192cd_priv *priv, struct tx_insn *t
 #endif // CONFIG_IEEE80211W
 				}
 #ifndef USE_RTL8186_SDK
-				rtl_cache_sync_wback(priv, (unsigned long)bus_to_virt(dma_txhead[*tx_head] - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
+				rtl_cache_sync_wback(priv, (unsigned long)phys_to_virt(dma_txhead[*tx_head] - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
 #endif
 
-				flush_addr[flush_num] = (unsigned long)bus_to_virt(get_desc(pmicdesc->Dword10) - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET);
+				flush_addr[flush_num] = (unsigned long)phys_to_virt(get_desc(pmicdesc->Dword10) - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET);
 				flush_len[flush_num++] = (get_desc(pmicdesc->Dword7) & TX_TxBufSizeMask);
 
 #ifdef OSK_LOW_TX_DESC
@@ -6279,7 +6279,7 @@ init_deschead:
 
 	pfrstdesc->Dword0 |= set_desc(TX_OWN);
 #ifndef USE_RTL8186_SDK
-	rtl_cache_sync_wback(priv, (unsigned long)bus_to_virt(pfrst_dma_desc - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
+	rtl_cache_sync_wback(priv, (unsigned long)phys_to_virt(pfrst_dma_desc - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
 #endif
 
 	if (q_num == HIGH_QUEUE) {
@@ -6817,11 +6817,11 @@ void rtl8192cd_signin_txdesc(struct rtl8192cd_priv *priv, struct tx_insn *txcfg)
 		if (i != 0) {
 			pdesc->Dword0 |= set_desc(TX_OWN);
 #ifndef USE_RTL8186_SDK
-			rtl_cache_sync_wback(priv, (unsigned long)bus_to_virt(dma_txhead[*tx_head] - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
+			rtl_cache_sync_wback(priv, (unsigned long)phys_to_virt(dma_txhead[*tx_head] - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
 #endif
 		}
 
-		flush_addr[flush_num]  = (unsigned long)bus_to_virt(get_desc(pdesc->Dword8) - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET);
+		flush_addr[flush_num]  = (unsigned long)phys_to_virt(get_desc(pdesc->Dword8) - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET);
 		flush_len[flush_num++] = (get_desc(pdesc->Dword7) & TX_TxBufSizeMask);
 
 		/*
@@ -6985,10 +6985,10 @@ fill_body:
 #endif
 
 #ifndef USE_RTL8186_SDK
-		rtl_cache_sync_wback(priv, (unsigned long)bus_to_virt(dma_txhead[*tx_head] - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
+		rtl_cache_sync_wback(priv, (unsigned long)phys_to_virt(dma_txhead[*tx_head] - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
 #endif
 
-		flush_addr[flush_num] = (unsigned long)bus_to_virt(get_desc(pndesc->Dword8) - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET);
+		flush_addr[flush_num] = (unsigned long)phys_to_virt(get_desc(pndesc->Dword8) - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET);
 		flush_len[flush_num++] = get_desc(pndesc->Dword7) & TX_TxBufSizeMask;
 
 #ifdef OSK_LOW_TX_DESC
@@ -7122,10 +7122,10 @@ fill_body:
 							    txcfg->privacy);
 				}
 #ifndef USE_RTL8186_SDK
-				rtl_cache_sync_wback(priv, (unsigned long)bus_to_virt(dma_txhead[*tx_head] - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
+				rtl_cache_sync_wback(priv, (unsigned long)phys_to_virt(dma_txhead[*tx_head] - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
 #endif
 
-				flush_addr[flush_num]  = (unsigned long)bus_to_virt(get_desc(picvdesc->Dword8) - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET);
+				flush_addr[flush_num]  = (unsigned long)phys_to_virt(get_desc(picvdesc->Dword8) - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET);
 				flush_len[flush_num++] = (get_desc(picvdesc->Dword7) & TX_TxBufSizeMask);
 #ifdef OSK_LOW_TX_DESC
 				if (q_num != BE_QUEUE && q_num != HIGH_QUEUE)
@@ -7196,9 +7196,9 @@ fill_body:
 #endif // CONFIG_IEEE80211W
 				}
 #ifndef USE_RTL8186_SDK
-				rtl_cache_sync_wback(priv, (unsigned long)bus_to_virt(dma_txhead[*tx_head] - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
+				rtl_cache_sync_wback(priv, (unsigned long)phys_to_virt(dma_txhead[*tx_head] - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
 #endif
-				flush_addr[flush_num] = (unsigned long)bus_to_virt(get_desc(pmicdesc->Dword8) - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET);
+				flush_addr[flush_num] = (unsigned long)phys_to_virt(get_desc(pmicdesc->Dword8) - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET);
 				flush_len[flush_num++] = (get_desc(pmicdesc->Dword7) & TX_TxBufSizeMask);
 #ifdef OSK_LOW_TX_DESC
 				if (q_num != BE_QUEUE && q_num != HIGH_QUEUE)
@@ -7302,7 +7302,7 @@ init_deschead:
 
 	pfrstdesc->Dword0 |= set_desc(TX_OWN);
 #ifndef USE_RTL8186_SDK
-	rtl_cache_sync_wback(priv, (unsigned long)bus_to_virt(pfrst_dma_desc - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
+	rtl_cache_sync_wback(priv, (unsigned long)phys_to_virt(pfrst_dma_desc - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
 #endif
 
 	if (q_num == HIGH_QUEUE) {
@@ -7405,7 +7405,7 @@ int rtl88XX_signin_txdesc_amsdu(struct rtl8192cd_priv *priv, struct tx_insn *txc
 	} else
 		pdesc->Dword0 = set_desc(TX_OWN);
 #ifndef USE_RTL8186_SDK
-	rtl_cache_sync_wback(priv, (unsigned long)bus_to_virt(dma_txhead[*tx_head] - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
+	rtl_cache_sync_wback(priv, (unsigned long)phys_to_virt(dma_txhead[*tx_head] - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
 #endif
 #endif // CONFIG_WLAN_HAL
 
@@ -7476,7 +7476,7 @@ int rtl88XX_signin_txdesc_amsdu(struct rtl8192cd_priv *priv, struct tx_insn *txc
 		pfrstdesc->Dword0 = set_desc((get_desc(pfrstdesc->Dword0) & 0xff0000) | priv->amsdu_len | TX_FirstSeg | TX_OWN);
 
 #ifndef USE_RTL8186_SDK
-		rtl_cache_sync_wback(priv, (unsigned long)bus_to_virt(priv->amsdu_first_dma_desc - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
+		rtl_cache_sync_wback(priv, (unsigned long)phys_to_virt(priv->amsdu_first_dma_desc - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
 #endif
 
 		tx_poll(priv, q_num);
@@ -7538,7 +7538,7 @@ int rtl8192cd_signin_txdesc_amsdu(struct rtl8192cd_priv *priv, struct tx_insn *t
 		pdesc->Dword0 = set_desc(TX_OWN);
 
 #ifndef USE_RTL8186_SDK
-	rtl_cache_sync_wback(priv, (unsigned long)bus_to_virt(dma_txhead[*tx_head] - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
+	rtl_cache_sync_wback(priv, (unsigned long)phys_to_virt(dma_txhead[*tx_head] - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
 #endif
 
 	pdescinfo->type = _SKB_FRAME_TYPE_;
@@ -7572,7 +7572,7 @@ int rtl8192cd_signin_txdesc_amsdu(struct rtl8192cd_priv *priv, struct tx_insn *t
 #endif
 
 #ifndef USE_RTL8186_SDK
-		rtl_cache_sync_wback(priv, (unsigned long)bus_to_virt(priv->amsdu_first_dma_desc - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
+		rtl_cache_sync_wback(priv, (unsigned long)phys_to_virt(priv->amsdu_first_dma_desc - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
 #endif
 		tx_poll(priv, q_num);
 	}
@@ -7674,7 +7674,7 @@ int rtl8192cd_SetupOneCmdPacket(struct rtl8192cd_priv *priv, unsigned char *dat_
 		}
 
 #ifndef USE_RTL8186_SDK
-		rtl_cache_sync_wback(priv, (unsigned long)bus_to_virt(phw->txcmd_desc_dma_addr[*tx_head] - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
+		rtl_cache_sync_wback(priv, (unsigned long)phys_to_virt(phw->txcmd_desc_dma_addr[*tx_head] - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
 #endif
 		*tx_head = (*tx_head + 1) & (NUM_CMD_DESC - 1);
 	}
@@ -7976,7 +7976,7 @@ __inline__ static unsigned char rtl8192cd_swq_settimer(struct rtl8192cd_priv *pr
 				;
 			} else {
 				if (timer_pending(&priv->pshare->swq_sw_timer))
-					del_timer_sync(&priv->pshare->swq_sw_timer);
+					timer_delete_sync(&priv->pshare->swq_sw_timer);
 			}
 		}
 	} else {
@@ -8619,9 +8619,38 @@ exit:
 	return 0;
 }
 
-void rtl8192cd_swq_timeout(unsigned long task_priv)
+/*
+ * ★ TWO ENTRY POINTS, TWO ABIs -- do not merge them back into one function.
+ *
+ * This handler is reached in two completely different ways depending on chip:
+ *
+ *   - 8192C/8192D/8188C/8188E take the SOFTWARE timer path and register it with
+ *     timer_setup(), so the kernel hands it a `struct timer_list *`.
+ *   - THIS CHIP (8197F/8192CD) takes the HARDWARE timer path: swq_use_hw_timer
+ *     is set to 1 and the handler is registered with tasklet_init(), which
+ *     passes the `data` argument back verbatim as an `unsigned long` -- here,
+ *     `priv` itself. See rtl8192cd_swq_timeout()'s registration in
+ *     8192cd_osdep.c; it is scheduled from the ISR on GTIMER4.
+ *
+ * The 4.14 original took a bare `unsigned long` and so served both callers
+ * correctly. Porting the signature to `struct timer_list *` for the
+ * timer_setup() conversion silently broke the tasklet caller: t was really
+ * `priv`, timer_container_of() then subtracted offsetof(priv_shared_info,
+ * swq_sw_timer) from it, and pshare->priv was garbage. The loop below
+ * (`while (head != priv->pshare->swq_timer_tail)`) runs under
+ * SAVE_INT_AND_CLI() -- i.e. spin_lock_irqsave, interrupts OFF -- so a garbage
+ * tail bound is an unbounded spin with interrupts disabled, in softirq context.
+ * That is a hard kernel wedge: console dead, no SysRq, watchdog reset. On this
+ * board CONFIG_RTL_92C/92D/88E_SUPPORT are all off, so only the TASKLET
+ * REGISTRATION is compiled in -- the timer_setup() sibling registration is
+ * preprocessed out. (rtl8192cd_swq_timeout() itself is still defined and
+ * emitted as a global symbol; nothing references it in this configuration.)
+ *
+ * Keep the real body in a plain helper and give each registration mechanism a
+ * correctly-typed trampoline.
+ */
+static void __rtl8192cd_swq_timeout(struct rtl8192cd_priv *priv)
 {
-	struct rtl8192cd_priv        *priv = (struct rtl8192cd_priv *)task_priv;
 	struct sw_tx_queue_timer *swq_timer;
 	int head;
 	unsigned char add_timer;
@@ -8741,6 +8770,25 @@ void rtl8192cd_swq_timeout(unsigned long task_priv)
 	RESTORE_INT(x);
 	SMP_UNLOCK_XMIT(x);
 }
+
+/* Software-timer registration (timer_setup) -- 8192C/8192D/8188C/8188E only. */
+void rtl8192cd_swq_timeout(struct timer_list *t)
+{
+	struct priv_shared_info *pshare = timer_container_of(pshare, t, swq_sw_timer);
+
+	__rtl8192cd_swq_timeout(pshare->priv);
+}
+
+/*
+ * Tasklet registration (tasklet_init) -- the live path on 8197F. tasklet_init()
+ * hands the callback its `data` word unchanged, and the registration passes
+ * `priv`, so take it as an unsigned long and cast it straight back. Do NOT
+ * container_of() this argument: it is a rtl8192cd_priv *, not a timer_list *.
+ */
+void rtl8192cd_swq_timeout_tasklet(unsigned long task_priv)
+{
+	__rtl8192cd_swq_timeout((struct rtl8192cd_priv *)task_priv);
+}
 #endif //SW_TX_QUEUE
 
 
@@ -8759,7 +8807,7 @@ __inline__ static void rtl8192cd_atm_swq_settimer(struct rtl8192cd_priv *priv, U
 				RTL_W32(TC4_CTRL, 0);
 			} else {
 				if (timer_pending(&priv->pshare->atm_swq_sw_timer))
-					del_timer_sync(&priv->pshare->atm_swq_sw_timer);
+					timer_delete_sync(&priv->pshare->atm_swq_sw_timer);
 			}
 		}
 		priv->pshare->atm_timer_init = 0;//reset timer
@@ -8818,9 +8866,15 @@ void rtl8192cd_atm_swq_inittimer(unsigned long task_priv)
 __inline__ static int rtl8192cd_atm_swq_dequeue(struct rtl8192cd_priv *priv);
 
 
-void rtl8192cd_atm_swq_timeout(unsigned long task_priv)
+/*
+ * ★ Same two-ABI hazard as rtl8192cd_swq_timeout() above: armed as a timer, but
+ * ALSO called directly from the ISR (8192cd_osdep.c) with the current `priv`.
+ * The 4.14 original took an `unsigned long`; a `struct timer_list *` signature
+ * makes timer_container_of() mis-decode that direct argument into a garbage
+ * pshare, and the body then spins under SAVE_INT_AND_CLI with interrupts off.
+ */
+void __rtl8192cd_atm_swq_timeout(struct rtl8192cd_priv *priv)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
 	UINT32 tri_time;
 	unsigned long x = 0;
 
@@ -8848,6 +8902,14 @@ void rtl8192cd_atm_swq_timeout(unsigned long task_priv)
 	SMP_UNLOCK_XMIT(x);
 
 	return;
+}
+
+/* Timer registration (timer_setup). */
+void rtl8192cd_atm_swq_timeout(struct timer_list *t)
+{
+	struct priv_shared_info *pshare = timer_container_of(pshare, t, atm_swq_sw_timer);
+
+	__rtl8192cd_atm_swq_timeout(pshare->priv);
 }
 
 void atm_check_refill(struct rtl8192cd_priv *priv)
@@ -12675,9 +12737,9 @@ void rtl8192cd_signin_txdesc_shortcut_8812(struct rtl8192cd_priv *priv, struct t
 #endif // NOT_RTK_BSP
 
 #ifndef USE_RTL8186_SDK
-	rtl_cache_sync_wback(priv, (unsigned long)bus_to_virt(dma_txhead[*tx_head] - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
+	rtl_cache_sync_wback(priv, (unsigned long)phys_to_virt(dma_txhead[*tx_head] - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
 #endif
-	rtl_cache_sync_wback(priv, (unsigned long)bus_to_virt(get_desc(pdesc->Dword10) - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), (get_desc(pdesc->Dword7)&TX_TxBufSizeMask), PCI_DMA_TODEVICE);
+	rtl_cache_sync_wback(priv, (unsigned long)phys_to_virt(get_desc(pdesc->Dword10) - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), (get_desc(pdesc->Dword7)&TX_TxBufSizeMask), PCI_DMA_TODEVICE);
 
 #ifdef OSK_LOW_TX_DESC
 	if (q_num != BE_QUEUE && q_num != HIGH_QUEUE)
@@ -12687,7 +12749,7 @@ void rtl8192cd_signin_txdesc_shortcut_8812(struct rtl8192cd_priv *priv, struct t
 		txdesc_rollover(pdesc, (unsigned int *)tx_head);
 one_txdesc:
 
-	rtl_cache_sync_wback(priv, (unsigned long)bus_to_virt(get_desc(pfrstdesc->Dword10) - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), (get_desc(pfrstdesc->Dword7)&TX_TxBufSizeMask), PCI_DMA_TODEVICE);
+	rtl_cache_sync_wback(priv, (unsigned long)phys_to_virt(get_desc(pfrstdesc->Dword10) - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), (get_desc(pfrstdesc->Dword7)&TX_TxBufSizeMask), PCI_DMA_TODEVICE);
 
 #ifdef SUPPORT_SNMP_MIB
 	if (txcfg->rts_thrshld <= get_mpdu_len(txcfg, txcfg->fr_len))
@@ -12697,7 +12759,7 @@ one_txdesc:
 	pfrstdesc->Dword0 |= set_desc(TX_OWN);
 
 #ifndef USE_RTL8186_SDK
-	rtl_cache_sync_wback(priv, (unsigned long)bus_to_virt(pfrst_dma_desc - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
+	rtl_cache_sync_wback(priv, (unsigned long)phys_to_virt(pfrst_dma_desc - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
 #endif
 
 #ifdef RESERVE_TXDESC_FOR_EACH_IF
@@ -13042,9 +13104,9 @@ next_desc:
 #endif // NOT_RTK_BSP
 
 #ifndef USE_RTL8186_SDK
-	rtl_cache_sync_wback(priv, (unsigned long)bus_to_virt(dma_txhead[*tx_head] - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
+	rtl_cache_sync_wback(priv, (unsigned long)phys_to_virt(dma_txhead[*tx_head] - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
 #endif
-	rtl_cache_sync_wback(priv, (unsigned long)bus_to_virt(get_desc(pdesc->Dword8) - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), (get_desc(pdesc->Dword7)&TX_TxBufSizeMask), PCI_DMA_TODEVICE);
+	rtl_cache_sync_wback(priv, (unsigned long)phys_to_virt(get_desc(pdesc->Dword8) - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), (get_desc(pdesc->Dword7)&TX_TxBufSizeMask), PCI_DMA_TODEVICE);
 
 #ifdef OSK_LOW_TX_DESC
 	if (q_num != BE_QUEUE && q_num != HIGH_QUEUE)
@@ -13061,7 +13123,7 @@ next_desc:
 #endif
 one_txdesc:
 
-	rtl_cache_sync_wback(priv, (unsigned long)bus_to_virt(get_desc(pfrstdesc->Dword8) - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), (get_desc(pfrstdesc->Dword7)&TX_TxBufSizeMask), PCI_DMA_TODEVICE);
+	rtl_cache_sync_wback(priv, (unsigned long)phys_to_virt(get_desc(pfrstdesc->Dword8) - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), (get_desc(pfrstdesc->Dword7)&TX_TxBufSizeMask), PCI_DMA_TODEVICE);
 
 #ifdef SUPPORT_SNMP_MIB
 	if (txcfg->rts_thrshld <= get_mpdu_len(txcfg, txcfg->fr_len))
@@ -13071,7 +13133,7 @@ one_txdesc:
 	pfrstdesc->Dword0 |= set_desc(TX_OWN);
 
 #ifndef USE_RTL8186_SDK
-	rtl_cache_sync_wback(priv, (unsigned long)bus_to_virt(pfrst_dma_desc - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
+	rtl_cache_sync_wback(priv, (unsigned long)phys_to_virt(pfrst_dma_desc - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), sizeof(struct tx_desc), PCI_DMA_TODEVICE);
 #endif
 
 #ifdef RESERVE_TXDESC_FOR_EACH_IF
@@ -14292,7 +14354,7 @@ rtl88XX_tx_recycle(
 #if defined(CONFIG_NET_PCI) && !defined(USE_RTL8186_SDK)
 		if (IS_PCIBIOS_TYPE) {
 			if (_RESERVED_FRAME_TYPE_ != pdescinfo->type) {
-				pci_unmap_single(priv->pshare->pdev, pdescinfo->paddr, pdescinfo->len, PCI_DMA_TODEVICE);
+				dma_unmap_single(&priv->pshare->pdev->dev, pdescinfo->paddr, pdescinfo->len, PCI_DMA_TODEVICE);
 			}
 		}
 #endif
@@ -14363,7 +14425,7 @@ rtl88XX_tx_recycle(
 			if (IS_PCIBIOS_TYPE) {
 				if (_RESERVED_FRAME_TYPE_ != pdescinfo->buf_type[cnt]) {
 					//use the paddr and flen of pdesc field for icv, mic case which doesn't fill the pdescinfo
-					pci_unmap_single(priv->pshare->pdev,
+					dma_unmap_single(&priv->pshare->pdev->dev,
 							 pdescinfo->buf_paddr[cnt],//payload
 							 pdescinfo->buf_len[cnt],
 							 PCI_DMA_TODEVICE);
@@ -14565,13 +14627,13 @@ static int rtl8192cd_tx_recycle(struct rtl8192cd_priv *priv, unsigned int txRing
 				//use the paddr and flen of pdesc field for icv, mic case which doesn't fill the pdescinfo
 #if defined(CONFIG_RTL_8812_SUPPORT) || defined(CONFIG_RTL_8723B_SUPPORT)
 				if (GET_CHIP_VER(priv) == VERSION_8812E || GET_CHIP_VER(priv) == VERSION_8723B)
-					pci_unmap_single(priv->pshare->pdev,
+					dma_unmap_single(&priv->pshare->pdev->dev,
 							 get_desc(pdesc->Dword10),
 							 (get_desc(pdesc->Dword7) & 0xffff),
 							 PCI_DMA_TODEVICE);
 				else
 #endif
-					pci_unmap_single(priv->pshare->pdev,
+					dma_unmap_single(&priv->pshare->pdev->dev,
 							 get_desc(pdesc->Dword8),
 							 (get_desc(pdesc->Dword7) & 0xffff),
 							 PCI_DMA_TODEVICE);
@@ -15363,9 +15425,10 @@ void aes_fill_encheader(struct rtl8192cd_priv *priv,
 }
 
 #if defined(SUPPORT_TX_AMSDU) || defined (P2P_SUPPORT)
-__IRAM_IN_865X void rtl8192cd_amsdu_timeout(unsigned long task_priv)
+__IRAM_IN_865X void rtl8192cd_amsdu_timeout(struct timer_list *t)
 {
-	struct rtl8192cd_priv        *priv = (struct rtl8192cd_priv *)task_priv;
+	struct priv_shared_info *pshare = timer_container_of(pshare, t, amsdu_sw_timer);
+	struct rtl8192cd_priv *priv = pshare->priv;
 	
 	amsdu_timeout(priv, jiffies);
 	priv->pshare->amsdu_cnt_timeout++;
@@ -15530,6 +15593,22 @@ void check_tcp_ack_timeout(struct rtl8192cd_priv *priv, unsigned int ack_anyway)
 		if (IS_DRV_OPEN(priv))
 			mod_timer(&priv->tcpack_timer, jiffies + RTL_MILISECONDS_TO_JIFFIES(timeout));
 	}
+}
+
+/* 6.18 port: check_tcp_ack_timeout() takes (priv, ack_anyway) and is also
+ * called directly with an explicit ack_anyway from 8192cd_hw.c/8192cd_osdep.c
+ * -- it was never itself a valid timer_setup() callback (that mismatch
+ * predates this port; the old init_timer()/.function assignment had the
+ * exact same 2-arg-function-as-1-arg-callback problem, just silently
+ * tolerated by the pre-C99-strict toolchain). This trampoline is the real
+ * timer_setup() target; the periodic/timer-driven check always passes
+ * ack_anyway=0, matching the only other unforced call site
+ * (8192cd_osdep.c's HW-timer path). */
+void check_tcp_ack_timeout_timerfn(struct timer_list *t)
+{
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, tcpack_timer);
+
+	check_tcp_ack_timeout(priv, 0);
 }
 
 

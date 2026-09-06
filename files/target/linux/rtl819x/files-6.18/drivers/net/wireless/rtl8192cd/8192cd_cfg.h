@@ -1604,7 +1604,7 @@
 //#undef RF_MIMO_SWITCH
 
 #ifndef __ECOS  // avoid  relocation R_mips_26 problem
-#define del_timer_sync del_timer
+#define timer_delete_sync timer_delete
 #endif
 
 #define CONFIG_RTL_PCIE_LINK_PROTECTION 1
@@ -1931,7 +1931,7 @@
 
 #ifndef __LINUX_2_6__
 #ifndef __ECOS
-#define del_timer_sync del_timer
+#define timer_delete_sync timer_delete
 #endif
 #endif
 

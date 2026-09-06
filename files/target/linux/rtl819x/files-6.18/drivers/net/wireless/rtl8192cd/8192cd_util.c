@@ -1378,9 +1378,7 @@ void init_stainfo(struct rtl8192cd_priv *priv, struct stat_info *pstat)
 
 #ifdef DOT11K
 	if (priv->pmib->dot11StationConfigEntry.dot11RadioMeasurementActivated) {
-		pstat->rm_timer.data = (unsigned long) pstat;
-		pstat->rm_timer.function = rm_beacon_expire;
-		init_timer(&pstat->rm_timer);
+		timer_setup(&pstat->rm_timer, rm_beacon_expire, 0);
 	}
 #endif
 
@@ -1471,9 +1469,8 @@ void init_stainfo(struct rtl8192cd_priv *priv, struct stat_info *pstat)
 
 
 #ifdef CONFIG_IEEE80211W
-	init_timer(&pstat->SA_timer);
-	pstat->SA_timer.data = (unsigned long) pstat;
-	pstat->SA_timer.function = rtl8192cd_sa_query_timer;
+	timer_setup(&pstat->SA_timer, rtl8192cd_sa_query_timer, 0);
+
 #endif
 
 #ifdef CONFIG_RTL_WAPI_SUPPORT
@@ -1870,7 +1867,7 @@ void release_stainfo(struct rtl8192cd_priv *priv, struct stat_info *pstat)
 
 #ifdef CONFIG_IEEE80211W
 	if (timer_pending(&pstat->SA_timer))
-		del_timer(&pstat->SA_timer);
+		timer_delete(&pstat->SA_timer);
 #endif
 
 	// free all queued skb
@@ -1966,7 +1963,7 @@ void release_stainfo(struct rtl8192cd_priv *priv, struct stat_info *pstat)
 	if (priv->pmib->dot11StationConfigEntry.dot11RadioMeasurementActivated) {
 		/*terminate the measurement request to other STA*/
 		if (timer_pending(&pstat->rm_timer))
-			del_timer_sync(&pstat->rm_timer);
+			timer_delete_sync(&pstat->rm_timer);
 
 		/*terminate the measurement process requested by other STA*/
 		if (pstat == priv->rm.req_pstat) {
@@ -1997,7 +1994,7 @@ void release_stainfo(struct rtl8192cd_priv *priv, struct stat_info *pstat)
 
 #if defined(INCLUDE_WPA_PSK) && !defined(RTK_NL80211)
 	if (timer_pending(&pstat->wpa_sta_info->resendTimer)) {
-		del_timer(&pstat->wpa_sta_info->resendTimer);
+		timer_delete(&pstat->wpa_sta_info->resendTimer);
 		set_connect_sta_info(priv, pstat->hwaddr, STA_CONNECT_4_WAY_ONDEAUTH);
 	}
 #endif
@@ -2170,6 +2167,7 @@ struct	stat_info *alloc_stainfo(struct rtl8192cd_priv *priv, unsigned char *hwad
 		if (priv->pshare->aidarray[i]->station.wpa_sta_info == NULL)
 			goto no_free_memory;
 		memset(priv->pshare->aidarray[i]->station.wpa_sta_info, 0, sizeof(WPA_STA_INFO));
+		priv->pshare->aidarray[i]->station.wpa_sta_info->pstat = &priv->pshare->aidarray[i]->station; /* 6.18 port: backpointer for timer_container_of() */
 #endif
 
 #if defined(WIFI_HAPD) || defined(RTK_NL80211)
@@ -5658,9 +5656,9 @@ void enable_vxd_ap(struct rtl8192cd_priv *priv)
 #endif // UNIVERSAL_REPEATER
 
 #ifdef RTK_STA_BWC
-void rtl8192cd_sta_bwc_timer(unsigned long task_priv)
+void rtl8192cd_sta_bwc_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, sta_bwc_timer);
 
 	struct stat_info *pstat;
 	int i;
@@ -5678,9 +5676,9 @@ void rtl8192cd_sta_bwc_timer(unsigned long task_priv)
 #endif
 
 #ifdef GBWC
-void rtl8192cd_GBWC_timer(unsigned long task_priv)
+void rtl8192cd_GBWC_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, GBWC_timer);
 	struct sk_buff *pskb;
 
 	if (!(priv->drv_state & DRV_STATE_OPEN))
@@ -5729,9 +5727,9 @@ void rtl8192cd_GBWC_timer(unsigned long task_priv)
 #endif
 
 #ifdef SBWC
-void rtl8192cd_SBWC_timer(unsigned long task_priv)
+void rtl8192cd_SBWC_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, SBWC_timer);
 	struct sk_buff *pskb;
 	SBWC_MODE mode;
 	struct stat_info	*pstat;
@@ -5804,9 +5802,9 @@ void rtl8192cd_SBWC_timer(unsigned long task_priv)
 }
 #endif
 
-void rtl8192cd_connect_sta_info_timer(unsigned long task_priv)
+void rtl8192cd_connect_sta_info_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, connect_sta_info_timer);
 
 	if (!(priv->drv_state & DRV_STATE_OPEN))
 		return;
@@ -6136,9 +6134,10 @@ void clearAllTxShortCut(struct rtl8192cd_priv *priv)
 #if defined(MULTI_STA_REFINE)
 
 
-void TxPktBuf_AgingTimer(unsigned long task_priv)
+void TxPktBuf_AgingTimer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct priv_shared_info *pshare = timer_container_of(pshare, t, PktAging_timer);
+	struct rtl8192cd_priv *priv = pshare->priv;
 	if (!(priv->drv_state & DRV_STATE_OPEN))
 		return;
 	if (priv->pshare->paused_sta_num > 8) {
@@ -6296,9 +6295,9 @@ void TxPktBuf_AgingTimer(unsigned long task_priv)
 
 #ifdef CONFIG_PCI_HCI
 #if CONFIG_WLAN_NOT_HAL_EXIST
-void add_ps_timer(unsigned long task_priv)
+void add_ps_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, add_ps_timer);
 	struct stat_info *pstat = NULL;
 	unsigned int set_timer = 0;
 
@@ -6309,7 +6308,7 @@ void add_ps_timer(unsigned long task_priv)
 		return;
 
 	if (timer_pending(&priv->add_ps_timer))
-		del_timer_sync(&priv->add_ps_timer);
+		timer_delete_sync(&priv->add_ps_timer);
 
 #ifdef PCIE_POWER_SAVING
 	if ((priv->pwr_state == L2) || (priv->pwr_state == L1))
@@ -6603,9 +6602,9 @@ void checkBandwidth(struct rtl8192cd_priv *priv)
 
 #if defined(CONFIG_RTL_92D_SUPPORT) || defined(CONFIG_RTL_92C_SUPPORT)
 #ifdef CONFIG_PCI_HCI
-void add_RATid_timer(unsigned long task_priv)
+void add_RATid_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, add_RATid_timer);
 	struct stat_info *pstat = NULL;
 	unsigned int set_timer = 0;
 	unsigned long flags = 0;
@@ -6614,7 +6613,7 @@ void add_RATid_timer(unsigned long task_priv)
 		return;
 
 	if (timer_pending(&priv->add_RATid_timer))
-		del_timer_sync(&priv->add_RATid_timer);
+		timer_delete_sync(&priv->add_RATid_timer);
 
 #ifdef PCIE_POWER_SAVING
 	if ((priv->pwr_state == L2) || (priv->pwr_state == L1))
@@ -6709,7 +6708,7 @@ void ap_offload_deactivate(struct rtl8192cd_priv *priv, int reason)
 
 #ifdef CONFIG_POWER_SAVE
 	if (!priv->pshare->offload_prohibited) {
-		del_timer(&priv->pshare->ps_timer);
+		timer_delete(&priv->pshare->ps_timer);
 		priv->pshare->ps_timer_expires = 0;
 		rtw_lock_suspend(priv);
 	}
@@ -7144,7 +7143,7 @@ __IRAM_WIFI_PRI3 void rtl_cache_sync_wback(struct rtl8192cd_priv *priv, unsigned
 	if (0 == size)
 		return;	// if the size of cache sync is equal to zero, don't do sync action
 
-	dma_cache_wback_inv((unsigned long)bus_to_virt(start - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), size);
+	dma_cache_wback_inv((unsigned long)phys_to_virt(start - CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), size);
 }
 #endif//#ifdef __OSK_
 
@@ -8703,7 +8702,7 @@ void rtl8192cd_cu_stop(struct rtl8192cd_priv *priv)
 
 	if (stop_cu) {
 		if (timer_pending(&priv->pshare->cu_info.cu_cntdwn_timer)) {
-			del_timer_sync(&priv->pshare->cu_info.cu_cntdwn_timer);
+			timer_delete_sync(&priv->pshare->cu_info.cu_cntdwn_timer);
 		}
 		priv->pshare->cu_info.cu_enable = 0;
 	}
@@ -8715,9 +8714,8 @@ void rtl8192cd_cu_start(struct rtl8192cd_priv *priv)
 	priv->cu_enable = 1;
 	if (priv->pshare->cu_info.cu_enable == 0) {
 		priv->pshare->cu_info.channel_utilization = 0;
-		init_timer(&priv->pshare->cu_info.cu_cntdwn_timer);
-		priv->pshare->cu_info.cu_cntdwn_timer.data = (unsigned long) priv;
-		priv->pshare->cu_info.cu_cntdwn_timer.function = rtl8192cd_cu_cntdwn_timer;
+		timer_setup(&priv->pshare->cu_info.cu_cntdwn_timer, rtl8192cd_cu_cntdwn_timer, 0);
+
 		priv->pshare->cu_info.cu_cntdwn = priv->pshare->cu_info.cu_initialcnt = (priv->pmib->dot11StationConfigEntry.channel_utili_beaconIntval * priv->pmib->dot11StationConfigEntry.dot11BeaconPeriod) / CU_Intval;
 		start_bbp_ch_load(priv, 50000);
 		//priv->pshare->cu_info.cu_cntdwn_timer.expires = jiffies + CU_TO;
@@ -10175,9 +10173,9 @@ void Release_BB_Reset(struct rtl8192cd_priv *priv)
 	RTL_W8(0x2, tmp_reg2);
 }
 
-void RF_MIMO_check_timer(unsigned long task_priv)
+void RF_MIMO_check_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, ps_timer);
 	int i = 0, assoc_num = priv->assoc_num;
 
 	if (!(priv->drv_state & DRV_STATE_OPEN))
@@ -12031,9 +12029,8 @@ void start_monitor_mode(struct rtl8192cd_priv *priv)
 		| RCR_AMF | RCR_ADF | RCR_AICV | RCR_ACRC32 | RCR_CBSSID_ADHOC | RCR_AB | RCR_AM | RCR_APM | RCR_AAP);
 
 	if (!priv->pmib->miscEntry.chan_switch_disable) {
-		init_timer(&priv->chan_switch_timer);
-		priv->chan_switch_timer.data = (unsigned long) priv;
-		priv->chan_switch_timer.function = rtl8192cd_chan_switch_timer;
+		timer_setup(&priv->chan_switch_timer, rtl8192cd_chan_switch_timer, 0);
+
 		mod_timer(&priv->chan_switch_timer, jiffies + RTL_MILISECONDS_TO_JIFFIES(priv->pmib->miscEntry.chan_switch_time));
 	}
 
@@ -12045,7 +12042,7 @@ void stop_monitor_mode(struct rtl8192cd_priv *priv)
 
 	OPMODE_VAL(OPMODE & (~WIFI_SITE_MONITOR));
 	if (timer_pending(&priv->chan_switch_timer))
-		del_timer_sync(&priv->chan_switch_timer);
+		timer_delete_sync(&priv->chan_switch_timer);
 
 	panic_printk("priv->is_monitor_mode = %d,\n", priv->is_monitor_mode);
 }

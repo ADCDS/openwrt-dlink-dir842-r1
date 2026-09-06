@@ -232,6 +232,9 @@ typedef struct _wpa_global_info {
 	int					GTKRekey;
 	int					GKeyFailure;
 	struct timer_list	GKRekeyTimer;
+	/* 6.18 port: backpointer so timer_container_of(GKRekeyTimer) can
+	 * recover the owning priv -- wpa_global_info is a separate allocation. */
+	struct rtl8192cd_priv	*priv;
 } WPA_GLOBAL_INFO;
 #endif
 
@@ -242,6 +245,9 @@ typedef struct _wpa_sta_info {
 	int					RSNEnabled;		// bit0-WPA, bit1-WPA2
 	unsigned char		UnicastCipher;
 	struct rtl8192cd_priv	*priv;
+	/* 6.18 port: backpointer so timer_container_of(resendTimer) can
+	 * recover the owning pstat -- wpa_sta_info is a separate allocation. */
+	struct stat_info	*pstat;
 } WPA_STA_INFO;
 
 #else
@@ -300,6 +306,9 @@ typedef struct _wpa_sta_info {
 	unsigned char		UnicastCipher_1x;
 	unsigned char		MulticastCipher_1x;
 #endif
+	/* 6.18 port: backpointer so timer_container_of(resendTimer) can
+	 * recover the owning pstat -- wpa_sta_info is a separate allocation. */
+	struct stat_info	*pstat;
 } WPA_STA_INFO;
 #endif
 

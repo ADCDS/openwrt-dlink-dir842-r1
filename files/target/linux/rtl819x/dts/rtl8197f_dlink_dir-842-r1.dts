@@ -205,6 +205,33 @@
 };
 
 /*
- * Enabled per bring-up milestone as each driver lands:
- *   &wmac -> the on-SoC 2.4 GHz radio
+ * The on-SoC 2.4 GHz WMAC (M7). Enabled 2026-09-03, once the vendor rtl8192cd
+ * driver was stable enough to load without wedging the kernel.
+ *
+ * ★ THIS NODE IS WHAT SUPPLIES THE INTERRUPT. Leaving it disabled is not merely
+ * "the radio is off" -- it silently breaks RF bring-up in a way that looks like a
+ * driver bug:
+ *
+ *   - With the node disabled, drivers/net/wireless/rtl8197f/rtl8197f-wmac.c never
+ *     probes, so nothing ever calls platform_get_irq() for this block and nothing
+ *     populates wlan_device[1] (mmio 0xb8640000).
+ *   - rtl8192cd then falls back to the 4.14-era hardcoded BSP_WLAN_MAC_IRQ = 6
+ *     (8192cd_osdep.c) and calls request_irq(6, ...). On 4.14 that was a bare CPU
+ *     IP6 line and worked. On 6.18 `mti,cpu-interrupt-controller` creates a legacy
+ *     domain where virq == hwirq for 0-7, and this SoC's Realtek intc claims IP6 as
+ *     one of its four parents (see the intc `interrupts = <2>, <4>, <5>, <6>` in
+ *     rtl8197f.dtsi). irq_set_chained_handler_and_data() therefore marks virq 6
+ *     IRQ_NOREQUEST, and __setup_irq() rejects the request with -EINVAL.
+ *   - The driver only logs that failure and carries on, so the symptom is not an
+ *     error but a radio that loads, registers /proc/wlan0 and its netdevs, and then
+ *     simply never comes up: `wifi up` reports nothing and wlan0 stays operstate
+ *     down. Observed exactly that on 2026-09-03 before enabling this node.
+ *
+ * Additionally realtek_rtl_of_init() clears IRR[29] and GIMR bit 29 at boot, so
+ * even the correct hwirq is routed nowhere until a driver maps it -- which is
+ * precisely what probing this node does (intc hwirq 29 -> IP6, programming IRR and
+ * GIMR on the way).
  */
+&wmac {
+	status = "okay";
+};

@@ -1190,12 +1190,12 @@ void unchainned_all_frag(struct rtl8192cd_priv *priv, struct list_head *phead)
 }
 
 
-void rtl8192cd_frag_timer(unsigned long task_priv)
+void rtl8192cd_frag_timer(struct timer_list *t)
 {
 	unsigned long flags;
 	struct list_head	*phead, *plist;
 	struct stat_info	*pstat;
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, frag_to_filter);
 	
 	struct list_head frag_list;
 
@@ -6522,7 +6522,7 @@ void issue_actionFrame(struct rtl8192cd_priv *priv)
     					panic_printk("%s(%d), settimer, %x\n", __FUNCTION__, __LINE__, &pstat->SA_timer);
     				
     					if(timer_pending(&pstat->SA_timer))
-    						del_timer(&pstat->SA_timer);
+    						timer_delete(&pstat->SA_timer);
 
     					pstat->SA_timer.data = (unsigned long) pstat;
     					pstat->SA_timer.function = rtl8192cd_sa_query_timer;
@@ -8188,7 +8188,7 @@ if(!IS_OUTSRC_CHIP(priv))
 				issue_BSS_TSM_req(priv, &tsmreq);
                 
                	if (timer_pending(&priv->disassoc_timer))
-            		del_timer_sync(&priv->disassoc_timer);
+            		timer_delete_sync(&priv->disassoc_timer);
                 
 				mod_timer(&priv->disassoc_timer, jiffies + tsmreq.Disassoc_timer * RTL_MILISECONDS_TO_JIFFIES(priv->pmib->dot11StationConfigEntry.dot11BeaconPeriod));
 			}
@@ -8717,9 +8717,9 @@ void rtl8192cd_thermal_protection(struct rtl8192cd_priv *priv)
 	
 }
 #endif
-void rtl8192cd_1sec_timer(unsigned long task_priv)
+void rtl8192cd_1sec_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, expire_timer);
 #ifdef CHECK_CRYPTO
 	unsigned long	flags;
 #endif
@@ -8941,9 +8941,9 @@ void rtl8192cd_offload_expire_timer(struct rtl8192cd_priv *priv)
 }
 #endif // CONFIG_POWER_SAVE
 
-void rtl8192cd_1sec_timer(unsigned long task_priv)
+void rtl8192cd_1sec_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, expire_timer);
 
 	if (!(priv->drv_state & DRV_STATE_OPEN))
 		return;
@@ -12028,10 +12028,10 @@ void signin_beacon_desc(struct rtl8192cd_priv *priv, unsigned int *beaconbuf, un
 	
 #if defined(CONFIG_RTL_8812_SUPPORT) || defined(CONFIG_RTL_8723B_SUPPORT)	
 	if(GET_CHIP_VER(priv)== VERSION_8812E || GET_CHIP_VER(priv)== VERSION_8723B)
-	rtl_cache_sync_wback(priv, (unsigned long)bus_to_virt(get_desc(pdesc->Dword10)), frlen, PCI_DMA_TODEVICE);
+	rtl_cache_sync_wback(priv, (unsigned long)phys_to_virt(get_desc(pdesc->Dword10)), frlen, PCI_DMA_TODEVICE);
 	else
 #endif
-	rtl_cache_sync_wback(priv, (unsigned long)bus_to_virt(get_desc(pdesc->Dword8)), frlen, PCI_DMA_TODEVICE);
+	rtl_cache_sync_wback(priv, (unsigned long)phys_to_virt(get_desc(pdesc->Dword8)), frlen, PCI_DMA_TODEVICE);
 
 
 #ifdef MBSSID
@@ -13108,12 +13108,13 @@ void construct_ibss_beacon(struct rtl8192cd_priv *priv)
 
 
 #ifdef __KERNEL__
-void issue_beacon_ibss_vxd(unsigned long task_priv)
+void issue_beacon_ibss_vxd(struct timer_list *t)
 #elif defined(__ECOS)
 void issue_beacon_ibss_vxd(void *task_priv)
 #endif
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct priv_shared_info *pshare = timer_container_of(pshare, t, vxd_ibss_beacon);
+	struct rtl8192cd_priv *priv = pshare->priv;
 	unsigned long flags;
 	DECLARE_TXINSN(txinsn);
 	
@@ -20017,7 +20018,7 @@ void stop_sa_query(struct stat_info *pstat)
 	PMFDEBUG("RX 11W_SA_Rsp , stop send sa query again\n");
 	pstat->sa_query_count = 0;
 	if (timer_pending(&pstat->SA_timer))
-		del_timer(&pstat->SA_timer);
+		timer_delete(&pstat->SA_timer);
 }
 
 
@@ -20028,15 +20029,15 @@ int check_sa_query_timeout(struct stat_info *pstat)
 		pstat->sa_query_timed_out = 1;
 		pstat->sa_query_count = 0;
 		if (timer_pending(&pstat->SA_timer))
-			del_timer(&pstat->SA_timer);
+			timer_delete(&pstat->SA_timer);
 		return 1;
 	}	
 	return 0;
 }
 
-void rtl8192cd_sa_query_timer(unsigned long task_priv)
+void rtl8192cd_sa_query_timer(struct timer_list *t)
 {
-	struct stat_info        *pstat = (struct stat_info *)task_priv;
+	struct stat_info        *pstat = timer_container_of(pstat, t, SA_timer);
 	struct rtl8192cd_priv *priv = NULL;
 	struct aid_obj *aidobj;
 
@@ -20569,14 +20570,14 @@ void start_clnt_ss(struct rtl8192cd_priv *priv)
 #endif
 
     if (timer_pending(&priv->ss_timer))
-        del_timer(&priv->ss_timer);
+        timer_delete(&priv->ss_timer);
 #ifdef CLIENT_MODE
     if (PENDING_REAUTH_TIMER)
         DELETE_REAUTH_TIMER;
     if (PENDING_REASSOC_TIMER)
         DELETE_REASSOC_TIMER;
     if (timer_pending(&priv->idle_timer))
-        del_timer(&priv->idle_timer);
+        timer_delete(&priv->idle_timer);
 #endif
 
 #ifdef P2P_SUPPORT
@@ -21430,9 +21431,9 @@ static void debug_print_bss(struct rtl8192cd_priv *priv)
 }
 
 
-void rtl8192cd_ss_timer(unsigned long task_priv)
+void rtl8192cd_ss_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, ss_timer);
 	int idx, loop_finish=0;
 	int AUTOCH_SS_COUNT=SS_COUNT;//AUTOCH_SS_SPEEDUP
 	int i,j;
@@ -22074,7 +22075,7 @@ void rtl8192cd_ss_timer(unsigned long task_priv)
 			if(priv->pmib->miscEntry.ss_loop_delay) {
 				//STADEBUG("loop delay for %d miliseconads\n",priv->pmib->miscEntry.ss_loop_delay);
 				if(timer_pending(&priv->ss_timer))
-					del_timer(&priv->ss_timer);
+					timer_delete(&priv->ss_timer);
 				mod_timer(&priv->ss_timer, jiffies + RTL_MILISECONDS_TO_JIFFIES(priv->pmib->miscEntry.ss_loop_delay));
 
 				if(priv->ss_req_ongoing == SSFROM_REPEATER_VXD) {
@@ -22452,17 +22453,16 @@ abort_scan:
 				 	if(!priv->pmib->dot11DFSEntry.disable_DFS 
 					&& is_DFS_channel(priv->pmib->dot11RFEntry.dot11channel) && (OPMODE & WIFI_AP_STATE)) {
 						if (timer_pending(&priv->DFS_timer))
-							del_timer(&priv->DFS_timer);
+							timer_delete(&priv->DFS_timer);
 
 						if (timer_pending(&priv->ch_avail_chk_timer))
-							del_timer(&priv->ch_avail_chk_timer);
+							timer_delete(&priv->ch_avail_chk_timer);
 
 						if (timer_pending(&priv->dfs_det_chk_timer))
-							del_timer(&priv->dfs_det_chk_timer);
+							timer_delete(&priv->dfs_det_chk_timer);
 
-						init_timer(&priv->ch_avail_chk_timer);
-						priv->ch_avail_chk_timer.data = (unsigned long) priv;
-						priv->ch_avail_chk_timer.function = rtl8192cd_ch_avail_chk_timer;
+						timer_setup(&priv->ch_avail_chk_timer, rtl8192cd_ch_avail_chk_timer, 0);
+
 
 						if ((priv->pmib->dot11StationConfigEntry.dot11RegDomain == DOMAIN_ETSI) &&
 							(IS_METEOROLOGY_CHANNEL(priv->pmib->dot11RFEntry.dot11channel)))
@@ -22470,23 +22470,21 @@ abort_scan:
 						else
 							mod_timer(&priv->ch_avail_chk_timer, jiffies + CH_AVAIL_CHK_TO);
 
-						init_timer(&priv->DFS_timer);
-						priv->DFS_timer.data = (unsigned long) priv;
-						priv->DFS_timer.function = rtl8192cd_DFS_timer;
+						timer_setup(&priv->DFS_timer, rtl8192cd_DFS_timer, 0);
+
 
 						/* DFS activated after 5 sec; prevent switching channel due to DFS false alarm */
 						mod_timer(&priv->DFS_timer, jiffies + RTL_SECONDS_TO_JIFFIES(5));
 
-						init_timer(&priv->dfs_det_chk_timer);
-						priv->dfs_det_chk_timer.data = (unsigned long) priv;
-						priv->dfs_det_chk_timer.function = rtl8192cd_dfs_det_chk_timer;
+						timer_setup(&priv->dfs_det_chk_timer, rtl8192cd_dfs_det_chk_timer, 0);
+
 
 						mod_timer(&priv->dfs_det_chk_timer, jiffies + RTL_MILISECONDS_TO_JIFFIES(priv->pshare->rf_ft_var.dfs_det_period*10));
 
 						DFS_SetReg(priv);
 
 						if (!priv->pmib->dot11DFSEntry.CAC_enable) {
-							del_timer_sync(&priv->ch_avail_chk_timer);
+							timer_delete_sync(&priv->ch_avail_chk_timer);
 							mod_timer(&priv->ch_avail_chk_timer, jiffies + RTL_MILISECONDS_TO_JIFFIES(200));
 						}
 				 	}
@@ -24986,9 +24984,9 @@ void assign_aggre_size(struct rtl8192cd_priv *priv, struct stat_info *pstat)
 }
 
 #ifdef SUPPORT_MONITOR
-void rtl8192cd_chan_switch_timer(unsigned long task_priv)
+void rtl8192cd_chan_switch_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, chan_switch_timer);
 	
 	if (!(priv->drv_state & DRV_STATE_OPEN))
 		return;
@@ -25199,7 +25197,7 @@ unsigned int OnAssocReq(struct rtl8192cd_priv *priv, struct rx_frinfo *pfrinfo)
 
 //Ignore AssocReq during 4-WAY Handshake for some phones' connection issue
 if((pstat) && (pstat->wpa_sta_info->state == PSK_STATE_PTKINITNEGOTIATING))
-	return;
+	return FAIL; /* 6.18 port: OnAssocReq returns unsigned int */
 
 	frame_type = GetFrameSubType(pframe);
 #ifdef NOT_RTK_BSP
@@ -25269,7 +25267,7 @@ if((pstat) && (pstat->wpa_sta_info->state == PSK_STATE_PTKINITNEGOTIATING))
 
 			
 			if(timer_pending(&pstat->SA_timer))
-				del_timer(&pstat->SA_timer);
+				timer_delete(&pstat->SA_timer);
 
 			pstat->SA_timer.data = (unsigned long) pstat;
 			pstat->SA_timer.function = rtl8192cd_sa_query_timer;
@@ -30179,17 +30177,16 @@ void ap_sync_chan_to_bss(struct rtl8192cd_priv *priv, int bss_channel, int bss_b
 #ifdef DFS
 	if(!priv->pmib->dot11DFSEntry.disable_DFS && is_DFS_channel(priv->pmib->dot11RFEntry.dot11channel)) {
 		if (timer_pending(&priv->DFS_timer))
-			del_timer(&priv->DFS_timer);
+			timer_delete(&priv->DFS_timer);
 
 		if (timer_pending(&priv->ch_avail_chk_timer))
-			del_timer(&priv->ch_avail_chk_timer);
+			timer_delete(&priv->ch_avail_chk_timer);
 
 		if (timer_pending(&priv->dfs_det_chk_timer))
-			del_timer(&priv->dfs_det_chk_timer);
+			timer_delete(&priv->dfs_det_chk_timer);
 		
-		init_timer(&priv->ch_avail_chk_timer);
-		priv->ch_avail_chk_timer.data = (unsigned long) priv;
-		priv->ch_avail_chk_timer.function = rtl8192cd_ch_avail_chk_timer;
+		timer_setup(&priv->ch_avail_chk_timer, rtl8192cd_ch_avail_chk_timer, 0);
+
 
 		if ((priv->pmib->dot11StationConfigEntry.dot11RegDomain == DOMAIN_ETSI) &&
 			(IS_METEOROLOGY_CHANNEL(priv->pmib->dot11RFEntry.dot11channel)))
@@ -30197,24 +30194,22 @@ void ap_sync_chan_to_bss(struct rtl8192cd_priv *priv, int bss_channel, int bss_b
 		else
 			mod_timer(&priv->ch_avail_chk_timer, jiffies + CH_AVAIL_CHK_TO);
 
-		init_timer(&priv->DFS_timer);
-		priv->DFS_timer.data = (unsigned long) priv;
-		priv->DFS_timer.function = rtl8192cd_DFS_timer;
+		timer_setup(&priv->DFS_timer, rtl8192cd_DFS_timer, 0);
+
 
 		
 		/* DFS activated after 5 sec; prevent switching channel due to DFS false alarm */
 		mod_timer(&priv->DFS_timer, jiffies + RTL_SECONDS_TO_JIFFIES(5));
 
-		init_timer(&priv->dfs_det_chk_timer);
-		priv->dfs_det_chk_timer.data = (unsigned long) priv;
-		priv->dfs_det_chk_timer.function = rtl8192cd_dfs_det_chk_timer;
+		timer_setup(&priv->dfs_det_chk_timer, rtl8192cd_dfs_det_chk_timer, 0);
+
 
 		mod_timer(&priv->dfs_det_chk_timer, jiffies + RTL_MILISECONDS_TO_JIFFIES(priv->pshare->rf_ft_var.dfs_det_period*10));
 
 		DFS_SetReg(priv);
 
 		if (!priv->pmib->dot11DFSEntry.CAC_enable) {
-			del_timer_sync(&priv->ch_avail_chk_timer);
+			timer_delete_sync(&priv->ch_avail_chk_timer);
 			mod_timer(&priv->ch_avail_chk_timer, jiffies + RTL_MILISECONDS_TO_JIFFIES(200));
 		}
 	}
@@ -30718,7 +30713,7 @@ void start_clnt_join(struct rtl8192cd_priv *priv)
 
 // stop ss_timer before join ------------------------
 	if (timer_pending(&priv->ss_timer))
-		del_timer(&priv->ss_timer);
+		timer_delete(&priv->ss_timer);
 //------------------------------- david+2007-03-10
 
 	// if found bss
@@ -31888,15 +31883,15 @@ void rtl8192cd_disassoc_timer(unsigned long task_priv)
 	}
 	
 	if (timer_pending(&priv->disassoc_timer))
-		del_timer_sync(&priv->disassoc_timer);
+		timer_delete_sync(&priv->disassoc_timer);
 	
 	//memset(priv->pmib->hs2Entry.sta_mac, 0, 6);
 }
 
 #endif
-void rtl8192cd_reauth_timer(unsigned long task_priv)
+void rtl8192cd_reauth_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, reauth_timer);
 #ifndef SMP_SYNC
 	unsigned long flags = 0;
 #endif
@@ -31945,9 +31940,9 @@ void rtl8192cd_reauth_timer(unsigned long task_priv)
 }
 
 
-void rtl8192cd_reassoc_timer(unsigned long task_priv)
+void rtl8192cd_reassoc_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, reassoc_timer);
 #ifndef SMP_SYNC    
 	unsigned long flags = 0;
 #endif
@@ -31993,9 +31988,9 @@ void rtl8192cd_reassoc_timer(unsigned long task_priv)
 }
 
 
-void rtl8192cd_idle_timer(unsigned long task_priv)
+void rtl8192cd_idle_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, idle_timer);
 
 	SMP_LOCK(flags);
 	if (!(priv->drv_state & DRV_STATE_OPEN)) {
@@ -32010,9 +32005,13 @@ void rtl8192cd_idle_timer(unsigned long task_priv)
 }
 
 #ifdef MULTI_MAC_CLONE
-void rtl8192cd_mclone_reauth_timer(unsigned long data)
+void rtl8192cd_mclone_reauth_timer(struct timer_list *t)
 {
-	struct mclone_timer_data *timer_data = (struct mclone_timer_data *)data;
+	/* 6.18 port: recover the owning mclone_sta_info via the timer field
+	 * itself (a sibling of timer_data within the same array element),
+	 * then reuse the original timer_data-based logic unchanged below. */
+	struct mclone_sta_info *mclone_sta = timer_container_of(mclone_sta, t, reauth_timer);
+	struct mclone_timer_data *timer_data = &mclone_sta->timer_data;
 	struct rtl8192cd_priv *priv;
 	unsigned long active_id = timer_data->active_id;
 	unsigned long flags;
@@ -32070,9 +32069,13 @@ void rtl8192cd_mclone_reauth_timer(unsigned long data)
 	SMP_UNLOCK(flags);
 }
 
-void rtl8192cd_mclone_reassoc_timer(unsigned long data)
+void rtl8192cd_mclone_reassoc_timer(struct timer_list *t)
 {
-	struct mclone_timer_data *timer_data = (struct mclone_timer_data *)data;
+	/* 6.18 port: recover the owning mclone_sta_info via the timer field
+	 * itself (a sibling of timer_data within the same array element),
+	 * then reuse the original timer_data-based logic unchanged below. */
+	struct mclone_sta_info *mclone_sta = timer_container_of(mclone_sta, t, reassoc_timer);
+	struct mclone_timer_data *timer_data = &mclone_sta->timer_data;
 	struct rtl8192cd_priv *priv;
 	unsigned long active_id = timer_data->active_id;
 	unsigned long flags;
@@ -33575,7 +33578,7 @@ unsigned int OnBeaconClnt_Bss(struct rtl8192cd_priv *priv, struct rx_frinfo *pfr
 			DEBUG_INFO("CSA Detected mode=%d, channel=%d, countdown=%d\n",*(p+2), priv->pshare->dfsSwitchChannel, priv->pshare->dfsSwitchChCountDown);
 			if (priv->pshare->dfsSwitchChCountDown <= 5) {
 				if (timer_pending(&priv->dfs_cntdwn_timer))
-					del_timer(&priv->dfs_cntdwn_timer);
+					timer_delete(&priv->dfs_cntdwn_timer);
 
 				DFS_SwChnl_clnt(priv);
 				priv->pshare->dfsSwCh_ongoing = 1;
@@ -34078,7 +34081,7 @@ int OnBeaconClnt_Ibss(struct rtl8192cd_priv *priv, struct rx_frinfo *pfrinfo)
 	}
 
 	if (timer_pending(&priv->idle_timer))
-		del_timer(&priv->idle_timer);
+		timer_delete(&priv->idle_timer);
 
 	p = get_ie(pframe + WLAN_HDR_A3_LEN + _BEACON_IE_OFFSET_, _DSSET_IE_, &len,
 		pfrinfo->pktlen - WLAN_HDR_A3_LEN - _BEACON_IE_OFFSET_);
@@ -35023,7 +35026,7 @@ void set_vxd_rescan(struct rtl8192cd_priv *priv,int rescantype)
 	//SMP_LOCK(flags);
 	if (timer_pending(&priv->ss_timer)) {
 		SMP_UNLOCK(flags);
-		del_timer_sync(&priv->ss_timer);
+		timer_delete_sync(&priv->ss_timer);
 		SMP_LOCK(flags);
 	}
 
@@ -35780,17 +35783,17 @@ bool qos_enhance_proc(struct rtl8192cd_priv *priv)
 	unsigned int ulMiddleTpInterval = 0;
 
 	if((NULL == priv) || !(priv->drv_state & DRV_STATE_OPEN)){
-		return;
+		return false; /* 6.18 port: qos_enhance_proc returns bool */
 	}
 	
 	if(!QOS_ENHANCE_ENABLE(priv) || (!QOS_ENABLE)){
 		priv->pshare->rf_ft_var.qos_enhance_active = 0;
-		return;
+		return false; /* 6.18 port: qos_enhance_proc returns bool */
 	}
 
 	if(priv->assoc_num<2){
 		priv->pshare->rf_ft_var.qos_enhance_active = 0;
-		return;
+		return false; /* 6.18 port: qos_enhance_proc returns bool */
 	}
 
 	if(priv->pshare->rf_ft_var.swq_dbg == 200)
@@ -35866,7 +35869,7 @@ bool qos_enhance_proc(struct rtl8192cd_priv *priv)
 		priv->pshare->rf_ft_var.qos_enhance_active = 0;
 		memset(&priv->pshare->rf_ft_var.qos_enhance_sta, 0, sizeof(priv->pshare->rf_ft_var.qos_enhance_sta));
 	}
-	return;
+	return true; /* 6.18 port: qos_enhance_proc returns bool */
 }
 #endif
 

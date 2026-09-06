@@ -257,9 +257,10 @@ static void set_sw_LED2(struct rtl8192cd_priv *priv, int flag)
 #endif
 }
 
-static void LED_Interval_timeout(unsigned long task_priv)
+static void LED_Interval_timeout(struct timer_list *t)
 {
-    struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+    struct priv_shared_info *pshare = timer_container_of(pshare, t, LED_Timer);
+    struct rtl8192cd_priv *priv = pshare->priv;
     int led_on_time= LED_ON_TIME;
 
     if (!(priv->drv_state & DRV_STATE_OPEN))
@@ -501,10 +502,8 @@ void enable_sw_LED(struct rtl8192cd_priv *priv, int init)
     #endif
 
     if (init) {
-        init_timer(&priv->pshare->LED_Timer);
         #if defined(CONFIG_PCI_HCI)
-        priv->pshare->LED_Timer.data = (unsigned long) priv;
-        priv->pshare->LED_Timer.function = &LED_Interval_timeout;
+        timer_setup(&priv->pshare->LED_Timer, LED_Interval_timeout, 0);
         #elif defined(CONFIG_USB_HCI) || defined(CONFIG_SDIO_HCI)
         priv->pshare->LED_Timer.data = (unsigned long) &priv->pshare->LED_Timer_event;
         priv->pshare->LED_Timer.function = timer_event_timer_fn;
@@ -516,23 +515,21 @@ void enable_sw_LED(struct rtl8192cd_priv *priv, int init)
     }
 }
 
-#if defined(SUPPORT_UCFGING_LED) 
-void LED_Interval_timeout2(unsigned long task_priv)
+#if defined(SUPPORT_UCFGING_LED)
+void LED_Interval_timeout2(struct timer_list *t)
 {
 
 #ifdef RTLWIFINIC_GPIO_CONTROL
 		RTLWIFINIC_GPIO_write(5, LED_CFGING_Toggle);
-#endif		
-	mod_timer(&LED_TimerCFGING, jiffies + LED_UCFGING_TIME); 
-	LED_CFGING_Toggle = (LED_CFGING_Toggle + 1) % 2;		
+#endif
+	mod_timer(&LED_TimerCFGING, jiffies + LED_UCFGING_TIME);
+	LED_CFGING_Toggle = (LED_CFGING_Toggle + 1) % 2;
 }
 
 void StartCFGINGTimer(void )
 {
-	
-	init_timer(&LED_TimerCFGING);
-	LED_TimerCFGING.data = 0;
-	LED_TimerCFGING.function = &LED_Interval_timeout2;
+
+	timer_setup(&LED_TimerCFGING, LED_Interval_timeout2, 0);
 	LED_CFGING_Interval = LED_UCFGING_TIME;
 	LED_CFGING_Toggle = 0;
 	LED_CFGING_ToggleStart = LED_OFF;
@@ -554,7 +551,7 @@ void disable_sw_LED(struct rtl8192cd_priv *priv)
         set_sw_LED2(priv, LED_OFF);
     }
     if (timer_pending(&priv->pshare->LED_Timer))
-        del_timer_sync(&priv->pshare->LED_Timer);
+        timer_delete_sync(&priv->pshare->LED_Timer);
 }
 
 
@@ -698,7 +695,7 @@ void set_wireless_LED_steady_on(int led_num, struct net_device *dev)
 	}
 	else if ((LED_TYPE >= LEDTYPE_SW_LINK_TXRX) && (LED_TYPE < LEDTYPE_SW_MAX)) {
 		if (timer_pending(&priv->pshare->LED_Timer))
-			del_timer_sync(&priv->pshare->LED_Timer);
+			timer_delete_sync(&priv->pshare->LED_Timer);
 	}
 
 	if (led_num == LED_0)

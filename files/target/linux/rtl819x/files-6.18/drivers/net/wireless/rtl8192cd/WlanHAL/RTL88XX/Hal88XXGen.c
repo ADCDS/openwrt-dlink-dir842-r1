@@ -5593,7 +5593,7 @@ InitHCIDMAMem88XX(
 	unsigned int dma_len = DESC_DMA_PAGE_SIZE_MAX_HAL_IF(Adapter);
 
 	if (HAL_IS_PCIBIOS_TYPE(Adapter)) {
-		page_ptr = pci_alloc_consistent(Adapter->pshare->pdev, dma_len, &ring_dma_addr);
+		page_ptr = dma_alloc_coherent(&Adapter->pshare->pdev->dev, dma_len, &ring_dma_addr, GFP_KERNEL); /* 6.18 port: pci_alloc_consistent() removed */
 		if (NULL == page_ptr) {
 			RT_TRACE_F( COMP_INIT, DBG_SERIOUS, ("Allocate HAL Memory-TX Failed\n") );
 			return RT_STATUS_FAILURE;
@@ -5836,7 +5836,7 @@ StopHCIDMASW88XX(
 
 		u4Byte page_align_phy = (HAL_PAGE_SIZE - (((u4Byte)_GET_HAL_DATA(Adapter)->alloc_dma_buf) & (HAL_PAGE_SIZE - 1)));
 
-		pci_free_consistent(Adapter->pshare->pdev, dma_len, (void*)_GET_HAL_DATA(Adapter)->alloc_dma_buf,
+		dma_free_coherent(&Adapter->pshare->pdev->dev, dma_len, (void*)_GET_HAL_DATA(Adapter)->alloc_dma_buf, /* 6.18 port: pci_free_consistent() removed */
 							(dma_addr_t)((_GET_HAL_DATA(Adapter)->ring_dma_addr) - page_align_phy));
 	}
 #endif

@@ -9316,7 +9316,7 @@ int APmacTestFunction_8814(struct rtl8192cd_priv *priv, unsigned char *data)
 					
 				}
 				//stop issue VO pkt
-				del_timer(&tickfn);
+				timer_delete(&tickfn);
 				
 				if(Q_empty)
 				{
@@ -9360,7 +9360,7 @@ int APmacTestFunction_8814(struct rtl8192cd_priv *priv, unsigned char *data)
 					printk("[FAIL] VO pkt go to S0/S1 when S0/S1 is empty.\n");
 					RTL_W16(0x42A,0x1010);
 				}
-				del_timer(&tickfn);
+				timer_delete(&tickfn);
 				//cancel MACID sleep bit
 				for(count_i = 1; count_i < 9; count_i++) 
 					GET_HAL_INTERFACE(priv)->SetMACIDSleepHandler(priv,0,count_i);
@@ -9377,7 +9377,7 @@ int APmacTestFunction_8814(struct rtl8192cd_priv *priv, unsigned char *data)
 				for(count_i = 1; count_i < 9; count_i++)
             		issue_Test_NullData(priv,count_i,BE_QUEUE,0);  
 				
-				//³]©wª½±µdrop, check sniffer
+				//ï¿½]ï¿½wï¿½ï¿½ï¿½ï¿½drop, check sniffer
 				RTL_W16(0x4E4, RTL_R16(0x4E4) | BIT(1));
 				issue_Test_NullData(priv,1,VO_QUEUE,0); 
 				//sniffer will not see any pkt due to pkts are droped.
@@ -11901,83 +11901,83 @@ int dynamic_RF_pwr_adj(struct rtl8192cd_priv *priv, unsigned char *data)
 void reset_nop_channel(struct rtl8192cd_priv *priv)
 {
 	if (timer_pending(&priv->ch52_timer)) {
-		del_timer_sync(&priv->ch52_timer);
-		rtl8192cd_ch52_timer(priv);
+		timer_delete_sync(&priv->ch52_timer);
+		rtl8192cd_ch52_timer(&priv->ch52_timer);
 	}
 
 	if (timer_pending(&priv->ch56_timer)) {
-		del_timer_sync(&priv->ch56_timer);
-		rtl8192cd_ch56_timer(priv);
+		timer_delete_sync(&priv->ch56_timer);
+		rtl8192cd_ch56_timer(&priv->ch56_timer);
 	}
 
 	if (timer_pending(&priv->ch60_timer)) {
-		del_timer_sync(&priv->ch60_timer);
-		rtl8192cd_ch60_timer(priv);
+		timer_delete_sync(&priv->ch60_timer);
+		rtl8192cd_ch60_timer(&priv->ch60_timer);
 	}
 
 	if (timer_pending(&priv->ch64_timer)) {
-		del_timer_sync(&priv->ch64_timer);
-		rtl8192cd_ch64_timer(priv);
+		timer_delete_sync(&priv->ch64_timer);
+		rtl8192cd_ch64_timer(&priv->ch64_timer);
 	}
 
 	if (timer_pending(&priv->ch100_timer)) {
-		del_timer_sync(&priv->ch100_timer);
-		rtl8192cd_ch100_timer(priv);
+		timer_delete_sync(&priv->ch100_timer);
+		rtl8192cd_ch100_timer(&priv->ch100_timer);
 	}
 
 	if (timer_pending(&priv->ch104_timer)) {
-		del_timer_sync(&priv->ch104_timer);
-		rtl8192cd_ch104_timer(priv);
+		timer_delete_sync(&priv->ch104_timer);
+		rtl8192cd_ch104_timer(&priv->ch104_timer);
 	}
 
 	if (timer_pending(&priv->ch108_timer)) {
-		del_timer_sync(&priv->ch108_timer);
-		rtl8192cd_ch108_timer(priv);
+		timer_delete_sync(&priv->ch108_timer);
+		rtl8192cd_ch108_timer(&priv->ch108_timer);
 	}
 
 	if (timer_pending(&priv->ch112_timer)) {
-		del_timer_sync(&priv->ch112_timer);
-		rtl8192cd_ch112_timer(priv);
+		timer_delete_sync(&priv->ch112_timer);
+		rtl8192cd_ch112_timer(&priv->ch112_timer);
 	}
 
 	if (timer_pending(&priv->ch116_timer)) {
-		del_timer_sync(&priv->ch116_timer);
-		rtl8192cd_ch116_timer(priv);
+		timer_delete_sync(&priv->ch116_timer);
+		rtl8192cd_ch116_timer(&priv->ch116_timer);
 	}
 
 	if (timer_pending(&priv->ch120_timer)) {
-		del_timer_sync(&priv->ch120_timer);
-		rtl8192cd_ch120_timer(priv);
+		timer_delete_sync(&priv->ch120_timer);
+		rtl8192cd_ch120_timer(&priv->ch120_timer);
 	}
 
 	if (timer_pending(&priv->ch124_timer)) {
-		del_timer_sync(&priv->ch124_timer);
-		rtl8192cd_ch124_timer(priv);
+		timer_delete_sync(&priv->ch124_timer);
+		rtl8192cd_ch124_timer(&priv->ch124_timer);
 	}
 
 	if (timer_pending(&priv->ch128_timer)) {
-		del_timer_sync(&priv->ch128_timer);
-		rtl8192cd_ch128_timer(priv);
+		timer_delete_sync(&priv->ch128_timer);
+		rtl8192cd_ch128_timer(&priv->ch128_timer);
 	}
 
 	if (timer_pending(&priv->ch132_timer)) {
-		del_timer_sync(&priv->ch132_timer);
-		rtl8192cd_ch132_timer(priv);
+		timer_delete_sync(&priv->ch132_timer);
+		rtl8192cd_ch132_timer(&priv->ch132_timer);
 	}
 
 	if (timer_pending(&priv->ch136_timer)) {
-		del_timer_sync(&priv->ch136_timer);
-		rtl8192cd_ch136_timer(priv);
+		timer_delete_sync(&priv->ch136_timer);
+		rtl8192cd_ch136_timer(&priv->ch136_timer);
 	}
 
 	if (timer_pending(&priv->ch140_timer)) {
-		del_timer_sync(&priv->ch140_timer);
-		rtl8192cd_ch140_timer(priv);
+		timer_delete_sync(&priv->ch140_timer);
+		rtl8192cd_ch140_timer(&priv->ch140_timer);
 	}
 
 	if (timer_pending(&priv->ch144_timer)) {
-		del_timer_sync(&priv->ch144_timer);
-		rtl8192cd_ch144_timer(priv);
+		timer_delete_sync(&priv->ch144_timer);
+		rtl8192cd_ch144_timer(&priv->ch144_timer);
 	}
 }
 #endif
@@ -12698,7 +12698,9 @@ int rtl8192cd_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 #ifdef __OSK__
 #define VERIFY_WRITE 1
 #endif
-			ret = access_ok(VERIFY_WRITE, (const void *)wrq->u.data.pointer, sizeof(privtab));
+			/* 6.18 port: access_ok() dropped its type argument in 5.0 (all
+			 * checks are effectively VERIFY_WRITE now). */
+			ret = access_ok((const void *)wrq->u.data.pointer, sizeof(privtab));
 			if (!ret) {
 				ret = -EFAULT;
 				DEBUG_ERR("user space valid check error!\n");

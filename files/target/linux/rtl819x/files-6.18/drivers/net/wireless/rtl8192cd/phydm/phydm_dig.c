@@ -1855,6 +1855,43 @@ phydm_lna_sat_chk_callback(
 	phydm_lna_sat_chk(pDM_Odm);
 }
 
+
+/*
+ * ★ TIMER-CALLBACK ABI TRAMPOLINE -- see phydm_interface.c's ODM_InitializeTimer().
+ *
+ * On 4.14 the ODM_AP branch of ODM_InitializeTimer() did `pTimer->function =
+ * CallBackFunc; pTimer->data = (unsigned long)pDM_Odm;`, so every phydm timer
+ * callback was handed the ODM structure itself (the `pContext` argument was
+ * ignored outright on the AP path, and every AP caller passes NULL for it).
+ *
+ * 6.18's timer_setup() has no `.data`, so the port casts the callback to
+ * `void (*)(struct timer_list *)`. The cast silences the compiler but does not
+ * change what the callee does: each of these callbacks starts with
+ * `PDM_ODM_T pDM_Odm = (PDM_ODM_T)pDM_VOID;` and then dereferences ODM fields.
+ * It would therefore receive a `struct timer_list *` and read/write ODM members
+ * at wild offsets past a ~40-byte timer object -- silent adjacent-memory
+ * corruption rather than a clean oops, which is why it does not fault
+ * immediately.
+ *
+ * Recover the real ODM pointer with timer_container_of() and hand the callback
+ * exactly what it expects.
+ */
+static void phydm_lna_sat_chk_timer_fn(struct timer_list *t)
+{
+	PDM_ODM_T pDM_Odm = timer_container_of(pDM_Odm, t,
+			DM_LNA_SAT_INFO.phydm_lna_sat_chk_timer);
+
+	phydm_lna_sat_chk_callback(pDM_Odm);
+}
+
+static void phydm_tdma_dig_timer_fn(struct timer_list *t)
+{
+	PDM_ODM_T pDM_Odm = timer_container_of(pDM_Odm, t,
+			DM_DigTable.phydm_tdma_dig_timer);
+
+	phydm_tdma_dig_call_back(pDM_Odm);
+}
+
 void
 phydm_lna_sat_chk_timers(
 	IN		PVOID		pDM_VOID,
@@ -1866,7 +1903,7 @@ phydm_lna_sat_chk_timers(
 
 	if (state == INIT_LNA_SAT_CHK_TIMMER) {
 		ODM_InitializeTimer(pDM_Odm, &(pDM_LNA_info->phydm_lna_sat_chk_timer),
-			(RT_TIMER_CALL_BACK)phydm_lna_sat_chk_callback, NULL, "phydm_lna_sat_chk_timer");
+			(RT_TIMER_CALL_BACK)phydm_lna_sat_chk_timer_fn, NULL, "phydm_lna_sat_chk_timer");
 	} else if (state == CANCEL_LNA_SAT_CHK_TIMMER) {
 		ODM_CancelTimer(pDM_Odm, &(pDM_LNA_info->phydm_lna_sat_chk_timer));
 	} else if (state == RELEASE_LNA_SAT_CHK_TIMMER) {
@@ -2080,7 +2117,7 @@ phydm_tdma_dig_timers(
 	{
 		if (state == INIT_TDMA_DIG_TIMMER) {
 			ODM_InitializeTimer(pDM_Odm, &(pDM_DigTable->phydm_tdma_dig_timer),
-				(RT_TIMER_CALL_BACK)phydm_tdma_dig_call_back, NULL, "phydm_tdma_dig_timer");
+				(RT_TIMER_CALL_BACK)phydm_tdma_dig_timer_fn, NULL, "phydm_tdma_dig_timer");
 		} else if (state == CANCEL_TDMA_DIG_TIMMER) {
 			ODM_CancelTimer(pDM_Odm, &(pDM_DigTable->phydm_tdma_dig_timer));
 		} else if (state == RELEASE_TDMA_DIG_TIMMER) {

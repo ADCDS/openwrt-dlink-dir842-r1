@@ -40,6 +40,18 @@
     #define _FALSE              0
 #endif
 
+/* 6.18 port: pull in the kernel's own BIT() (an unsigned-long shift, safe up
+ * to bit 63) before the #ifndef guard below, so it always wins over this
+ * file's narrower int-based fallback. Without this, whichever of the two
+ * headers happens to be included first for a given .c file wins the race --
+ * and when this vendor macro wins, it silently corrupts BIT() for every
+ * *kernel* header included afterwards in the same translation unit (real
+ * failure seen: a static_assert deep in <linux/mm_types.h> tripped because
+ * MMF_INIT_LEGACY_MASK's own BIT()-based computation picked up this file's
+ * 32-bit `1 << x` instead of the kernel's `UL(1) << nr`). */
+#ifdef __KERNEL__
+#include <linux/bits.h>
+#endif
 #ifndef BIT
 #define BIT(x)		(1 << (x))
 #endif

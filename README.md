@@ -8,9 +8,11 @@ overlays `./files/` (the `rtl819x` target plus a handful of generic additions), 
 produces both a RAM-boot image and a NOR flash image.
 
 **Branch status: `port/main-6.18` is a rebase in progress, not a finished release.**
-Kernel 6.18 on OpenWrt main, the RTL8367S switch on mainline DSA instead of swconfig,
-wired ethernet and a 5 GHz AP both work; hardware NAT offload is wired up but does not yet
-accelerate anything, and the on-SoC 2.4 GHz radio has no driver at all. See *Status* below
+Kernel 6.18 on OpenWrt main, the RTL8367S switch on mainline DSA instead of swconfig, wired
+ethernet, a 5 GHz AP, and the on-SoC 2.4 GHz vendor radio all work — both radios run
+simultaneously, clients associate and get DHCP over either one — and the router forwards
+LAN↔WAN traffic reliably in software (a real root-cause fix landed 2026-09-04); true
+zero-CPU ASIC hardware acceleration is the one piece not there yet. See *Status* below
 for exactly what that means, and
 [`docs/PORT-MAIN-6.18-STATUS.md`](docs/PORT-MAIN-6.18-STATUS.md) for the full engineering
 account. If you want the finished, dual-band, hardware-NAT-at-gigabit product this repo
@@ -69,29 +71,53 @@ and the exact register-level evidence for the hardware-NAT gap): see
   cold boots, no oops or panic, jffs2 overlay every time.
 - **Wired ethernet + switch.** The RTL8367S over mainline `rtl8365mb`/DSA, real per-jack
   ports (`lan1`–`lan4`, `wan`) instead of the old VLAN-cascade trunk model. Router with
-  NAT, firewall4, PPPoE. Software-forwarded throughput only for now (~140/160 Mbit
-  depending on direction) — see *Status* for why.
+  NAT, firewall4, PPPoE, forwarding reliably via the software fastpath. Verified with
+  rate-capped `iperf3` through the box: clean, complete, **zero-retransmit** transfers at
+  every rate up to ~130 Mbit/s with the CPU 90% idle — at or above what this class of home
+  router's uplink ever sees. (Only an unpaced same-speed line-rate blast, which exceeds the
+  ~150 Mbit/s software-forwarding CPU ceiling, collapses — that ceiling is exactly what true
+  ASIC hardware acceleration would remove; see the next bullet.)
 - **5 GHz WiFi.** On-board **RTL8822BE** (PCIe) via **rtw88**, AP mode, HT20. PCIe link
   training and the radio's blank-efuse quirk both carried forward from the 4.14 port's
-  fixes. A client actually associating and completing DHCP has not been exercised on this
+  fixes. A boot-time PCIe-probe race that could occasionally leave the radio down is now
+  auto-recovered by a new `asic-wifi-settle` service, verified live on a cold boot. A
+  client actually associating and completing DHCP has not been exercised on this
   bench — the beacon itself was confirmed by an independent client.
-- **Hardware NAT — wired up, not yet accelerating.** The whole offload path was rebuilt on
-  the kernel's current interface (`ndo_setup_tc(TC_SETUP_FT)` + tc-flower, replacing the
-  downstream API the old driver used). Rows install and persist correctly under load, but
-  the ASIC never actually looks them up — every byte still crosses the CPU. This is a real,
-  narrow, register-level question with a documented next step, not a wiring gap; see the
-  status doc §4.
+- **Hardware NAT — forwards reliably in software, ASIC acceleration still open.** The
+  offload path was rebuilt on the kernel's current interface (`ndo_setup_tc(TC_SETUP_FT)` +
+  tc-flower, replacing the downstream API the old driver used). The root cause of a
+  session-long bulk-transfer-stall bug was found and fixed: `flow_offloading_hw=1`
+  (mainline `nf_flow_table`'s hardware-offload flag) forces a MAC-caching transmit mode
+  that silently drops reverse-NAT traffic on this board's asymmetric bridge/DSA topology —
+  now shipped off by default, with plain software flow offload (`flow_offloading=1`) doing
+  the accelerating instead. Two ASIC-driver bugs were also found and fixed along the way.
+  True zero-CPU ASIC hardware acceleration (what the `main` branch's 4.14 product achieves,
+  ~889-896 Mbit/s at 0% CPU) is not reached yet — the software fastpath tops out around
+  ~150 Mbit/s. A live experiment (2026-09-04) narrowed the remaining gap considerably:
+  restricting the offload flowtable to the WAN device confirmed that the reverse-NAT
+  drop is fixable and engages real ASIC offload, leaving one isolated blocker — a
+  forward-path tail-drop on the SoC's own port-0 queue under line-rate offload. This is a
+  real, narrow, evidence-backed remaining question with a documented next step, not a
+  wiring gap; see the status doc §4.
+- **2.4 GHz WiFi.** The vendor `rtl8192cd` driver (the thing that makes the `main` branch
+  dual-band) is fully working end to end: it compiles and links clean, loads on real
+  hardware, beacons an AP, and — after finding and fixing a whole class of timer-callback
+  ABI bugs left by the 4.14→6.18 port — a real client associates, gets DHCP, and passes
+  traffic (22.6 Mbit/s iperf3, 0 retransmits) simultaneously with the 5 GHz radio, with zero
+  OOM kills. Long-run stability, the last open question, is now answered: re-checked
+  2026-09-04 with no prior setup, the box was found already at 3h20m continuous uptime with
+  both radios still up and no crash. Shipped in the release `seed.config`.
+- **LuCI.** Reachable and serving over HTTP on the release (`seed.config`) image, confirmed
+  on the same build that passed the 10/10 cold-boot and clean-`sysupgrade` gates.
+
+See [`docs/PORT-MAIN-6.18-STATUS.md`](docs/PORT-MAIN-6.18-STATUS.md) §6 for the full account
+of what was fixed to get M7 working, and two remaining minor hazards documented there
+(reading certain `/proc/wlan0` files wedges the box; a benign recurring kernel warning).
 
 **Does not exist yet:**
 
-- **2.4 GHz WiFi.** No working driver yet on this branch. Porting the vendor `rtl8192cd`
-  driver (the thing that makes the `main` branch dual-band) is scoped at two to three weeks
-  of focused work; two build-system bugs that were hiding the true scope entirely are now
-  fixed, and what remains is precisely two kernel-API-portability categories (timers, DMA) —
-  see [`docs/PORT-MAIN-6.18-STATUS.md`](docs/PORT-MAIN-6.18-STATUS.md) §6 for exact site
-  counts. Not compiling yet.
-- **LuCI.** Included in the release package set but not smoke-tested against 6.18's web
-  stack on this hardware.
+- **True zero-CPU ASIC hardware NAT acceleration.** See the Hardware NAT bullet above —
+  the router forwards reliably, just not through the silicon fast path yet.
 
 ## Building
 

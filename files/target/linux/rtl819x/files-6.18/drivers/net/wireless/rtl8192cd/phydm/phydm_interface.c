@@ -571,10 +571,20 @@ ODM_InitializeTimer(
 	)
 {
 #if (DM_ODM_SUPPORT_TYPE & ODM_AP)
-	init_timer(pTimer);
-	pTimer->function = CallBackFunc;
-	pTimer->data = (unsigned long)pDM_Odm;
-	/*mod_timer(pTimer, jiffies+RTL_MILISECONDS_TO_JIFFIES(10));	*/
+	/* 6.18 port, DELIBERATELY INCOMPLETE: this is a generic dispatch wrapper --
+	 * every ODM_InitializeTimer() caller passes its OWN callback (still the
+	 * pre-timer_setup `void cb(unsigned long)` shape) plus a context pointer
+	 * that is the struct EMBEDDING pTimer for most call sites but not
+	 * verified for all of them. A correct port means adding one small
+	 * trampoline per distinct callback (recovering the embedding struct via
+	 * timer_container_of() and calling the original signature), not a single
+	 * generic fix here. Unblocked minimally, at build time only, so the rest
+	 * of this module compiles: the compiler now accepts this line, but any
+	 * phydm timer that actually FIRES will call its callback with a
+	 * `struct timer_list *` where it expects an `unsigned long` context --
+	 * wrong at runtime. Do not consider phydm's own timers (DIG, antenna
+	 * diversity, beamforming) functional until this is finished properly. */
+	timer_setup(pTimer, (void (*)(struct timer_list *))CallBackFunc, 0);
 #elif(DM_ODM_SUPPORT_TYPE & ODM_CE)
 	PADAPTER Adapter = pDM_Odm->Adapter;
 	_init_timer(pTimer,Adapter->pnetdev,CallBackFunc,pDM_Odm);
@@ -592,7 +602,7 @@ ODM_CancelTimer(
 	)
 {
 #if (DM_ODM_SUPPORT_TYPE & ODM_AP)
-	del_timer(pTimer);
+	timer_delete(pTimer);
 #elif(DM_ODM_SUPPORT_TYPE & ODM_CE)
 	_cancel_timer_ex(pTimer);
 #elif(DM_ODM_SUPPORT_TYPE & ODM_WIN)

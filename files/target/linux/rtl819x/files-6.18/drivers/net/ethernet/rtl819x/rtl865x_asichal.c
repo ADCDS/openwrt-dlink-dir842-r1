@@ -209,6 +209,15 @@ module_param(wan_route_mode, int, 0644);
 MODULE_PARM_DESC(wan_route_mode,
 		 "SWTCR0 WANRouteMode bits[4:3]: 0=Forward (default, known-good), 1=ToCpu (R6 candidate), 2=Drop. Re-run `cat /proc/rtl865x_gw` to apply.");
 
+static int vid0_netif;
+module_param(vid0_netif, int, 0644);
+MODULE_PARM_DESC(vid0_netif,
+		 "M5 probe: install netif[2] as a copy of the LAN netif but with vid=0, so a"
+		 " VLAN-0 ingress (rtl8365mb leaves the trunk untagged/PVID-less under DSA,"
+		 " vs 4.14's 802.1Q trunk) still resolves a netif and can reach L3. 0=off"
+		 " (default). Re-run `cat /proc/rtl865x_gw` to apply; PROBE ONLY -- if WAN"
+		 " ingress also lands in VLAN 0 this will misclassify it as LAN.");
+
 #define EN_STOP_TLU		(1 << 18)		/* SWTCR0: freeze lookup */
 #define STOP_TLU_READY		(1 << 19)		/* SWTCR0: freeze acked */
 #define ASIC_L3_ENGINE_CFG	(RTL819X_SWCORE_BASE + 0x4234)
@@ -255,6 +264,39 @@ int rtl865x_asic_l3_engine_enable(void)
 	return 0;
 }
 
+/* ---- cross-kernel ASIC-touch trace (diagnostic, purely additive) ----
+ * Every rtl865x_asic_write_entry()/read_entry() call, logged to an in-memory
+ * ring buffer (NOT printk -- the point is to observe timing/frequency without
+ * perturbing it over a 38400-baud console). Dumped on demand via
+ * /proc/rtl865x_trace. Built identically into the working 4.14 driver so the
+ * two traces can be diffed directly for the same test scenario. */
+#define ASIC_TRACE_SIZE 4096
+struct asic_trace_entry {
+	u32 jiffies;
+	u32 w0;		/* write: first word written; read: first word read back */
+	u16 idx;
+	u8  type;
+	u8  op;		/* 0=write 1=read */
+	u8  rc;		/* 0 = ok, else -errno truncated to u8 */
+	u8  poll;	/* EN_STOP_TLU wait-loop iterations this call took, saturated */
+};
+static struct asic_trace_entry asic_trace[ASIC_TRACE_SIZE];
+static atomic_t asic_trace_head = ATOMIC_INIT(0);
+
+static void asic_trace_add(u8 op, u32 type, u32 idx, u32 w0, int rc, u32 poll)
+{
+	unsigned int i = (unsigned int)atomic_inc_return(&asic_trace_head) - 1;
+	struct asic_trace_entry *e = &asic_trace[i % ASIC_TRACE_SIZE];
+
+	e->jiffies = jiffies;
+	e->w0 = w0;
+	e->idx = idx;
+	e->type = type;
+	e->op = op;
+	e->rc = (u8)(-rc);
+	e->poll = poll > 255 ? 255 : poll;
+}
+
 int rtl865x_asic_write_entry(u32 type, u32 idx, const void *entry, bool force)
 {
 	const u32 *w = entry;
@@ -287,6 +329,7 @@ int rtl865x_asic_write_entry(u32 type, u32 idx, const void *entry, bool force)
 		rc = -EIO;
 out:
 	REG32(SWTCR0) &= ~EN_STOP_TLU;
+	asic_trace_add(0, type, idx, w[0], rc, g);
 	return rc;
 }
 
@@ -407,12 +450,38 @@ static const u8 GW_MAC_WAN[6] = { 0x00,0xe0,0x4c,0x81,0x96,0xc3 };
  * userspace configures — including a MAC derived from flash by board.d — automatically
  * becomes the ASIC's netif MAC, keeping the two consistent by construction.
  */
-/* Last-known-good live MACs. ★ Load-bearing: `ifdown wan` DESTROYS eth0.1 (netifd
- * removes the VLAN netdev), so a gw_prog that runs while the WAN is down must NOT
- * fall back to the compile-time constant — that programs netif[1] with a MAC the
- * ASIC then compares reverse-direction frames against, and every WAN->LAN reply
- * misses classification and traps to the CPU (~500 Mbit hybrid instead of ~895).
- * The constant is only for the first boot, before the netdev has ever existed. */
+/* Last-known-good live MACs. ★ Load-bearing: gw_netif_mac() re-reads the LIVE
+ * "wan" / "br-lan" netdev MAC every time gw_prog() runs, so it always matches
+ * whatever userspace (including the flash-derived per-unit MAC board.d sets)
+ * actually assigned.
+ *
+ * Historical note, corrected 2026-09-03 (M5 reason-8 investigation): this
+ * comment used to warn that `ifdown wan` DESTROYS eth0.1 (netifd removing the
+ * VLAN subinterface netdev) — true of the 4.14/swconfig VLAN-cascade model
+ * this code was written against, where "eth0.1"/"eth0.2" were real 802.1q
+ * subinterfaces of one RGMII trunk. Under this port's DSA model there is no
+ * such netdev: "wan" and "br-lan" are persistent netdevs owned by the DSA
+ * switch driver / netifd's bridge setup and are never destroyed by `ifdown`.
+ * Which meant `gw_netif_mac("eth0.1"/"eth0.2", ...)` (the names this code
+ * used until this fix) returned NULL from dev_get_by_name() on literally
+ * every call, on every boot — not a boot-order race, a permanent miss — so
+ * the shadow below was never populated and the ASIC's netif[0]/[1] GMAC
+ * field stayed pinned at the GW_MAC_LAN/GW_MAC_WAN compile-time placeholder
+ * forever. The ASIC's DMAC==GMAC gate then failed for essentially every real
+ * LAN/WAN frame (whose DMAC is the box's real MAC, never the placeholder),
+ * which is the root cause of the M5 hwnat "src=19(RP) dst=19(RP) reason=8"
+ * classification failure — see docs/PORT-MAIN-6.18-STATUS.md §4 and the
+ * decoded MAC comparison in /proc/rtl865x_classify (classify_show(), below).
+ * Fixed by pointing gw_netif_mac() at the netdevs that actually exist on
+ * this port ("wan", "br-lan"); the resync/fallback logic itself was already
+ * correct and needed no change. The shadow is still load-bearing for the
+ * remaining real race: dev_get_by_name() can still return NULL very early in
+ * boot, before netifd has assigned the flash MAC to the device, and a
+ * gw_prog that runs in that window must NOT fall back to the compile-time
+ * constant — that programs netif[0]/[1] with a MAC the ASIC then compares
+ * every real frame against, and every LAN/WAN frame misses the DMAC==GMAC
+ * gate. The constant is only for the very first read, before either netdev
+ * has ever existed. */
 static u8 gw_wan_ifmac_shadow[ETH_ALEN];
 static u8 gw_lan_ifmac_shadow[ETH_ALEN];
 
@@ -431,6 +500,23 @@ static void gw_netif_mac(const char *ifname, const u8 *fallback, u8 *shadow,
 	}
 	if (dev)
 		dev_put(dev);
+}
+
+/* R7 / M5 reason-8 investigation: decode the ASIC netif's packed 48-bit GMAC
+ * (mac47_19 << 19 | mac18_0, see struct asic_netif's field comment) back into
+ * a plain MAC — the exact inverse of the mac_hi/mac_lo packing in
+ * gw_wan_netif_prog_locked() and gw_prog()'s LAN netif block above. Used only
+ * by the read-only /proc/rtl865x_classify diagnostic (classify_show(),
+ * below) to compare the ASIC's live programmed GMAC against the Linux
+ * netdev's real MAC — no ASIC access, no side effect. */
+static void gw_netif_mac_decode(u32 mac_hi, u32 mac_lo, u8 mac[ETH_ALEN])
+{
+	mac[0] = (mac_hi >> 21) & 0xff;
+	mac[1] = (mac_hi >> 13) & 0xff;
+	mac[2] = (mac_hi >> 5) & 0xff;
+	mac[3] = ((mac_hi & 0x1f) << 3) | ((mac_lo >> 16) & 0x7);
+	mac[4] = (mac_lo >> 8) & 0xff;
+	mac[5] = mac_lo & 0xff;
 }
 
 static __maybe_unused void gw_set_pvid(u32 port, u32 pvid)
@@ -582,10 +668,18 @@ struct asic_extintip {
 
 /* The NAPT outbound-index hash — vendor rtl8651_naptTcpUdpTableIndex HASH1
  * (sdk-ref/rtl865x_asicL4.c:160-163), ported VERBATIM: a 10-way XOR fold of
- * {dip,dport,isTCP,sip,sport} to a 10-bit index. With SWTCR1 EnL4WayH=0 the
- * NAPT table is 1024 flat 1-way rows and this value IS the exact write index.
- * (The reverse direction needs no hash: the inbound row lives at
- * globalPort & 0x3ff, which the globalPort itself encodes via offset<<10.) */
+ * {dip,dport,isTCP,sip,sport} to a 10-bit index. This value IS the exact write
+ * index — rows are addressed FLAT 0..1023 REGARDLESS of SWTCR1 EnL4WayH (which
+ * this driver DOES set, via 0x2200): the vendor never transforms the index for
+ * 4-way, it only searches more ways on LOOKUP. See the authoritative note at
+ * rtl865x_asichal.h:33-38 and the SWTCR1 write at ~line 1562. Inputs are NUMERIC
+ * host-order (proven from the stock disasm, docs/HWNAT-OFFLOAD.md §4), NOT
+ * network-order — ignore any lingering "network order" comment on the callers.
+ * (Reverse direction needs no hash: the inbound row lives at globalPort & 0x3ff.)
+ * ⚠ This hash is byte-for-byte identical to the WORKING 4.14 driver and the ASIC
+ * has been observed matching a driver-installed row at this exact index on real
+ * silicon (hwFwd=1 reason=0000). It is NOT the cause of reason=7 — do not re-audit
+ * it; reason=7 is an aging/teardown artifact (docs/PORT-MAIN-6.18-STATUS.md §4). */
 u32 gw_napt_hash1(u32 isTCP, u32 sip, u32 sport, u32 dip, u32 dport)
 {
 	return ((sport & 0x3ff)
@@ -766,7 +860,7 @@ static void gw_wan_netif_prog_locked(void)
 	u8 mac[ETH_ALEN];
 
 	memset(&nif, 0, sizeof(nif));
-	gw_netif_mac("eth0.1", GW_MAC_WAN, gw_wan_ifmac_shadow, mac);	/* R3: per-unit MAC if userspace set one */
+	gw_netif_mac("wan", GW_MAC_WAN, gw_wan_ifmac_shadow, mac);	/* R3: per-unit MAC if userspace set one */
 	mac_hi = (mac[0] << 21) | (mac[1] << 13) | (mac[2] << 5) | (mac[3] >> 3);
 	mac_lo = ((mac[3] & 0x7) << 16) | (mac[4] << 8) | mac[5];
 	nif.valid = 1; nif.vid = GW_VID_WAN; nif.mac18_0 = mac_lo; nif.mac47_19 = mac_hi;
@@ -858,17 +952,30 @@ int rtl865x_wan_set_nexthop(const u8 *gw_mac, bool is_pppoe, u16 pppoe_sid)
 	return 1;
 }
 
-/* Heal netif[1] <-> live-eth0.1 MAC divergence. The nexthop/extIP shadows are
- * resynced per flow, but nothing re-derived the WAN NETIF MAC after the netdev was
- * destroyed and recreated (ifdown/ifup, netifd reload) — if a gw_prog ran in the
- * down-window, netif[1] kept a wrong MAC and reverse-direction frames missed
- * classification forever (measured: ~508 Mbit at ~80% CPU, cured only by a manual
- * gw_prog). Shadow-compared: 0 = in sync (or no netdev to compare against),
- * 1 = reprogrammed (caller must flush per-flow rows — they were installed under
- * the stale identity). Caller holds rtl865x_hal_lock. */
+/* Heal netif[1] <-> live-"wan" MAC divergence. The nexthop/extIP shadows are
+ * resynced per flow, but nothing else re-derives the WAN NETIF MAC on its own
+ * if the live MAC changes after boot.
+ *
+ * Historical note, corrected 2026-09-03: this was written against the
+ * 4.14/swconfig model, where `ifdown wan` genuinely destroyed the eth0.1 VLAN
+ * subinterface netdev and recreated it on `ifup` — a gw_prog that ran in that
+ * down-window left netif[1] on a stale MAC and every reverse-direction frame
+ * missed classification forever there (measured: ~508 Mbit at ~80% CPU, cured
+ * only by a manual gw_prog). Under this port's DSA model "wan" is a
+ * persistent netdev dev_get_by_name() never loses that way — but this port
+ * had its own, worse version of the same failure mode: the name this
+ * function looked up ("eth0.1") never existed under DSA at all, so `dev` was
+ * always NULL, this always returned 0, and it never healed anything —
+ * silently leaving netif[1] pinned on the GW_MAC_WAN compile-time constant
+ * forever (see gw_netif_mac()'s header comment and the M5 hwnat reason-8
+ * investigation, docs/PORT-MAIN-6.18-STATUS.md §4). Fixed by pointing this
+ * at the netdev that actually exists ("wan"); the resync logic itself was
+ * always correct. Shadow-compared: 0 = in sync (or no netdev to compare
+ * against), 1 = reprogrammed (caller must flush per-flow rows — they were
+ * installed under the stale identity). Caller holds rtl865x_hal_lock. */
 int rtl865x_wan_netif_mac_sync(void)
 {
-	struct net_device *dev = dev_get_by_name(&init_net, "eth0.1");
+	struct net_device *dev = dev_get_by_name(&init_net, "wan");
 	bool stale;
 
 	if (!dev)
@@ -879,7 +986,7 @@ int rtl865x_wan_netif_mac_sync(void)
 	if (!stale)
 		return 0;
 	gw_wan_netif_prog_locked();	/* re-reads the live MAC, updates the shadow */
-	pr_info("rtl865x gw: netif[1] MAC resynced to live eth0.1 (%pM)\n",
+	pr_info("rtl865x gw: netif[1] MAC resynced to live wan (%pM)\n",
 		gw_wan_ifmac_shadow);
 	return 1;
 }
@@ -1055,14 +1162,26 @@ static int gw_prog(struct seq_file *m, void *v)
 	 * the candidate was never actually tested. Bits[4:3] are cleared explicitly here so
 	 * the value is deliberate rather than inherited from the loader.
 	 *
+	 * ★ NOW ACTUALLY TESTED, 2026-09-04, and REFUTED as a fix for the LAN->WAN bulk
+	 * stall. Bench discipline as this comment requires: WAN static 172.16.0.1/24, peer
+	 * reachable, path warmed with 4 pings (0.87 ms, no ARP flush), box confirmed up
+	 * before and after. Baseline wan_route_mode=0: forwarded LAN->WAN iperf3 stalls.
+	 * Switched to 1 (ToCpu) and re-ran `cat /proc/rtl865x_gw` to apply: forwarded
+	 * LAN->WAN iperf3 STILL stalls, box still healthy (0.59 ms). So ToCpu neither kills
+	 * the WAN (the old confounded claim) nor fixes the stall — it is simply not the
+	 * lever for this symptom. Left at 0. See docs/PORT-MAIN-6.18-STATUS.md §4.
+	 *
 	 * Runtime-switchable so it can be A/B'd inside ONE boot (re-run `cat
 	 * /proc/rtl865x_gw` after changing it — that is what re-executes this write):
 	 *   echo 0 > /sys/module/rtl819x/parameters/wan_route_mode   # Forward (default)
 	 *   echo 1 > /sys/module/rtl819x/parameters/wan_route_mode   # ToCpu   (R6 candidate)
 	 * ⚠ Measure with the bench discipline: warm the path first and do NOT flush ARP
 	 * before pinging (confound #5), and confirm the box is actually up (confound #4).
-	 * The R6 signal is the eth0.1 rx_packets delta during a sustained inbound transfer:
-	 * ~0 = hardware reverse engaged, ~every packet = still CPU-trapped. */
+	 * The R6 signal is the "wan" netdev's rx_packets delta during a sustained
+	 * inbound transfer (this port's DSA WAN port netdev — the eth0.1 VLAN
+	 * subinterface this note originally named is the 4.14/swconfig model's
+	 * naming and does not exist here): ~0 = hardware reverse engaged, ~every
+	 * packet = still CPU-trapped. */
 	/* MultiPortModeP is SWTCR0[13:5] = {Ext3..Ext1, Port0..Port5}, "Internal(0) /
 	 * External(1)" per the vendor header. The old code ORed 0x3F in without ever
 	 * clearing the field, so it could only ever SET bits — ports 0-5 permanently
@@ -1171,7 +1290,7 @@ static int gw_prog(struct seq_file *m, void *v)
 	{	/* R3: per-unit MAC from the live LAN netif if userspace set one */
 		u8 lmac[ETH_ALEN];
 
-		gw_netif_mac("eth0.2", GW_MAC_LAN, gw_lan_ifmac_shadow, lmac);
+		gw_netif_mac("br-lan", GW_MAC_LAN, gw_lan_ifmac_shadow, lmac);
 		mac_hi = (lmac[0] << 21) | (lmac[1] << 13) | (lmac[2] << 5) | (lmac[3] >> 3);
 		mac_lo = ((lmac[3] & 0x7) << 16) | (lmac[4] << 8) | lmac[5];
 	}
@@ -1181,6 +1300,39 @@ static int gw_prog(struct seq_file *m, void *v)
 	nif.outACLStart = 253; nif.outACLEnd = 253;
 	rtl865x_asic_write_entry(ASIC_TYPE_NETIF, 0, &nif, true);
 	gw_wan_netif_prog_locked();	/* netif[1] = WAN; MTU pinned 1500 (stock parity — see gw_wan_netif_prog_locked) */
+
+	/* M5 PROBE (reason-8 / "L3 never runs" investigation): under swconfig the 8367S
+	 * 802.1Q-tagged the trunk (VID 1={4,6t} VID 2={0,1,2,3,6t}, ingress filtering on)
+	 * and the SoC read the real VID straight off the tag. rtl8365mb under DSA leaves
+	 * the VLAN 4K table empty and programs no PVID on any port -- the trunk is now
+	 * UNTAGGED, egress is transparent REAL_KEEP. If the CPU-tag ingress path does not
+	 * itself apply a PVID, frames land in VLAN 0, which has a VLAN-table row
+	 * (rtl819x-eth.c) but NO netif -- the net decision (VID -> netif) misses, there is
+	 * no netif to run the DMAC==GMAC/enableRoute/MTU gate against, and the ASIC
+	 * L2-forwards the frame to the CPU instead of entering L3. That is indistinguishable
+	 * from "src=RP dst=RP reason=8" on /proc/rtl865x_classify.
+	 * Indirect support: narrowing VLAN 0's member mask (refuted as a *fix* -- see
+	 * docs/PORT-MAIN-6.18-STATUS.md) broke LAN reachability specifically because
+	 * CPU-destined ingress traffic carrying VID 0 needed port 8 in that mask --
+	 * i.e. real production traffic really does arrive tagged VID 0.
+	 * This installs netif[2] as an exact copy of the LAN identity but vid=0, so a
+	 * VLAN-0 net decision resolves to a real (LAN) netif instead of missing. Default
+	 * off; toggle live with vid0_netif=1 then `cat /proc/rtl865x_gw` (re-warm after --
+	 * gw_prog wipes the L2 tables). The one measurement that settles it: does the
+	 * `reason` field on large (len~1500) l2Tr=1 pid_dump lines move off 8? */
+	if (vid0_netif) {
+		int wrc;
+
+		nif.vid = 0;
+		wrc = rtl865x_asic_write_entry(ASIC_TYPE_NETIF, 2, &nif, true);
+		nif.vid = GW_VID_LAN;
+		pr_err("rtl819x M5 probe: netif[2] vid=0 (LAN identity) write rc=%d\n", wrc);
+	} else {
+		struct asic_netif dead2;
+
+		memset(&dead2, 0, sizeof(dead2));
+		rtl865x_asic_write_entry(ASIC_TYPE_NETIF, 2, &dead2, true);
+	}
 
 	/* 5. direct routes: LAN 192.168.0.0/24 -> netif0; WAN 172.16.0.0/24 -> netif1
 	 *    process=ARP(2); ARP range 0..248 like stock. */
@@ -1355,8 +1507,9 @@ static int gw_prog(struct seq_file *m, void *v)
 	 * datapath. A/B it in one boot:
 	 *   echo 1 > /sys/module/rtl819x/parameters/wan_connected_route
 	 *   cat /proc/rtl865x_gw >/dev/null        # re-runs gw_prog
-	 * R6 signal: eth0.1 rx_packets delta during a sustained inbound transfer
-	 * collapsing toward 0 (measure warm; see bench confound #5).
+	 * R6 signal: the "wan" netdev's rx_packets delta during a sustained
+	 * inbound transfer collapsing toward 0 (measure warm; see bench confound
+	 * #5) — see the wan_route_mode comment above for why "wan", not eth0.1.
 	 */
 	if (wan_connected_route) {
 		struct asic_arp wa;
@@ -1427,10 +1580,12 @@ static int gw_prog(struct seq_file *m, void *v)
 	 *   - extIP[0] = 172.16.0.1 (the single WAN IP every flow masquerades to; the
 	 *     hwnat ADD path guards that conntrack's chosen extIP matches this, else it
 	 *     declines to software). internalIP=0 + isOne2One=0 => many-to-one NAPT.
-	 *   - SWTCR1 = 0 (EnL4WayH=0, L4EnHash1=0): flat 1024x1-way L4 table so the 10-bit
-	 *     gw_napt_hash1() value IS the physical row index — the invariant both the
-	 *     hwnat writer and the aging reader depend on. CSCR (above) recomputes the
-	 *     L3+L4 checksums after each src-rewrite.
+	 *   - SWTCR1 = 0x2200 (EnL4WayH=1 4-way, L4EnHash1=1 enhanced-hash) — VENDOR-EXACT
+	 *     (see the write at ~line 1562 for the full justification). gw_napt_hash1()'s
+	 *     10-bit value is STILL the physical row index (rows are addressed flat 0..1023
+	 *     regardless of the 4-way bit; 4-way only adds search ways on lookup) — the
+	 *     invariant both the hwnat writer and the aging reader depend on. CSCR (above)
+	 *     recomputes the L3+L4 checksums after each src-rewrite.
 	 * Phase-2's hand-programmed static hal->tiny flow is GONE: with EN_L4 armed and a
 	 * NAPT miss trapping to CPU (SWTCR0 NAPTR_NOT_FOUND_DROP=0), the first packets of
 	 * every flow reach Linux, get software-NAT'd + masqueraded to 172.16.0.1, and the
@@ -1751,6 +1906,169 @@ static const struct proc_ops fabric_fops = {
 	.proc_read = seq_read, .proc_lseek = seq_lseek, .proc_release = single_release,
 };
 
+/* M5 DIAGNOSTIC (2026-09 hwnat-classification-gap investigation, purely additive --
+ * see docs/PORT-MAIN-6.18-STATUS.md §4): with sel_cpu_reason=1 armed, a live
+ * LAN-ingress bulk flow decodes to "src=19(RP) dst=19(RP) reason=8" -- the L3 stage
+ * is not even recognising the LAN source as NAT-eligible (it should classify NPI,
+ * one stage further in, matching the 4.14 project's own worst case). Every
+ * WRITE-side register this port can read (route[2], netif[0]/[1], MSCR/SWTCR0/
+ * SWTCR1) matches the 4.14 blueprint that measures 891 Mbit/0% CPU on real silicon,
+ * byte for byte -- which argues gw_prog() itself (unchanged from that tree) is not
+ * the bug. But that comparison has only ever looked at what gw_prog() WROTE; it
+ * cannot see whether the ASIC's LIVE table content still matches that write at the
+ * MOMENT a bad capture happens, or has since diverged (an intervening fabric
+ * full-reset, a race with the per-flow NAPT row writer, table-SRAM corruption).
+ *
+ * This entry answers exactly that question and nothing else: a PLAIN
+ * rtl865x_asic_read_entry() of route[2] (the LAN /24 whose internal=1 is what
+ * should classify a 192.168.0.x source as NPI -- see l34Model.c's modelIPRouting()
+ * as decoded in the M5 investigation notes) and netif[0]/[1] (whose enHWRoute is
+ * the L3-routing enable bit gw_prog() sets on both interfaces). No write, no
+ * gw_prog() side effect -- unlike /proc/rtl865x_gw, opening THIS cannot itself
+ * change the state being investigated.
+ *
+ * How to read it on the bench: in the SAME moment sel_cpu_reason shows a bad
+ * decode (e.g. "src=19(RP) dst=19(RP) reason=8") on a live LAN-ingress flow, also
+ * `cat /proc/rtl865x_classify`.
+ *   - If route[2] still reads valid=1 process=2 internal=1 and netif[0] still
+ *     reads valid=1 enHWRoute=1 (i.e. matches the EXPECT line below), the ASIC's
+ *     live table content matches what gw_prog() programmed -- the state-divergence
+ *     hypothesis is RULED OUT, and the anomaly is in the real silicon's
+ *     classification behaviour itself, not a stale/corrupted table. That is a
+ *     genuine, useful negative result, not a dead end.
+ *   - If anything reads back OTHER than the EXPECT line, THAT field is the actual
+ *     bug and now has a name. Correlate the timing against dmesg's existing
+ *     "FABRIC WEDGE detected" / "RX-STALL WEDGE detected" / "recovery level N
+ *     starting|complete" / "ASIC gw scaffolding re-armed" lines (rtl819x-eth.c's
+ *     wedge detector already logs every auto-recovery with its own trigger
+ *     counts) to see whether a self-heal reset fired near the bad capture.
+ *   - ★ 2026-09-03 addition, same investigation: the netif[0]/[1] valid/enHWRoute/
+ *     vid fields above can read back exactly as EXPECTed while the GMAC field
+ *     they don't show is still wrong — that is precisely what was happening
+ *     here (see gw_netif_mac()'s header comment). The "GMAC=... vs live ...
+ *     MATCH=" lines below decode netif[0]/[1]'s stored MAC and compare it
+ *     against the REAL "br-lan"/"wan" netdev MAC at cat-time (a second, plain
+ *     dev_get_by_name() + dev_addr read under the same no-write contract —
+ *     not an ASIC access). MATCH=no there — even with everything else above
+ *     reading EXPECT — is the concrete, bench-checkable signature of the
+ *     DMAC==GMAC gate failing before route-table classification runs, i.e.
+ *     the mechanism the reason-4 decode above names and reason=8 is
+ *     hypothesised to be one stage earlier than.
+ * Purely diagnostic: this proves or disproves a hypothesis, it does not itself
+ * change anything on the datapath. */
+static int classify_show(struct seq_file *m, void *v)
+{
+	u32 rraw[3] = { 0 };
+	u32 n0raw[5] = { 0 };
+	u32 n1raw[5] = { 0 };
+	struct asic_l3route_arp rt;
+	struct asic_netif nif0, nif1;
+	int rc2, rc4a, rc4b;
+
+	mutex_lock(&rtl865x_hal_lock);
+	rc2  = rtl865x_asic_read_entry(ASIC_TYPE_L3_ROUTING, 2, rraw);
+	rc4a = rtl865x_asic_read_entry(ASIC_TYPE_NETIF, 0, n0raw);
+	rc4b = rtl865x_asic_read_entry(ASIC_TYPE_NETIF, 1, n1raw);
+	mutex_unlock(&rtl865x_hal_lock);
+
+	memset(&rt, 0, sizeof(rt));
+	memcpy(&rt, rraw, sizeof(rraw));
+	memset(&nif0, 0, sizeof(nif0));
+	memcpy(&nif0, n0raw, sizeof(n0raw));
+	memset(&nif1, 0, sizeof(nif1));
+	memcpy(&nif1, n1raw, sizeof(n1raw));
+
+	seq_printf(m,
+		   "[rtl865x LIVE classify state -- READ ONLY: plain rtl865x_asic_read_entry(),\n"
+		   " no write, no gw_prog(). See the comment above classify_show() in\n"
+		   " rtl865x_asichal.c for how to read the result against a sel_cpu_reason capture.]\n");
+
+	seq_printf(m,
+		   "route[2] (LAN 192.168.0.0/24, ASIC_TYPE_L3_ROUTING idx 2) read_entry rc=%d\n"
+		   "  raw: w0(ipAddr)=%08x w1(bits)=%08x\n"
+		   "  valid=%u process=%u internal=%u netif=%u ipAddr=%u.%u.%u.%u ipMask=%u(=/%u)\n"
+		   "  EXPECT valid=1 process=2 internal=1 netif=0 ipAddr=192.168.0.0 ipMask=23(=/24)\n",
+		   rc2, rraw[0], rraw[1],
+		   rt.valid, rt.process, rt.internal, rt.netif,
+		   (rt.ipAddr >> 24) & 0xff, (rt.ipAddr >> 16) & 0xff,
+		   (rt.ipAddr >> 8) & 0xff, rt.ipAddr & 0xff,
+		   rt.ipMask, rt.ipMask + 1);
+
+	seq_printf(m,
+		   "netif[0] (LAN, ASIC_TYPE_NETIF idx 0) read_entry rc=%d\n"
+		   "  raw: w0=%08x w1=%08x\n"
+		   "  valid=%u enHWRoute=%u vid=%u\n"
+		   "  EXPECT valid=1 enHWRoute=1 vid=%u(RTL865X_VID_LAN)\n",
+		   rc4a, n0raw[0], n0raw[1],
+		   nif0.valid, nif0.enHWRoute, nif0.vid, RTL865X_VID_LAN);
+
+	seq_printf(m,
+		   "netif[1] (WAN, ASIC_TYPE_NETIF idx 1) read_entry rc=%d\n"
+		   "  raw: w0=%08x w1=%08x\n"
+		   "  valid=%u enHWRoute=%u vid=%u\n"
+		   "  EXPECT valid=1 enHWRoute=1 vid=%u(RTL865X_VID_WAN)\n",
+		   rc4b, n1raw[0], n1raw[1],
+		   nif1.valid, nif1.enHWRoute, nif1.vid, RTL865X_VID_WAN);
+
+	/* ★ 2026-09-03 addition, M5 reason-8 investigation (see the comment above
+	 * this function): decode netif[0]/[1]'s stored GMAC and compare it
+	 * against the REAL "br-lan"/"wan" netdev MAC. Read-only: a plain
+	 * dev_get_by_name() + dev_addr read, no ASIC access, no write, no
+	 * gw_prog() side effect — exactly the same no-write contract as the
+	 * rest of this entry. */
+	{
+		u8 asic_lan[ETH_ALEN], asic_wan[ETH_ALEN];
+		u8 live_lan[ETH_ALEN] = { 0 }, live_wan[ETH_ALEN] = { 0 };
+		struct net_device *dl, *dw;
+		bool have_lan = false, have_wan = false;
+
+		gw_netif_mac_decode(nif0.mac47_19, nif0.mac18_0, asic_lan);
+		gw_netif_mac_decode(nif1.mac47_19, nif1.mac18_0, asic_wan);
+
+		dl = dev_get_by_name(&init_net, "br-lan");
+		if (dl) {
+			if (is_valid_ether_addr(dl->dev_addr)) {
+				ether_addr_copy(live_lan, dl->dev_addr);
+				have_lan = true;
+			}
+			dev_put(dl);
+		}
+		dw = dev_get_by_name(&init_net, "wan");
+		if (dw) {
+			if (is_valid_ether_addr(dw->dev_addr)) {
+				ether_addr_copy(live_wan, dw->dev_addr);
+				have_wan = true;
+			}
+			dev_put(dw);
+		}
+
+		seq_printf(m,
+			   "netif[0] GMAC=%pM  live br-lan=%pM  MATCH=%s\n",
+			   asic_lan, live_lan,
+			   !have_lan ? "unknown(no live br-lan dev)" :
+			   ether_addr_equal(asic_lan, live_lan) ? "yes" : "no");
+		seq_printf(m,
+			   "netif[1] GMAC=%pM  live wan=%pM  MATCH=%s\n"
+			   "  EXPECT MATCH=yes on both lines above (the ASIC's DMAC==GMAC\n"
+			   "  gate must agree with the netdev real frames are actually sent to)\n",
+			   asic_wan, live_wan,
+			   !have_wan ? "unknown(no live wan dev)" :
+			   ether_addr_equal(asic_wan, live_wan) ? "yes" : "no");
+	}
+
+	return 0;
+}
+
+static int classify_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, classify_show, NULL);
+}
+
+static const struct proc_ops classify_fops = {
+	.proc_open = classify_open,
+	.proc_read = seq_read, .proc_lseek = seq_lseek, .proc_release = single_release,
+};
+
 /* ---- AP/bridge role: invalidate a stale L2 row for a station -----------------
  * WHY (measured 2026-08-23 on a DIR-842 R1 used as a dumb AP):
  * While a station is associated to a DIFFERENT AP on the same LAN, its frames
@@ -1912,13 +2230,66 @@ static const struct proc_ops l2flush_fops = {
 	.proc_read = seq_read, .proc_lseek = seq_lseek, .proc_release = single_release,
 };
 
+/* /proc/rtl865x_trace: dump the asic_trace ring buffer (write-side only, see
+ * asic_trace_add() above). Write anything to it to reset the head (start a
+ * fresh capture window without a reboot). */
+static const char *const asic_type_name[] = {
+	"L2", "ARP", "L3RT", "MCAST", "NETIF", "EXTIP", "VLAN", "VLAN1",
+	"SVRPORT", "NAPT", "ICMP", "PPPOE", "ACL", "NEXTHOP", "RATELIM",
+	"ALG", "DSLITE", "6RD", "L3V6", "NH6", "ARPV6", "MCASTV6",
+};
+
+static int trace_show(struct seq_file *m, void *v)
+{
+	unsigned int head = (unsigned int)atomic_read(&asic_trace_head);
+	unsigned int n = head < ASIC_TRACE_SIZE ? head : ASIC_TRACE_SIZE;
+	unsigned int start = head < ASIC_TRACE_SIZE ? 0 : head;
+	unsigned int i;
+
+	seq_printf(m, "# asic write-trace: %u entries (head=%u, ring=%u)\n",
+		   n, head, ASIC_TRACE_SIZE);
+	seq_printf(m, "# seq jiffies type idx w0 rc poll\n");
+	for (i = 0; i < n; i++) {
+		unsigned int idx = (start + i) % ASIC_TRACE_SIZE;
+		struct asic_trace_entry *e = &asic_trace[idx];
+		const char *tn = e->type < ARRAY_SIZE(asic_type_name)
+				  ? asic_type_name[e->type] : "?";
+
+		seq_printf(m, "%u %u %s(%u) %u %08x %d %u\n",
+			   start + i, e->jiffies, tn, e->type, e->idx, e->w0,
+			   -(int)e->rc, e->poll);
+	}
+	return 0;
+}
+
+static int trace_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, trace_show, NULL);
+}
+
+static ssize_t trace_write(struct file *file, const char __user *ubuf,
+			   size_t len, loff_t *ppos)
+{
+	atomic_set(&asic_trace_head, 0);
+	memset(asic_trace, 0, sizeof(asic_trace));
+	pr_info("rtl865x trace: capture window reset\n");
+	return len;
+}
+
+static const struct proc_ops trace_fops = {
+	.proc_open = trace_open, .proc_write = trace_write,
+	.proc_read = seq_read, .proc_lseek = seq_lseek, .proc_release = single_release,
+};
+
 static int __init rtl865x_asichal_init(void)
 {
 	proc_create("rtl865x_gw", 0444, NULL, &gw_proc_fops);
 	proc_create("rtl865x_dump", 0444, NULL, &gw_dump_fops);
 	proc_create("rtl865x_napt", 0444, NULL, &napt_scan_fops);
 	proc_create("rtl865x_fabric", 0444, NULL, &fabric_fops);
+	proc_create("rtl865x_classify", 0444, NULL, &classify_fops);
 	proc_create("rtl865x_l2flush", 0644, NULL, &l2flush_fops);
+	proc_create("rtl865x_trace", 0644, NULL, &trace_fops);
 	/* ⚠ NOTE for bridge/AP deployments: /proc/rtl865x_gw above is 0444 but is
 	 * NOT a passive read — opening it runs gw_prog(), which programs the full
 	 * router datapath and sets TEACR bit0 (freezing L2 aging). On a bridged box
@@ -1926,7 +2297,7 @@ static int __init rtl865x_asichal_init(void)
 	 * agent or idle `grep -r /proc` will do it. Use /proc/rtl865x_dump, which is
 	 * genuinely read-only, for inspection. Gating gw_prog on role belongs here
 	 * eventually; documenting it is the interim. */
-	pr_info("rtl865x asic-hal: /proc/rtl865x_{gw,napt,fabric} ready (M6.6)\n");
+	pr_info("rtl865x asic-hal: /proc/rtl865x_{gw,napt,fabric,classify} ready (M6.6)\n");
 	return 0;
 }
 late_initcall(rtl865x_asichal_init);

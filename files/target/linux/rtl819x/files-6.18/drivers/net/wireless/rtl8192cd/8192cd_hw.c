@@ -11,7 +11,15 @@
  */
 
 #define _8192CD_HW_C_
-#define _printk printk
+/* 6.18 port: this file used to #define _printk printk here, presumably an
+ * ancient compat shim. Nothing in this file calls _printk() directly, and
+ * the kernel's own <linux/printk.h> now owns that name for its real
+ * implementation (printk() itself expands to
+ * printk_index_wrap(_printk, fmt, ...)). Redefining _printk before that
+ * header is reached corrupts its own declaration and macro chain, leaving
+ * every printk() call in this file linked against a literal, nonexistent
+ * "printk" symbol instead of the real "_printk" -- confirmed via
+ * modpost's "printk" undefined error and a manual -E/-fsyntax-only check. */
 
 #ifdef __KERNEL__
 #include <linux/module.h>
@@ -15398,7 +15406,7 @@ int rtl8192cd_init_hw_PCI(struct rtl8192cd_priv *priv)
 	/*
 	#ifdef CONFIG_NET_PCI
 		if (IS_PCIBIOS_TYPE)
-			pci_unmap_single(priv->pshare->pdev, priv->pshare->cmdbuf_phyaddr,
+			dma_unmap_single(&priv->pshare->pdev->dev, priv->pshare->cmdbuf_phyaddr,
 				(LoadPktSize), PCI_DMA_TODEVICE);
 	#endif
 	*/
@@ -19072,7 +19080,7 @@ void cancel_timer2(struct rtl8192cd_priv *priv)
 
 	if(!priv->pshare->amsdu_use_hw_timer) {
 		if (timer_pending(&priv->pshare->amsdu_sw_timer))
-			del_timer(&priv->pshare->amsdu_sw_timer);
+			timer_delete(&priv->pshare->amsdu_sw_timer);
 		return;
 	}
 #ifdef CONFIG_WLAN_HAL
@@ -19425,16 +19433,17 @@ void tx_power_tracking(struct rtl8192cd_priv *priv)
 }
 
 
-void rtl8192cd_tpt_timer(unsigned long task_priv)
+void rtl8192cd_tpt_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_hw *phw = timer_container_of(phw, t, tpt_timer);
+	struct rtl8192cd_priv *priv = phw->priv;
 	unsigned int val32;
 
 	if (!(priv->drv_state & DRV_STATE_OPEN))
 		return;
 
 	if (timer_pending(&priv->pshare->phw->tpt_timer))
-		del_timer_sync(&priv->pshare->phw->tpt_timer);
+		timer_delete_sync(&priv->pshare->phw->tpt_timer);
 
 	if (priv->pmib->dot11RFEntry.ther) {
 		// query rf reg 0x24[4:0], for thermal meter value
@@ -22309,9 +22318,9 @@ int isPSConditionMatch(struct rtl8192cd_priv *priv)
 
 }
 
-void PCIe_power_save_timer(unsigned long task_priv)
+void PCIe_power_save_timer(struct timer_list *t)
 {
-	struct rtl8192cd_priv *priv = (struct rtl8192cd_priv *)task_priv;
+	struct rtl8192cd_priv *priv = timer_container_of(priv, t, ps_timer);
 	char force;
 	force = priv->ps_ctrl & 0x80;
 	priv->ps_ctrl &= 0x7f;
@@ -22791,7 +22800,7 @@ void PCIeWakeUp(struct rtl8192cd_priv *priv, unsigned int expTime)
 	if ( (priv->pwr_state == L1) || (priv->pwr_state == L2)) {
 
 		if (timer_pending(&priv->ps_timer))
-			del_timer_sync(&priv->ps_timer);
+			timer_delete_sync(&priv->ps_timer);
 
 #ifdef CONFIG_RTL_92D_DMDP
 		if (priv->pshare->wlandev_idx == 1) {
@@ -22870,7 +22879,7 @@ void gpio_wakeup_isr(int irq, void *dev_instance, struct pt_regs *regs)
 	priv->firstPkt = 1;
 #endif
 	if (timer_pending(&priv->ps_timer))
-		del_timer_sync(&priv->ps_timer);
+		timer_delete_sync(&priv->ps_timer);
 
 	if ( priv->pwr_state == L1 || priv->pwr_state == L2) {
 		priv->ps_ctrl = 0x02 | (priv->pwr_state << 4);
@@ -29447,7 +29456,7 @@ int read_gpio_8822(struct rtl8192cd_priv *priv, unsigned int num)
 		offset = (num - 8);
 	}
 	else
-		return;
+		return 0; /* 6.18 port: read_gpio_8822 returns int */
 
 	tmp_value = RTL_R32(reg_gpio_ctrl);
 

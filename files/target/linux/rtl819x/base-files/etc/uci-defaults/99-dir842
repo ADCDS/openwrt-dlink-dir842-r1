@@ -19,18 +19,96 @@ uci -q batch <<-EOT
 	commit system
 EOT
 
+# --- firewall flow offload: software yes, hardware NOT (yet) ---
+# `flow_offloading=1` is a real, safe speedup (mainline nf_flow_table's software
+# fastpath, i.e. plain conntrack-accelerated forwarding) — ship it on.
+#
+# ★ `flow_offloading_hw` STAYS OFF. NOT a conservative default pending more
+# testing: it is bench-CONFIRMED BROKEN for this port as of 2026-09-04. Setting
+# it to 1 makes nf_flow_table pick FLOW_OFFLOAD_XMIT_DIRECT (a source/dest MAC
+# pair cached ONCE at flow-add time via dev_fill_forward_path(), rather than a
+# live per-packet neigh_xmit() lookup) — unconditionally, per
+# net/netfilter/nft_flow_offload.c, whenever flow_offloading_hw is on at all.
+# This board's br-lan is a real Linux bridge over the 4 LAN DSA ports while wan
+# is a bare DSA port, and hitting that DEV_PATH_BRIDGE hop while resolving the
+# LAN/reverse direction is what forces DIRECT there — reverse-NAT'd return
+# traffic (WAN peer -> LAN client) then silently never arrives: no error
+# anywhere in this driver's own instrumentation, because the fault is entirely
+# upstream in generic kernel offload code this driver never touches. Measured
+# via three independent tcpdump vantage points (WAN peer, this router's own wan
+# interface, and the LAN client's own NIC) plus direct ASIC NAPT/ARP/L2/checksum
+# table reads, ALL of which came back correct — the tables are not the bug.
+# `hwnat`, this driver's OWN separate ASIC-NAT sysfs switch, is IRRELEVANT to
+# this specific failure: it reproduces identically whether hwnat is on or off,
+# because flow_offloading_hw is a fw4/nftables-level setting the ASIC-NAT driver
+# never sees. See docs/PORT-MAIN-6.18-STATUS.md §4 ("BREAKTHROUGH") for the full
+# evidence trail, including two of three confirming dd|nc runs with this exact
+# config (flow_offloading=1, flow_offloading_hw=0) completing 30MB/50MB
+# transfers cleanly (verified via a clean 4-way FIN teardown on a LAN-side
+# capture, not just a byte counter) versus the near-total failure measured with
+# flow_offloading_hw=1 on the same bench. This is confirmed to genuinely
+# accelerate LAN<->LAN and LAN<->WAN forwarding in software (not full ASIC
+# zero-CPU acceleration, which remains broken and is a separate, still-open
+# M5 sub-goal) — do not flip this to 1 without re-running that whole bench
+# protocol first, and do not read its current absence from any earlier boot's
+# `uci show` as "unset, therefore off already, therefore harmless to enable" —
+# it genuinely is not, on this specific board's DSA topology.
+uci -q batch <<-EOT
+	set firewall.@defaults[0].flow_offloading='1'
+	set firewall.@defaults[0].flow_offloading_hw='0'
+	commit firewall
+EOT
+
 
 # --- 5 GHz radio (RTL8822BE on PCIe) ---
-# Seed the band/width only. No SSID and no key: a shipped default passphrase is
-# worse than no radio, so the AP stays disabled exactly as OpenWrt generates it
-# and the user turns it on. HT20 rather than the auto-detected VHT80, matching
-# what this board shipped with in v1.x.
-[ -e /etc/config/wireless ] || wifi config
+# Seed the band/width/regdomain only. No SSID and no key: a shipped default
+# passphrase is worse than no radio, so the AP stays disabled and the user turns
+# it on. HT20 rather than the auto-detected VHT80, matching what this board
+# shipped with in v1.x.
+#
+# ★ THE `country` LINE IS LOAD-BEARING, NOT COSMETIC. The RTL8822BE on this board
+# has a BLANK EFUSE, so rtw88's rtw_regd_init() matches no entry, falls back to
+# rtw_reg_ww and never calls regulatory_hint() -- the wiphy stays on the world
+# regdomain '00', where 5170-5250 MHz (ch36) is NO-IR. hostapd then refuses the
+# channel outright ("Frequency 5180 (primary) not allowed for AP mode ... NO-IR",
+# hostapd src/ap/hw_features.c) and the AP never starts, with a healthy-looking
+# but unattached phy. The 4.14 product hit exactly this and set country=BR for
+# the same reason (see `git show main:files/target/linux/realtek/base-files/etc/
+# uci-defaults/99-dir842-m5`). Verified live on 6.18: without it, ch36 is
+# unusable even after the user enables the AP.
+#
+# ★ WHY country IS SET HERE AND NOT VIA ucidef_set_country IN board.d/02_network.
+# board.d would be the upstream-idiomatic place, but wifi-scripts coples the two:
+# mac80211.uc does `if (!country && band_name != '2g') defaults = null;` and then
+# `set <iface>.disabled='${defaults ? 0 : 1}'`. So declaring a country in
+# board.json would ALSO auto-enable the 5 GHz wifi-iface -- shipping an OPEN AP
+# (ssid 'OpenWrt', encryption 'none') by default. Setting it on the wifi-device
+# section here, after generation, changes the regdomain without re-running that
+# logic, so the iface keeps `disabled '1'` and the user still opts in. If this
+# script loses the detection race below, the failure mode is "5 GHz needs a
+# country set by hand", never "an open AP shipped".
+#
+# TO ENABLE THE AP the knob is the wifi-IFACE, not the wifi-device (the device is
+# already enabled -- it has no `disabled` option at all):
+#   uci set wireless.default_radio0.disabled=0
+#   uci set wireless.default_radio0.ssid=... encryption=psk2 key=...
+#   uci commit wireless && wifi
+# `uci set wireless.radio0.disabled=0` does nothing; that was a documented
+# mis-diagnosis, corrected 2026-09-03.
+#
+# NOTE (known gap, deliberately not papered over): the loop below is a no-op if
+# mac80211 detection has not run yet when uci_apply_defaults reaches this script
+# (detection is fired asynchronously by procd from the ieee80211 hotplug event
+# after kmodloader). The script still exits 0 and is therefore deleted, so the
+# seed is lost for that install. It is NOT fixed by exiting non-zero -- a script
+# that exits non-zero is retried every boot, and anything that hangs here blocks
+# boot() before /sbin/reload_config (see 10-dir842-5g-ifname's ★★ note).
 for _dev in $(uci -q show wireless | sed -n 's/^wireless\.\([A-Za-z0-9_-]*\)=wifi-device$/\1/p'); do
 	[ "$(uci -q get wireless.$_dev.type)" = "mac80211" ] || continue
 	[ "$(uci -q get wireless.$_dev.band)" = "5g" ] || continue
 	uci -q set wireless.$_dev.htmode='HT20'
 	uci -q set wireless.$_dev.channel='36'
+	uci -q set wireless.$_dev.country='BR'
 done
 uci -q commit wireless
 

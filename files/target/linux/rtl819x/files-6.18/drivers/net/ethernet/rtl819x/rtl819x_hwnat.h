@@ -69,4 +69,31 @@ void rtl819x_hwnat_stop(void);
 static inline void rtl819x_hwnat_stop(void) { }
 #endif
 
+/*
+ * ★ 2026-09-04: added for the LARGE-FRAME WEDGE detector (rtl819x-eth.c). That
+ * detector's whole premise is "large frames vanished from the CPU RX path while
+ * small frames keep arriving = wedged". Once hardware NAT offload actually
+ * accelerates a flow, that is exactly what HEALTHY looks like too: the ASIC
+ * stops handing large bulk frames to the CPU at all, on purpose. Bench-confirmed
+ * false positive: a flow whose NAPT row's agingTime sat pinned at the reload
+ * ceiling (i.e. genuinely hardware-hit) for 5+ continuous seconds still tripped
+ * the detector, which then fired a level-3 recovery and wiped the very table
+ * that was working. This lets the wedge check consult the SAME hotness state
+ * hwnat_aging_work_fn() already computes every 5s (the AGE poll) before
+ * declaring a wedge, so real hardware-forwarded traffic is not mistaken for a
+ * dead datapath. True positive detection (nothing hot, large frames vanished
+ * anyway) is unaffected.
+ */
+#ifdef CONFIG_RTL819X_HWNAT
+bool rtl819x_hwnat_has_hot_flow(void);
+/* True whenever >=1 flow currently has ASIC NAPT rows installed (set from packet 1
+ * of install, unlike has_hot_flow() which needs a 5s aging poll to observe a HIT).
+ * The LARGE-FRAME WEDGE detector uses it to avoid destroying a genuinely-offloaded
+ * flow that has stalled before its row was ever observed hot. */
+bool rtl819x_hwnat_any_flow_installed(void);
+#else
+static inline bool rtl819x_hwnat_has_hot_flow(void) { return false; }
+static inline bool rtl819x_hwnat_any_flow_installed(void) { return false; }
+#endif
+
 #endif /* _RTL819X_HWNAT_H */

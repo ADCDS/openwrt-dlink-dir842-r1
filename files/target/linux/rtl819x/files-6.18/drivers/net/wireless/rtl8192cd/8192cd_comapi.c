@@ -508,10 +508,10 @@ int rtl_wx_get_sens(struct net_device *dev,
 void clean_conn_var(RTL_PRIV *priv)
 {
   	if (timer_pending(&priv->reauth_timer))
-		del_timer_sync (&priv->reauth_timer);
+		timer_delete_sync (&priv->reauth_timer);
 
 	if (timer_pending(&priv->reassoc_timer))
-		del_timer_sync (&priv->reassoc_timer);
+		timer_delete_sync (&priv->reassoc_timer);
 #if 0
 	priv->reauth_count = 0;
 	priv->reassoc_count = 0;
@@ -3473,14 +3473,14 @@ int CfgFileRead(struct net_device *dev, char *buf)
 {
 	//RTL_PRIV *priv = dev->priv;
 	struct file *fp;
-	mm_segment_t oldfs;
 	//size_t len;
 
 	//int read_bytes = 0;
 	int ret = 0;
 
-	oldfs = get_fs();
-	set_fs(KERNEL_DS);
+	/* 6.18 port: mm_segment_t/get_fs()/set_fs() were removed entirely --
+	 * kernel_read() below never needed the address-space override, it
+	 * already reads into a kernel buffer directly. */
 	fp = filp_open(CFG_FILE_PATH, O_RDONLY, 0);
 	if(IS_ERR(fp)) {
 		ret = PTR_ERR(fp);
@@ -3505,10 +3505,9 @@ int CfgFileRead(struct net_device *dev, char *buf)
 
 err_close:
 	filp_close(fp, NULL);
-err_exit:	
-	set_fs(oldfs);
+err_exit:
 	return ret;
-	
+
 }
 
 static int rewrite_line (unsigned char **dst, unsigned char **src)

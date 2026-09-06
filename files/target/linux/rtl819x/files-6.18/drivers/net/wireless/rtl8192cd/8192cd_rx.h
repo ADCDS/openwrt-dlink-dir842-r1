@@ -13,6 +13,17 @@
 #ifndef _8192CD_RX_H_
 #define _8192CD_RX_H_
 
+/* 6.18 port: this file uses PCI_DMA_FROMDEVICE before 8192cd_util.h's own definition
+ * of it (later in whatever translation unit includes both) becomes visible -- an
+ * include-order issue, not a missing constant. Guarded so no conflict if that later
+ * definition is also reached in the same TU. */
+#ifndef PCI_DMA_TODEVICE
+#define PCI_DMA_TODEVICE		1
+#endif
+#ifndef PCI_DMA_FROMDEVICE
+#define PCI_DMA_FROMDEVICE		2
+#endif
+
 #include "./8192cd_cfg.h"
 #include "./8192cd.h"
 #include "./8192cd_util.h"
@@ -114,12 +125,12 @@ void init_rxdesc_88XX(
 
 #if defined(CONFIG_NET_PCI) && !defined(USE_RTL8186_SDK)
     // Remove it because pci_map_single() in get_physical_addr() already performed memory sync.
-    //rtl_cache_sync_wback(priv, bus_to_virt(phw->rx_infoL[i].paddr), RX_BUF_LEN - sizeof(struct rx_frinfo) - offset, PCI_DMA_FROMDEVICE);     
+    //rtl_cache_sync_wback(priv, phys_to_virt(phw->rx_infoL[i].paddr), RX_BUF_LEN - sizeof(struct rx_frinfo) - offset, PCI_DMA_FROMDEVICE);     
 #else
 #ifdef CONFIG_ENABLE_NCBUFF
     if(skb_ncbuff_tag(pskb)->tag != NUBUFF_CACHE_TAG)
 #endif
-    rtl_cache_sync_wback(priv, (unsigned long)(bus_to_virt(phw->rx_infoL[i].paddr)-CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), 
+    rtl_cache_sync_wback(priv, (unsigned long)(phys_to_virt(phw->rx_infoL[i].paddr)-CONFIG_LUNA_SLAVE_PHYMEM_OFFSET), 
         RX_BUF_LEN - sizeof(struct rx_frinfo) - offset, PCI_DMA_FROMDEVICE);
 #endif 
 }
@@ -156,7 +167,7 @@ static __inline__ void init_rxdesc(struct sk_buff *pskb, int i, struct rtl8192cd
 	phw->rx_descL[i].Dword6 = set_desc(phw->rx_infoL[i].paddr);
 #if defined(CONFIG_NET_PCI) && !defined(USE_RTL8186_SDK)
 	// Remove it because pci_map_single() in get_physical_addr() already performed memory sync.
-	//rtl_cache_sync_wback(priv, (unsigned long)bus_to_virt(phw->rx_infoL[i].paddr), RX_BUF_LEN - sizeof(struct rx_frinfo)-64, PCI_DMA_FROMDEVICE);
+	//rtl_cache_sync_wback(priv, (unsigned long)phys_to_virt(phw->rx_infoL[i].paddr), RX_BUF_LEN - sizeof(struct rx_frinfo)-64, PCI_DMA_FROMDEVICE);
 #else
 #ifdef CONFIG_ENABLE_NCBUFF
         if(skb_ncbuff_tag(pskb)->tag != NUBUFF_CACHE_TAG)

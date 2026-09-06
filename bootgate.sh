@@ -14,13 +14,22 @@ touch "$LOG"
 # whose command line merely mentions the device node, so the guard skips
 # starting the logger and every slice below comes back empty -- which scores as
 # FAIL on a board that booted perfectly. Same bug flash-nor.sh had.
-pgrep -f "^cat /dev/ttyUSB0" >/dev/null || { setsid bash -c "exec cat /dev/ttyUSB0 >> $LOG" </dev/null >/dev/null 2>&1 & sleep 1; }
+# ★ 2026-09-04: the plug also power-cycles the USB-serial adapter, so a logger started
+# once before the loop dies on the first cycle and every later slice is empty -- a
+# healthy board then scores 0/N. Restart the logger AFTER each power-on, not once.
+start_logger() {
+  pkill -f "^cat /dev/ttyUSB0" 2>/dev/null; sleep 1
+  stty -F /dev/ttyUSB0 38400 cs8 -cstopb -parenb -echo raw 2>/dev/null
+  setsid bash -c "exec cat /dev/ttyUSB0 >> $LOG" </dev/null >/dev/null 2>&1 &
+  sleep 1
+}
 
 for i in $(seq 1 "$N"); do
   M=$(wc -c < "$LOG")
   "$TOMADA" off >/dev/null 2>&1; sleep 3; "$TOMADA" on >/dev/null 2>&1
+  sleep 8; start_logger
   sleep "$WAIT"
-  slice=$(tail -c +$((M+1)) "$LOG" | tr -d '\r')
+  slice=$(tail -c +$((M+1)) "$LOG" | tr -d '\r\000')
   oops=$(printf '%s' "$slice" | grep -aciE 'Oops|Unable to handle kernel|unaligned access|Kernel panic|BUG:')
   up=$(printf '%s' "$slice" | grep -aci 'Please press Enter to activate')
   jffs=$(printf '%s' "$slice" | grep -aci 'switching to jffs2 overlay')
