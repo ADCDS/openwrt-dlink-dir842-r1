@@ -9,6 +9,23 @@ every *code* reference in the older docs (`eth0.1`/`eth0.2`, `swconfig dev switc
 `ndo_flow_offload`) as historical: this branch replaced all of it. Read this file first;
 follow its pointers into the old docs for background, not for current commands.
 
+> **★ 2026-09-24: read [`WEDGE-ROOT-CAUSE.md`](WEDGE-ROOT-CAUSE.md) before the wedge
+> sections below.** It is a static analysis and vendor-source comparison. Its fixes are
+> compile-tested only and have no bench results yet. Its findings:
+> - **Load wedge.** The TX doorbell drops the CPU-port DMA to 32-word bursts, and the
+>   same write inverts the FIFO marks, on the first transmit of every boot. The 128-byte
+>   burst size matches the 128-byte large-frame knee every wedge section measures.
+> - **33-minute hang.** The level-3 recovery ran the switch reset and clock gate with
+>   interrupts on, and no watchdog is armed.
+> - **Recovery-path defects.** Recovery leaked every in-flight TX skb and re-allocated all
+>   256 RX clusters on a live ring.
+> - **`/proc/wlan0/*` read crash.** The wifi driver passes `file_operations` where the
+>   kernel expects `proc_ops`.
+> - **M5.** The bulk-transfer stall is plausibly the same load wedge, with its detector
+>   disabled by the hwnat gate.
+>
+> Each change has a runtime revert knob. The bench plan is in that doc's §11.
+
 ## Status in one paragraph
 
 **★ Rewritten 2026-09-04 — everything above this line predates this session's work; the
