@@ -14659,13 +14659,26 @@ static ssize_t wlan_custom_Passthru_single_write(struct file * file, const char 
 	    return wlan_custom_Passthru_write_proc(file, userbuf,count, off);
 }
 
+/* struct proc_ops since 5.6 -- see the note at RTK_DECLARE_READ_PROC_FOPS in
+ * 8192cd_proc.c: a file_operations here makes every read call seq_read()
+ * through a mis-typed pointer. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,6,0)
+struct proc_ops wlan_custom_Passthru_proc_fops = {
+	.proc_open	= wlan_custom_Passthru_single_open,
+	.proc_write	= wlan_custom_Passthru_single_write,
+	.proc_read_iter	= seq_read_iter,
+	.proc_lseek	= seq_lseek,
+	.proc_release	= single_release,
+};
+#else
 struct file_operations wlan_custom_Passthru_proc_fops = {
-	 .open            = wlan_custom_Passthru_single_open,	
+	 .open            = wlan_custom_Passthru_single_open,
 	 .write           = wlan_custom_Passthru_single_write,
      .read           = seq_read,
      .llseek         = seq_lseek,
      .release        = single_release,
 };
+#endif
 #endif
 
 #endif //CONFIG_PROC_FS

@@ -71,6 +71,62 @@ void *pde_data(const struct inode *inode)
 }
 #endif
 
+/*
+ * ★ Since Linux 5.6, proc_create_data() takes a struct proc_ops, not a struct
+ * file_operations. These macros kept declaring file_operations, which only
+ * builds because the Makefile demotes -Wincompatible-pointer-types -- the proc
+ * core then read the file_operations fields at proc_ops offsets: proc_open
+ * <- fop_flags (NULL), proc_read_iter <- .read (seq_read), proc_lseek <-
+ * .read_iter (NULL), proc_write <- .write. So every READ of a /proc/wlan0 file
+ * called seq_read() with a struct kiocb * as its struct file * and an iov_iter *
+ * as its user buffer, without the single_open() that sets up the seq_file:
+ * the documented "reading /proc/wlan0/{mib_all,sta_info} wedges the box"
+ * hazard (an Oops/panic or silent memory corruption, depending on what the
+ * garbage pointers hit). Writes happened to line up, which is why
+ * `echo ... > /proc/wlan0/led` style controls worked.
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,6,0)
+#define RTK_DECLARE_READ_PROC_FOPS(read_proc) \
+	int read_proc##_open(struct inode *inode, struct file *file) \
+	{ \
+			return(single_open(file, read_proc, pde_data(file_inode(file)))); \
+	} \
+	struct proc_ops read_proc##_fops = { \
+			.proc_open		= read_proc##_open, \
+			.proc_read_iter		= seq_read_iter, \
+			.proc_lseek		= seq_lseek, \
+			.proc_release		= single_release, \
+	}
+
+#define RTK_DECLARE_WRITE_PROC_FOPS(write_proc) \
+	static ssize_t write_proc##_write(struct file * file, const char __user * userbuf, \
+		     size_t count, loff_t * off) \
+	{ \
+		return write_proc(file, userbuf,count, pde_data(file_inode(file))); \
+	} \
+	struct proc_ops write_proc##_fops = { \
+			.proc_write		= write_proc##_write, \
+	}
+
+
+#define RTK_DECLARE_READ_WRITE_PROC_FOPS(read_proc,write_proc) \
+	static ssize_t read_proc##_write(struct file * file, const char __user * userbuf, \
+		     size_t count, loff_t * off) \
+	{ \
+		return write_proc(file, userbuf,count, pde_data(file_inode(file))); \
+	} \
+	int read_proc##_open(struct inode *inode, struct file *file) \
+	{ \
+			return(single_open(file, read_proc, pde_data(file_inode(file)))); \
+	} \
+	struct proc_ops read_proc##_fops = { \
+			.proc_open		= read_proc##_open, \
+			.proc_read_iter		= seq_read_iter, \
+			.proc_write		= read_proc##_write, \
+			.proc_lseek		= seq_lseek, \
+			.proc_release		= single_release, \
+	}
+#else
 #define RTK_DECLARE_READ_PROC_FOPS(read_proc) \
 	int read_proc##_open(struct inode *inode, struct file *file) \
 	{ \
@@ -111,6 +167,7 @@ void *pde_data(const struct inode *inode)
 			.llseek 		= seq_lseek, \
 			.release		= single_release, \
 	}
+#endif
 
 		
 #define RTK_CREATE_PROC_ENTRY(name) \
