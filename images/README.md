@@ -1,5 +1,18 @@
 # Prebuilt images (`port/main-6.18`)
 
+**2026-09-24 warning: the files currently staged in this directory were built on
+2026-09-05 and do not include the 2026-09-24 wedge/recovery commits. Do not confuse
+these with the new tagged experimental release assets.** The tagged release supplies
+its own SHA-256 list; verify its downloaded files against that list, not the older list
+in this directory. The public release image was rebuilt without a private profile and
+verified for integrity and absence of bench credentials, but **this exact public binary
+was not separately flashed/soak-tested**; the hardware test used an otherwise equivalent
+kernel with an isolated bench profile. See the [live hardware A/B report](../docs/KERNEL-6.18-HARDWARE-AB-2026-09-24.md):
+the new changes have been run on hardware, but the size-selective CPU-port failure
+**still occurred** and only a manual level-3 fabric reset recovered large packets/SSH.
+An experimental release is not a production recommendation. No public asset should
+contain the private bench's SSH key, IP profile, or full-flash dump.
+
 Built 2026-09-05 from `port/main-6.18` (kernel 6.18.44, OpenWrt main), natively — no
 container, no pinned toolchain. `seed.config` (the release package set): **both radios**
 (the vendor `rtl8192cd` 2.4 GHz driver alongside `rtw88`/RTL8822BE 5 GHz — the manifest
@@ -15,7 +28,7 @@ partial fix to hardware NAT acceleration's forward-throughput problem (a missing
 field on accelerated flows — measured 15-30x improvement on hardware, does not yet fully
 close the gap; see the status doc's M5/§4 section for the full investigation and numbers).
 
-**This is a rebase-in-progress, not a finished release.** Wired ethernet and reliable
+**This was a rebase-in-progress snapshot, not a finished release.** Wired ethernet and reliable
 software-forwarded LAN↔WAN traffic both work well; true zero-CPU ASIC hardware NAT
 acceleration is the one piece that does not work yet (a real root-cause fix for an earlier
 bulk-transfer-stall bug already landed — `flow_offloading_hw=0` is the shipped default —

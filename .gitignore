@@ -3,6 +3,8 @@
 # built images ship as GitHub releases, not in-repo
 images/*.bin
 images/*.itb
+# Local hardware-test logs, firmware dumps, and private bench profile
+images/bench-*/
 
 # python bytecode
 __pycache__/

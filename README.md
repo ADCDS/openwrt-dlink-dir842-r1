@@ -7,7 +7,16 @@ This repo is a **build recipe**: `build.sh` clones `openwrt/openwrt` at a pinned
 overlays `./files/` (the `rtl819x` target plus a handful of generic additions), and
 produces both a RAM-boot image and a NOR flash image.
 
-**Branch status: `port/main-6.18` is a rebase in progress, not a finished release.**
+**Branch status: `port/main-6.18` is experimental, not a finished release.**
+A 2026-09-24 hardware test of the proposed wedge fixes still reproduced the intermittent
+size-selective CPU-port failure: small packets reached the router, larger packets and SSH
+failed until a manual level-3 switch-fabric reset. Stock Linux 3.10 did not wedge in two
+bounded comparison boots, but that is not proof it is immune. A full dual-radio build also
+OOM-killed services under one heavy host-to-router test. **Do not put this image inline as
+an essential switch or router yet.** See the [hardware A/B report](docs/KERNEL-6.18-HARDWARE-AB-2026-09-24.md)
+and [release caveats](images/README.md). Older positive datapath notes below describe
+specific earlier tests, not a stability guarantee.
+
 Kernel 6.18 on OpenWrt main, the RTL8367S switch on mainline DSA instead of swconfig, wired
 ethernet, a 5 GHz AP, and the on-SoC 2.4 GHz vendor radio all work — both radios run
 simultaneously, clients associate and get DHCP over either one — and the router forwards

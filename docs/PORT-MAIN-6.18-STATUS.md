@@ -9,9 +9,14 @@ every *code* reference in the older docs (`eth0.1`/`eth0.2`, `swconfig dev switc
 `ndo_flow_offload`) as historical: this branch replaced all of it. Read this file first;
 follow its pointers into the old docs for background, not for current commands.
 
-> **★ 2026-09-24: read [`WEDGE-ROOT-CAUSE.md`](WEDGE-ROOT-CAUSE.md) before the wedge
-> sections below.** It is a static analysis and vendor-source comparison. Its fixes are
-> compile-tested only and have no bench results yet. Its findings:
+> **★ 2026-09-24 hardware update: [kernel-6.18 stock A/B results](KERNEL-6.18-HARDWARE-AB-2026-09-24.md).**
+> The changes below are now tested on this DIR-842 R1; the size-selective CPU-port
+> failure **still occurred with the corrected live DMA burst/FIFO values**, then recovered
+> after a manual level-3 fabric reset. Stock did not wedge in two bounded cold-boot/load
+> trials, but that does not establish immunity to an intermittent fault. Do not read
+> the following static root-cause hypothesis as a proven cure. See
+> [`WEDGE-ROOT-CAUSE.md`](WEDGE-ROOT-CAUSE.md) for the original analysis and bench plan.
+> Its findings, as proposed before this hardware test:
 > - **Load wedge.** The TX doorbell drops the CPU-port DMA to 32-word bursts, and the
 >   same write inverts the FIFO marks, on the first transmit of every boot. The 128-byte
 >   burst size matches the 128-byte large-frame knee every wedge section measures.

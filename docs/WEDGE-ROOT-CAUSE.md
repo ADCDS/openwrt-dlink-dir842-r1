@@ -1,7 +1,11 @@
 # Why `port/main-6.18` wedges — root causes and the fix plan
 
-**2026-09-24. Static analysis, vendor-source comparison and compile tests only — nothing in
-this document has been run on hardware yet.** Every claim below is tagged:
+**2026-09-24. This document records the pre-test static analysis, vendor-source comparison
+and compile tests.** The fixes were subsequently run on hardware; see
+[KERNEL-6.18-HARDWARE-AB-2026-09-24.md](KERNEL-6.18-HARDWARE-AB-2026-09-24.md).
+**The size-selective failure still occurred with the corrected burst/FIFO registers; the
+DMA-doorbell hypothesis below is not proven as its sole cause.** The bench steps below are
+historical proposals, not completed validations. Every claim below is tagged:
 
 - **[code]**: read in this tree or in the exact kernel it builds against (Linux 6.18.44 plus
   every OpenWrt generic patch and this repo's `patches-6.18/`, reconstructed and applied
