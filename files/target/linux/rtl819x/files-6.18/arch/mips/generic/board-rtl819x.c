@@ -56,6 +56,13 @@
 #define RTL819X_INTC_GIMR2	((void __iomem *)(RTL819X_INTC_BASE + 0x20))
 #define RTL819X_INTC_IRR5	((void __iomem *)(RTL819X_INTC_BASE + 0x2c))
 
+/*
+ * Switch-core CPU-port DMA engine (drivers/net/ethernet/rtl819x): interface
+ * control (TXCMD/RXCMD) and interrupt mask.
+ */
+#define RTL819X_NIC_CPUICR	((void __iomem *)KSEG1ADDR(0x18010000))
+#define RTL819X_NIC_CPUIIMR	((void __iomem *)KSEG1ADDR(0x18010028))
+
 /* bank-2 input 15 is the 24K core's SI_TimerInt */
 #define RTL819X_INTC2_TIMER	15
 /* IRR5 covers bank-2 inputs 8..15, 4 bits each; input 15 lands in bits 31..28 */
@@ -106,14 +113,27 @@ static void __init rtl819x_setup_timer_irq(void)
 
 static void __init rtl819x_soc_init(void)
 {
-	u32 clk;
+	u32 clk = sr_r32(REALTEK_SR_CLKMANAGE);
 
 	pr_info("RTL819x: ID %08x BOOTSTRAP %08x CLKMANAGE %08x\n",
 		sr_r32(REALTEK_SR_REG_ID), sr_r32(REALTEK_SR_REG_BOOTSTRAP),
-		sr_r32(REALTEK_SR_CLKMANAGE));
+		clk);
 
-	clk = sr_r32(REALTEK_SR_CLKMANAGE) | REALTEK_SR_CLKMANAGE_SWCORE;
-	sr_w32(clk, REALTEK_SR_CLKMANAGE);
+	/*
+	 * Stop the CPU-port DMA engine the loader may have left running. A
+	 * TFTP/'J' RAM boot hands over with the loader's own NIC armed
+	 * (CPUICR RXCMD|TXCMD), and until the ethernet driver's ndo_open stops
+	 * it the engine keeps writing received frames into the loader's rings
+	 * -- memory Linux already owns. Only a loader that ran its network
+	 * stack has the switch core clocked, so an autoboot (clock off) skips
+	 * this rather than touch the block the instant its clock comes on.
+	 */
+	if (clk & REALTEK_SR_CLKMANAGE_SWCORE) {
+		__raw_writel(0, RTL819X_NIC_CPUIIMR);
+		__raw_writel(0, RTL819X_NIC_CPUICR);
+	}
+
+	sr_w32(clk | REALTEK_SR_CLKMANAGE_SWCORE, REALTEK_SR_CLKMANAGE);
 	pr_info("RTL819x: switch core clock forced on -> %08x\n",
 		sr_r32(REALTEK_SR_CLKMANAGE));
 

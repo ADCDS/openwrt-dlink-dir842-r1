@@ -23,6 +23,7 @@
 #include <linux/skbuff.h>
 #include <linux/if_vlan.h>	/* __vlan_hwaccel_put_tag / skb_vlan_tag_* (M6.2) */
 #include <linux/delay.h>	/* msleep/udelay: M7 fabric-reset sequencing */
+#include <linux/reboot.h>	/* emergency_restart: unrecoverable ring re-init */
 #include <asm/mipsregs.h>	/* clear_c0_status / set_c0_status / STATUSF_IP4 */
 #include <net/dsa.h>		/* netdev_uses_dsa: this netdev is the DSA conduit */
 
@@ -138,7 +139,32 @@ struct rtl819x_eth_priv {
 	int			irq;
 	struct timer_list	rx_timer;	/* polling: drives napi (RX IRQ storms) */
 	struct work_struct	hang_work;	/* M6.5: fabric-wedge soft-recover */
+	unsigned long		flags;
 };
+
+/* priv->flags: the ISR disabled the line and napi owes the enable_irq() */
+#define RTL819X_IRQ_OFF		0
+
+/*
+ * ★ How the ISR keeps the switch-core line quiet while napi runs.
+ *
+ * The old scheme cleared CP0 Status IM4 in the ISR and re-set it (plus GIMR bit
+ * 15) when napi completed. On this kernel that mask does nothing: the NIC is a
+ * child of the chained Realtek intc (irq-realtek-rtl.c), whose dispatcher ends
+ * with chained_irq_exit() -> irq_eoi == unmask_mips_irq() on the IP4 parent,
+ * re-setting IM4 the moment the ISR returns, and handle_level_irq() unmasks GIMR
+ * bit 15 after the handler as well. Only the CPUIIMR=0 write actually gated
+ * anything, so a switch-core assertion CPUIIMR does not cover (the storm the ISR
+ * comment describes, "CPUIISR can even read 0") would re-enter forever with no
+ * detector able to run -- a silent livelock.
+ *
+ * Default 0: disable_irq_nosync() in the ISR, enable_irq() when napi completes
+ * (the standard pattern; the irq core owns GIMR bit 15 and IM4). 1: the pre-fix
+ * CP0/GIMR scheme, for an A/B.
+ */
+static int irq_legacy_mask;
+module_param(irq_legacy_mask, int, 0644);
+MODULE_PARM_DESC(irq_legacy_mask, "0 = mask the NIC line with disable_irq_nosync() while napi runs (default); 1 = pre-fix CP0 IM4/GIMR scheme (ineffective under the chained intc)");
 
 /* M6.6 Phase 3 fast-offload: the RX IRQ (CP0 IP4) is unreliable on this SoC — a
  * frame landing in the receive-empty/CPUIISR-ack race window loses its RX_DONE, so
@@ -374,22 +400,60 @@ static void rtl819x_fabric_restore(void)
 		}
 }
 
+/*
+ * ★ Run the FULL_RST + switch-core clock-gate window with interrupts OFF.
+ *
+ * The vendor only ever executes FullAndSemiReset() atomically:
+ * rtl865x_reinitSwitchCore() masks GIMR and busy-waits first, then
+ * re865x_reProbe() calls it inside SMP_LOCK_ETH (local_irq_save on UP), and the
+ * reset itself uses mdelay() (sdk rtl_nic.c re865x_reProbe /
+ * rtl865x_reinitSwitchCore, rtl865x_asicCom.c FullAndSemiReset). This port used
+ * msleep() with interrupts on, so for ~650 ms with the switch core in reset and
+ * then unclocked every other context kept running -- phylink/SMI polling, the
+ * WMAC and rtw88 interrupt paths, netifd hotplug, SPI-NOR page-ins -- on a
+ * fabric whose own comment says a stray access in that window stalls the Lexra
+ * bus. The one 33-minute silent hang on record fits exactly this window: the
+ * recorded sequence is "recovery level 3 starting", then phylink's "switch wan:
+ * Link is Down" (proof other contexts ran mid-window), and it stops before the
+ * "L4/NAPT table SRAM cleared" line that a successful level 3 prints ~0.76 s
+ * after "starting" (docs/PORT-MAIN-6.18-STATUS.md §4).
+ *
+ * 1 (default) = vendor semantics, ~650 ms with interrupts off (a recovery is
+ * rare; timekeeping catches up from the clocksource). 0 = the pre-fix msleep()
+ * variant, for an A/B.
+ */
+static int fabric_reset_atomic = 1;
+module_param(fabric_reset_atomic, int, 0644);
+MODULE_PARM_DESC(fabric_reset_atomic, "level-3 reset: 1 = FULL_RST + clock gate with interrupts off, like the vendor (default); 0 = pre-fix msleep() with interrupts on");
+
 /* The vendor 8197F fabric reset + table-SRAM re-init.  Caller MUST have the
  * datapath fully quiesced (napi disabled, rx_timer stopped, TX disabled, HAL
  * mutex held, CPU engine down): between the clock gate and ungate NOTHING may
  * touch 0xBB80xxxx/0xB801xxxx or the Lexra bus access stalls. */
 static void rtl819x_fabric_full_reset(void)
 {
+	unsigned long flags;
 	int guard;
 
 	/* FullAndSemiReset(), CONFIG_RTL_8197F branch (asicCom.c:2125-2133;
 	 * stock 0x8019396c verified instruction-for-instruction). */
-	REG32(SIRR) |= SIRR_FULL_RST;
-	msleep(300);
-	REG32(SYS_CLK_MAG) &= ~CM_ACTIVE_SWCORE;
-	msleep(300);
-	REG32(SYS_CLK_MAG) |= CM_ACTIVE_SWCORE;
-	msleep(50);
+	if (fabric_reset_atomic) {
+		local_irq_save(flags);
+		REG32(SIRR) |= SIRR_FULL_RST;
+		mdelay(300);
+		REG32(SYS_CLK_MAG) &= ~CM_ACTIVE_SWCORE;
+		mdelay(300);
+		REG32(SYS_CLK_MAG) |= CM_ACTIVE_SWCORE;
+		mdelay(50);
+		local_irq_restore(flags);
+	} else {
+		REG32(SIRR) |= SIRR_FULL_RST;
+		msleep(300);
+		REG32(SYS_CLK_MAG) &= ~CM_ACTIVE_SWCORE;
+		msleep(300);
+		REG32(SYS_CLK_MAG) |= CM_ACTIVE_SWCORE;
+		msleep(50);
+	}
 
 	/* Stock rtl8651_initAsic table-SRAM init (0x801928c8): MEMCR=0 -> 0x24,
 	 * poll (MEMCR & 0x2400) == 0x2400.  Without it the TLU table writes that
@@ -481,6 +545,27 @@ static void rtl819x_fabric_full_reset(void)
  *   echo 1 > /sys/module/rtl819x/parameters/trunk_pause  # pause on  (collapse)
  *   echo 2 > /sys/module/rtl819x/parameters/trunk_pause  # pause off (fix)
  *   ip link set eth0 down; ip link set eth0 up           # re-apply, then measure */
+/*
+ * ★ Per-port descriptor flow-control thresholds (PBFCRn) -- an A/B knob, OFF
+ * by default because it has not been measured.
+ *
+ * The FCON 90 / FCOFF 60 this driver writes for ports 0-5 come from the
+ * vendor's rtl8651_clearRegister(), which no RTL8197F build ever calls (it is
+ * defined but uncalled in all three 8197F SDK generations). What the 8197F
+ * SDKs actually program, in rtl865x_initAsicL2(), is FCON 0x1AC / FCOFF 0x1A6
+ * for every port PHY0..CPU -- PBFCR0-6, the CPU port included, which this
+ * driver never writes at all. If a descriptor is one ~128-byte buffer cell
+ * (the granularity docs/M7-LARGE-FRAME-RX-WEDGE.md infers), 90 descriptors is
+ * ~7 full-size frames of buffering per port before flow control engages --
+ * and with trunk pause forced off, flow control on port 0 has no way to push
+ * back except dropping, which a 12-cell frame hits before a 1-cell one.
+ *   echo 1 > /sys/module/rtl819x/parameters/pbfcr_vendor
+ *   echo 1 > /sys/module/rtl819x/parameters/fabric_reset   # re-run rtl865x_start
+ */
+static int pbfcr_vendor;
+module_param(pbfcr_vendor, int, 0644);
+MODULE_PARM_DESC(pbfcr_vendor, "per-port flow-control thresholds: 0 = FCON 90/FCOFF 60 on ports 0-5 (default, pre-existing), 1 = vendor 8197F FCON 0x1AC/FCOFF 0x1A6 on ports 0-6 incl. CPU (unmeasured)");
+
 static int trunk_pause = 2;
 module_param(trunk_pause, int, 0644);
 MODULE_PARM_DESC(trunk_pause, "RGMII-trunk 802.3x pause: 2=force OFF (default, A-2 residual fix), 1=force on (bench A/B collapse), 0=leave loader value, 3=honor incoming pause only (bit16), 4=generate pause only (bit17) -- 3/4 unverified directional experiments, apply live via trunk_redo, no reflash needed");
@@ -778,6 +863,13 @@ static void rtl865x_start(void)
 	 * in.  rtl865x_start() runs at cold boot AND after every self-heal, so
 	 * this covers both paths (the bringup pr_err below prints DMA_CR0 for
 	 * bench verification: expect ....A0CE).
+	 *
+	 * ★ Until 2026-09-24 this value, and the 128-word burst above, only
+	 * survived until the first transmit: the TX doorbell cleared CPUICR bit
+	 * 29 (burst -> 32 words) and with it reset HiFifoMark to 0x57, below this
+	 * 0xA0 LowFifoMark. The bringup print is taken before any TX, so it never
+	 * showed that; `echo 1 > .../txdiag` prints the live CPUICR/DMA_CR0. See
+	 * tx_kick_clear_burst in rtl819x_swnic.c.
 	 */
 	REG32(DMA_CR0) = (REG32(DMA_CR0) & ~(LowFifoMark_MASK | HiFifoMark_MASK)) |
 			 ((0xA0 << LowFifoMark_OFFSET) | 0xCE);
@@ -820,8 +912,15 @@ static void rtl865x_start(void)
 	REG32(SBFCR2) = (0x0050u << 16) | 0x006Cu;	/* Max_SBuf FCOFF=80 / FCON=108 */
 	{
 		int q;
-		for (q = 0; q <= 5; q++)		/* per-port MaxDSC FCOFF=60 / FCON=90 */
-			REG32(PBFCR0 + q * 0x04) = (0x003Cu << 16) | 0x005Au;
+
+		if (pbfcr_vendor) {
+			/* rtl865x_initAsicL2(), CONFIG_RTL_8197F: PHY0..CPU */
+			for (q = 0; q <= 6; q++)
+				REG32(PBFCR0 + q * 0x04) = (0x01A6u << 16) | 0x01ACu;
+		} else {
+			for (q = 0; q <= 5; q++)	/* per-port MaxDSC FCOFF=60 / FCON=90 */
+				REG32(PBFCR0 + q * 0x04) = (0x003Cu << 16) | 0x005Au;
+		}
 	}
 
 	/* Kick the switch core into normal Tx/Rx. */
@@ -1012,25 +1111,30 @@ static irqreturn_t rtl819x_eth_isr(int irq, void *dev_id)
 	}
 
 	/*
-	 * Mask at BOTH the CPU-iface (CPUIIMR) AND the global controller
-	 * (GIMR/BSP_SW_IE) before running napi. A switch-level assertion (e.g. a
-	 * PHY link event on cable re-plug) is NOT gated by CPUIIMR, so without the
-	 * GIMR mask it re-fires IRQ 4 forever (CPUIISR can even read 0) -> storm ->
-	 * wedge. napi re-enables both. Always handle (don't return IRQ_NONE) so a
-	 * status==0 switch interrupt gets masked here instead of storming.
+	 * Mask the CPU-iface sources (CPUIIMR) AND the line itself before running
+	 * napi. A switch-level assertion (e.g. a PHY link event on cable re-plug)
+	 * is NOT gated by CPUIIMR, so it would re-fire forever (CPUIISR can even
+	 * read 0) -> storm -> wedge. napi re-enables both. Always handle (don't
+	 * return IRQ_NONE) so a status==0 switch interrupt gets masked here
+	 * instead of storming.
 	 */
 	writel(0, priv->base + R_CPUIIMR);
 	writel(status, priv->base + R_CPUIISR);
 
-	/*
-	 * Mask the net IRQ by CLEARING CP0 Status IP4 directly. plat_irq_dispatch
-	 * delivers the switch NIC as CP0 IP4 and re-dispatches via do_IRQ(); it is
-	 * a percpu-style line, so disable_irq()/CPUIIMR/GIMR do NOT gate it -> the
-	 * switch keeps asserting IP4 -> the ISR storms through plat_irq_dispatch
-	 * forever -> wedge. Clearing IM4 makes plat_irq_dispatch's
-	 * (status & cause & ST0_IM) skip IP4. napi re-sets IP4 when the ring drains.
-	 */
-	clear_c0_status(STATUSF_IP4);
+	if (!irq_legacy_mask) {
+		/* See irq_legacy_mask: the only mask that holds under the chained
+		 * Realtek intc. napi's completion owes the matching enable_irq(). */
+		if (!test_and_set_bit(RTL819X_IRQ_OFF, &priv->flags))
+			disable_irq_nosync(irq);
+	} else {
+		/*
+		 * Pre-fix: clear CP0 Status IP4 directly. Written for the 4.14
+		 * platform, where the NIC was a bare CPU line; under the 6.18
+		 * chained intc, chained_irq_exit() sets IM4 again right after
+		 * this handler returns.
+		 */
+		clear_c0_status(STATUSF_IP4);
+	}
 	napi_schedule(&priv->napi);
 	return IRQ_HANDLED;
 }
@@ -1145,6 +1249,7 @@ static void rtl819x_hang_work(struct work_struct *w)
 	uint32 rxcnt[NEW_NIC_MAX_RX_DESC_RING] = { 0 };
 	uint32 txcnt[NEW_NIC_MAX_TX_DESC_RING] = { 0 };
 	int mode = xchg(&fabric_reset_mode, 0);
+	int ret;
 
 	/* Spurious re-queue, or the device went down (ndo_stop) while this was
 	 * queued: rtl819x_eth_stop already ran napi_disable/rtl865x_down —
@@ -1181,6 +1286,9 @@ static void rtl819x_hang_work(struct work_struct *w)
 	netif_tx_disable(priv->dev);
 
 	rtl865x_down();
+	/* Let a transfer that was already in flight land before New_swNic_init()
+	 * frees the TX buffers the engine had not handed back yet. */
+	udelay(200);
 	if (mode >= 2) {
 		/* NIC descriptor-engine soft reset (vendor CPUICR bit22). Pulse
 		 * with TX/RX already off; ring bases are re-latched by the
@@ -1192,7 +1300,24 @@ static void rtl819x_hang_work(struct work_struct *w)
 	if (mode >= 3)
 		rtl819x_fabric_full_reset();
 
-	New_swNic_init(rxcnt, txcnt, RTL819X_CLUSTER_SIZE);
+	/*
+	 * ★ Never restart the engine on rings that are not there. On failure
+	 * New_swNic_init() has already freed the pools and rx_ri/tx_ri, and the
+	 * ring-base registers still name the freed memory (or nothing, after
+	 * FULL_RST): rtl865x_start() would re-enable DMA into it and napi/xmit
+	 * would dereference COH_V(NULL). New_swNic_init() re-arms the clusters a
+	 * live ring already holds and allocates nothing here, so this should be
+	 * unreachable -- but if it happens the CPU port is gone for good, and a
+	 * clean reboot beats DMA into freed pages.
+	 */
+	ret = New_swNic_init(rxcnt, txcnt, RTL819X_CLUSTER_SIZE);
+	if (ret) {
+		pr_emerg("rtl819x: recovery level %d: ring re-init failed (%d), CPU port unrecoverable - rebooting\n",
+			 mode, ret);
+		mutex_unlock(&rtl865x_hal_lock);
+		emergency_restart();
+		return;
+	}
 	rtl865x_start();
 
 	netif_wake_queue(priv->dev);
@@ -1898,13 +2023,19 @@ static int rtl819x_eth_poll(struct napi_struct *napi, int budget)
 	}
 
 	/* M6.3: NAPI complete -> re-arm the switch NIC IRQ the ISR masked (CPUIIMR
-	 * + CP0 IP4). */
+	 * + the line itself, see irq_legacy_mask). */
 	if (rx_done < budget) {
 		napi_complete_done(napi, rx_done);
 		REG32(CPUIISR) = REG32(CPUIISR);
 		REG32(CPUIIMR) = NIC_IIMR;
-		REG32(GIMR) |= BSP_SW_IE;
-		set_c0_status(STATUSF_IP4);
+		if (irq_legacy_mask) {
+			REG32(GIMR) |= BSP_SW_IE;
+			set_c0_status(STATUSF_IP4);
+		}
+		/* Balanced against the ISR's disable_irq_nosync() whatever the
+		 * knob says now, so flipping it at runtime cannot leak a disable. */
+		if (test_and_clear_bit(RTL819X_IRQ_OFF, &priv->flags))
+			enable_irq(priv->irq);
 		/*
 		 * M6.3b race-close: a frame can land between the New_swNic_receive()
 		 * that returned "empty" above and the CPUIISR ack here. The ack (W1C)
@@ -2115,6 +2246,9 @@ static int rtl819x_eth_open(struct net_device *dev)
 	if (ret)
 		return ret;
 
+	/* request_irq() starts the line enabled (depth 0) whatever a previous
+	 * open's ISR left it at, so no enable_irq() is owed from before. */
+	clear_bit(RTL819X_IRQ_OFF, &priv->flags);
 	ret = request_irq(priv->irq, rtl819x_eth_isr, 0, dev->name, dev);
 	if (ret) {
 		New_swNic_freeRings();
@@ -2165,6 +2299,10 @@ static int rtl819x_eth_stop(struct net_device *dev)
 	timer_delete_sync(&priv->rx_timer);
 	napi_disable(&priv->napi);
 	rtl865x_down();
+	/* CPUICR=0 stops the engine from starting new transfers, not the one in
+	 * flight: give a burst that was already under way time to land before
+	 * its cluster goes back to the page allocator. */
+	udelay(200);
 	free_irq(priv->irq, dev);
 	New_swNic_freeRings();
 	return 0;

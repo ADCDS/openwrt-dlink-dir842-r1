@@ -91,6 +91,70 @@ MODULE_PARM_DESC(pid_dump, "log source port/vid/asic0 for the next N RX frames (
 u32 rtl819x_rx_fcs_ok;
 u32 rtl819x_rx_fcs_fail;
 
+/*
+ * ★ Find the received cluster through ph->ph_mbuf, the way every Realtek
+ * pkthdr/mbuf implementation does (vendor rtl865xc_swNic.c
+ * increase_rx_idx_release_pkthdr() and swNic_receive(); the 8197F bootloader's
+ * swNic_poll.c marks the same computation "for rx descriptor runout").
+ *
+ * The switch core walks the pkthdr ring and the mbuf ring with two independent
+ * pointers and writes, into each pkthdr it fills, the address of the mbuf it
+ * actually used. Nothing forces the two to stay in lock-step -- a runout on one
+ * ring can advance the other -- and this driver used to assume they did:
+ * pkthdr[i] was paired with mbuf[i] and rx_ri[i]. Once they drift apart that
+ * hands up the WRONG cluster under a CORRECT ph_len (exactly the "correct
+ * length, stale payload, cached == uncached" wedge signature in
+ * docs/M7-LARGE-FRAME-RX-WEDGE.md), leaves the mbuf the hardware really used
+ * CPU-owned forever (one fewer mbuf for the engine on every event), and
+ * re-points an mbuf the engine may still own at a fresh cluster while the old
+ * one is already in the stack.
+ *
+ * rx_mbuf_desync counts frames whose ph_mbuf named a different slot than the
+ * pkthdr index; rx_mbuf_bad counts ph_mbuf values outside the mbuf pool (the
+ * pkthdr's own slot is used for those). Both read-only. Set rx_follow_ph_mbuf=0
+ * to restore the old index-paired behaviour for an A/B.
+ */
+static int rx_follow_ph_mbuf = 1;
+module_param(rx_follow_ph_mbuf, int, 0644);
+MODULE_PARM_DESC(rx_follow_ph_mbuf, "locate the RX cluster via ph->ph_mbuf like the vendor driver (1, default) or by ring index (0, pre-fix)");
+static unsigned int rx_mbuf_desync;
+module_param(rx_mbuf_desync, uint, 0444);
+MODULE_PARM_DESC(rx_mbuf_desync, "RX frames whose ph_mbuf named a different ring slot than their pkthdr (read-only)");
+static unsigned int rx_mbuf_bad;
+module_param(rx_mbuf_bad, uint, 0444);
+MODULE_PARM_DESC(rx_mbuf_bad, "RX frames whose ph_mbuf pointed outside the mbuf pool (read-only)");
+
+/*
+ * ★ The TX doorbell used to clear CPUICR bit 29 before setting TXFD. Bits 29:28
+ * are the Lexra BUS BURST SIZE (rtl819x_regs.h: BUSBURST_128WORDS = 2 << 28), so
+ * the first frame this box ever transmitted switched the CPU-port DMA engine
+ * from the 128-word bursts rtl865x_start() programs to 32-word (128-byte)
+ * bursts. The vendor's own note on that field (sdk rtl865x_asicCom.c: "the
+ * HiFifoMark value will be reset to default value (0x57) after updated the
+ * burst size field of CPUICR") means the same write also dropped DMA_CR0's high
+ * FIFO mark to 0x57 -- BELOW the 0xA0 low mark rtl865x_start() leaves in place,
+ * an inverted watermark pair. So the 0xA0CE "A-2" setting, and the 128-word
+ * burst the stock kernel runs, only ever existed between rtl865x_start() and
+ * the first transmit, on 4.14 and 6.18 alike. 128 bytes is exactly the
+ * "large-frame" knee every wedge in docs/ measures.
+ *
+ * Provenance of the clear: an old SDK's LEGACY swNic_send() carries it under
+ * CONFIG_RTL_8197F, but no 8197F build ever ran that function -- rtl_types.h
+ * defines CONFIG_RTL_SWITCH_NEW_DESCRIPTOR for CONFIG_RTL_8197F, which maps
+ * RTL_swNic_send() to New_swNic_send(), and that sets TXFD and nothing else in
+ * all three SDK generations; the newer SDK "#if 0"s the legacy line too. Stock
+ * runs that new-descriptor path (its CPUICR1=0x140, see rtl819x-eth.c), so the
+ * stock runtime state is the one rtl865x_start() programs.
+ *
+ * Default 0 = never touch the burst field (stock runtime state: 128-word
+ * bursts, DMA_CR0 0xA0CE). 1 = pre-fix behaviour, for an A/B; switching back
+ * to 0 at runtime needs `echo 1 > .../fabric_reset` (or eth0 down/up) so
+ * rtl865x_start() re-writes CPUICR and DMA_CR0.
+ */
+static int tx_kick_clear_burst;
+module_param(tx_kick_clear_burst, int, 0644);
+MODULE_PARM_DESC(tx_kick_clear_burst, "TX doorbell clears CPUICR bit 29 (=32-word bursts + FIFO mark reset) like before: 0 = no (default, stock runtime state), 1 = pre-fix behaviour");
+
 /* On UP this SoC serialises the engine with irq-off spinlocks. */
 static DEFINE_SPINLOCK(swnic_tx_lock);
 static DEFINE_SPINLOCK(swnic_rx_lock);
@@ -227,14 +291,19 @@ int32 New_swNic_init(uint32 userNeedRxPkthdrRingCnt[NEW_NIC_MAX_RX_DESC_RING],
 {
 	volatile uint32 *rr, *mr, *tr;
 	uint32 j;
+	/* A re-init over rings that are already populated (the recovery ladder)
+	 * keeps the RX clusters it has -- see the RX loop below. Only valid if the
+	 * cluster geometry is unchanged, which it always is in this driver. */
+	bool reuse = size_of_cluster == clusterSize;
 
 	BUILD_BUG_ON(sizeof(struct rtl_pktHdr) != 32);
 	BUILD_BUG_ON(sizeof(struct rtl_mBuf) != 32);
 
-	/* No lock: New_swNic_init() runs from ndo_open before napi/timer start,
-	 * so there is no concurrent receive; and the allocations below may sleep
-	 * (dma_alloc_coherent/GFP_KERNEL), which must not happen under the
-	 * irq-off Rx spinlock. */
+	/* No lock: New_swNic_init() runs from ndo_open before napi/timer start, or
+	 * from the recovery work with napi disabled and the TX queue stopped, so
+	 * there is no concurrent receive, transmit or reclaim; and the
+	 * allocations below may sleep (dma_alloc_coherent/GFP_KERNEL), which must
+	 * not happen under the irq-off Rx spinlock. */
 	size_of_cluster = clusterSize;
 	rxCnt = userNeedRxPkthdrRingCnt[0];
 	txCnt = userNeedTxPkthdrRingCnt[0];
@@ -279,6 +348,25 @@ int32 New_swNic_init(uint32 userNeedRxPkthdrRingCnt[NEW_NIC_MAX_RX_DESC_RING],
 		mb->skb = 0;
 
 		tr[j] = TXPH_P(j) | DESC_RISC_OWNED;	/* CPU owns until it Tx's */
+
+		/*
+		 * ★ A re-init from the recovery work runs with frames still in
+		 * flight: the engine was stopped (rtl865x_down) before it handed
+		 * them back, so txDone never reclaimed them. Zeroing the slot used
+		 * to leak every one of them -- up to a full ring (255 skbs) per
+		 * TX-STALL recovery, and a forwarded skb is an RX page-frag cluster
+		 * that pins its whole frag page. Free them; the engine is stopped,
+		 * so nothing can still be reading these buffers.
+		 */
+		if (tx_ri[j].skb) {
+			struct sk_buff *stale =
+				(struct sk_buff *)(uintptr_t)tx_ri[j].skb;
+
+			if (tx_ri[j].dma)
+				dma_unmap_single(swnic_dmadev, tx_ri[j].dma,
+						 stale->len, DMA_TO_DEVICE);
+			dev_kfree_skb_any(stale);
+		}
 		tx_ri[j].skb = 0;
 		tx_ri[j].dma = 0;
 	}
@@ -295,23 +383,44 @@ int32 New_swNic_init(uint32 userNeedRxPkthdrRingCnt[NEW_NIC_MAX_RX_DESC_RING],
 		dma_addr_t dma = 0;
 		unsigned char *buf;
 
-		/* free any stale cluster from a prior init without free */
-		if (rx_ri[j].skb) {
-			struct sk_buff *stale =
-				(struct sk_buff *)(uintptr_t)rx_ri[j].skb;
+		/*
+		 * ★ Keep the cluster this slot already has. A re-init over a
+		 * populated ring (every recovery-ladder level) used to free all 256
+		 * clusters and allocate 256 new ones, GFP_ATOMIC, on a 64 MB box
+		 * that lives near its watermark. One failed allocation sent it to
+		 * err_out, which frees the rings under a caller that then restarted
+		 * the DMA engine on them. A cluster sitting in the ring is still
+		 * mapped for the device and is never touched by the CPU until the
+		 * engine hands it back, so it can simply be re-armed; the sync only
+		 * drops any cache line that could shadow the next DMA.
+		 */
+		if (rx_ri[j].skb && rx_ri[j].dma && reuse) {
+			skb = (void *)(uintptr_t)rx_ri[j].skb;
+			dma = rx_ri[j].dma;
+			rx_cluster_shinfo_sane(skb, j);
+			dma_sync_single_for_device(swnic_dmadev, dma, clusterSize,
+						   DMA_FROM_DEVICE);
+		} else {
+			/* free any stale cluster from a prior init without free */
+			if (rx_ri[j].skb) {
+				struct sk_buff *stale =
+					(struct sk_buff *)(uintptr_t)rx_ri[j].skb;
 
-			if (rx_ri[j].dma)
-				dma_unmap_single(swnic_dmadev, rx_ri[j].dma,
-						 size_of_cluster, DMA_FROM_DEVICE);
-			rx_cluster_shinfo_sane(stale, j);
-			dev_kfree_skb_any(stale);
-			rx_ri[j].skb = 0;
-			rx_ri[j].dma = 0;
+				if (rx_ri[j].dma)
+					dma_unmap_single(swnic_dmadev,
+							 rx_ri[j].dma,
+							 clusterSize,
+							 DMA_FROM_DEVICE);
+				rx_cluster_shinfo_sane(stale, j);
+				dev_kfree_skb_any(stale);
+				rx_ri[j].skb = 0;
+				rx_ri[j].dma = 0;
+			}
+
+			buf = alloc_rx_buf(&skb, clusterSize, &dma);
+			if (!buf)
+				goto err_out;
 		}
-
-		buf = alloc_rx_buf(&skb, clusterSize, &dma);
-		if (!buf)
-			goto err_out;
 
 		ph->ph_mbuf = RXMB_P(j);
 		ph->ph_len = 0;
@@ -406,6 +515,36 @@ int32 New_swNic_rxPending(void)
  * (docs/M7-LARGE-FRAME-RX-WEDGE.md, docs/RX-STALL-WEDGE.md §5).
  */
 
+/*
+ * The mbuf slot the switch core actually filled for pkthdr slot @idx: the one
+ * named by ph->ph_mbuf (see rx_follow_ph_mbuf). Falls back to @idx, counting
+ * it, when ph_mbuf does not name a slot of our mbuf pool.
+ */
+static uint32 rx_mbuf_slot(const struct rtl_pktHdr *ph, uint32 idx)
+{
+	uint32 off, mi;
+
+	if (!rx_follow_ph_mbuf)
+		return idx;
+
+	off = ph->ph_mbuf - (uint32)rxMb.phys;
+	if (off % sizeof(struct rtl_mBuf) ||
+	    off / sizeof(struct rtl_mBuf) >= rxCnt) {
+		rx_mbuf_bad++;
+		pr_err_ratelimited("swnic rx: pkthdr[%u] ph_mbuf=%08x is not an mbuf of the pool at %08x\n",
+				   idx, ph->ph_mbuf, (uint32)rxMb.phys);
+		return idx;
+	}
+
+	mi = off / sizeof(struct rtl_mBuf);
+	if (unlikely(mi != idx)) {
+		rx_mbuf_desync++;
+		pr_warn_ratelimited("swnic rx: pkthdr[%u] was filled through mbuf[%u] (ring desync #%u)\n",
+				    idx, mi, rx_mbuf_desync);
+	}
+	return mi;
+}
+
 int32 New_swNic_receive(rtl_nicRx_info *info, int retryCount)
 {
 	unsigned long flags = 0;
@@ -423,7 +562,7 @@ int32 New_swNic_receive(rtl_nicRx_info *info, int retryCount)
 		void *nskb = NULL;
 		dma_addr_t ndma = 0;
 		unsigned char *nbuf;
-		uint32 idx, slot, len;
+		uint32 idx, mi, slot, len;
 
 		if (++loops > 256)	/* bound: never spin holding the Rx lock */
 			break;
@@ -439,15 +578,16 @@ int32 New_swNic_receive(rtl_nicRx_info *info, int retryCount)
 		}
 
 		ph = RXPH(idx);
-		mb = RXMB(idx);
+		mi = rx_mbuf_slot(ph, idx);	/* the mbuf the engine really used */
+		mb = RXMB(mi);
 		len = ph->ph_len;	/* includes 4-byte FCS */
 
 		{
 			static int rxt;
 			if (rxt < 40) {
 				rxt++;
-				pr_err("swnic rx#%d idx=%u ph_len=%u port=%02x vid=%u reason=%04x mlen=%u\n",
-				       rxt, idx, ph->ph_len, ph->ph_portlist,
+				pr_err("swnic rx#%d idx=%u mbuf=%u ph_len=%u port=%02x vid=%u reason=%04x mlen=%u\n",
+				       rxt, idx, mi, ph->ph_len, ph->ph_portlist,
 				       ph->ph_vlanId & 0x0fff, ph->ph_reason, mb->m_len);
 			}
 		}
@@ -455,18 +595,20 @@ int32 New_swNic_receive(rtl_nicRx_info *info, int retryCount)
 		/* Belt-and-suspenders: never skb_put an implausible length. */
 		if (len < 15 || len > size_of_cluster) {
 			mb->m_len = 0;
+			ph->ph_len = 0;
 			wmb();
-			mr[idx] |= DESC_SWCORE_OWNED;
+			mr[mi] |= DESC_SWCORE_OWNED;
 			rr[idx] |= DESC_SWCORE_OWNED;
 			rxCurr = NEXT_IDX(idx, rxCnt);
 			continue;
 		}
 
-		r_skb = (struct sk_buff *)(uintptr_t)rx_ri[idx].skb;
+		r_skb = (struct sk_buff *)(uintptr_t)rx_ri[mi].skb;
 		if (!r_skb) {		/* should not happen */
 			mb->m_len = 0;
+			ph->ph_len = 0;
 			wmb();
-			mr[idx] |= DESC_SWCORE_OWNED;
+			mr[mi] |= DESC_SWCORE_OWNED;
 			rr[idx] |= DESC_SWCORE_OWNED;
 			rxCurr = NEXT_IDX(idx, rxCnt);
 			continue;
@@ -486,7 +628,7 @@ int32 New_swNic_receive(rtl_nicRx_info *info, int retryCount)
 		}
 
 		/* Hand the received cluster up. */
-		dma_unmap_single(swnic_dmadev, rx_ri[idx].dma,
+		dma_unmap_single(swnic_dmadev, rx_ri[mi].dma,
 				 size_of_cluster, DMA_FROM_DEVICE);
 		info->input = (void *)r_skb;
 		info->len = len - 4;
@@ -559,15 +701,15 @@ int32 New_swNic_receive(rtl_nicRx_info *info, int retryCount)
 		if (unlikely(rtl819x_rx_dump > 0) && len > 132) {
 			u8 *cv = ((struct sk_buff *)r_skb)->data;
 			volatile u8 *uv = (volatile u8 *)
-				(0xA0000000u | ((u32)rx_ri[idx].dma & 0x1FFFFFFFu));
+				(0xA0000000u | ((u32)rx_ri[mi].dma & 0x1FFFFFFFu));
 			int i, diff = -1;
 
 			rtl819x_rx_dump--;
 			for (i = 0; i < (int)len; i++)
 				if (cv[i] != uv[i]) { diff = i; break; }
-			pr_err("rxdump idx=%u ph_len=%u ph_reason=%04x m_len=%u m_next=%08x m_data=%08x dma=%08x cache-vs-uncache-diff@%d\n",
-			       idx, len, ph->ph_reason, mb->m_len, mb->m_next,
-			       mb->m_data, (u32)rx_ri[idx].dma, diff);
+			pr_err("rxdump idx=%u mbuf=%u ph_mbuf=%08x ph_len=%u ph_reason=%04x m_len=%u m_next=%08x m_data=%08x dma=%08x cache-vs-uncache-diff@%d\n",
+			       idx, mi, ph->ph_mbuf, len, ph->ph_reason, mb->m_len,
+			       mb->m_next, mb->m_data, (u32)rx_ri[mi].dma, diff);
 			print_hex_dump(KERN_ERR, "rxd-head-c: ", DUMP_PREFIX_OFFSET,
 				       16, 1, cv, 48, false);
 			print_hex_dump(KERN_ERR, "rxd-head-u: ", DUMP_PREFIX_OFFSET,
@@ -576,18 +718,21 @@ int32 New_swNic_receive(rtl_nicRx_info *info, int retryCount)
 				       16, 1, cv + len - 16, 16, false);
 		}
 
-		/* Install the fresh cluster into the mbuf + bookkeeping. */
-		rx_ri[idx].skb = (uintptr_t)nskb;
-		rx_ri[idx].dma = ndma;
+		/* Install the fresh cluster into the mbuf the engine used + its
+		 * bookkeeping (vendor increase_rx_idx_release_pkthdr()). */
+		rx_ri[mi].skb = (uintptr_t)nskb;
+		rx_ri[mi].dma = ndma;
 		mb->m_data = (uint32)ndma;
 		mb->m_extbuf = (uint32)ndma;
 		mb->m_len = 0;
 		mb->m_extsize = size_of_cluster;
 		mb->skb = (uint32)(uintptr_t)nskb;
+		/* A stale ph_len must never be readable as a new frame's length. */
+		ph->ph_len = 0;
 
 		/* Re-arm mbuf first, then pkthdr, then advance. */
 		wmb();
-		mr[idx] |= DESC_SWCORE_OWNED;
+		mr[mi] |= DESC_SWCORE_OWNED;
 		rr[idx] |= DESC_SWCORE_OWNED;
 		rxCurr = NEXT_IDX(idx, rxCnt);
 
@@ -704,9 +849,15 @@ static int32 _New_swNic_send(void *skb, void *output, uint32 len,
 	wmb();
 	tr[idx] |= DESC_SWCORE_OWNED;
 	txCurr = next;
+	/* The own bit lives in DRAM, the doorbell in a register on another bus
+	 * path: make sure the former has left the CPU before the engine is told
+	 * to go and fetch it (newest vendor SDK: wmb() around the own bit). */
+	wmb();
 
-	/* Ring the Tx doorbell (8197F: clear bit29 first, per vendor). */
-	REG32(CPUICR) = REG32(CPUICR) & ~(1u << 29);
+	/* Ring the Tx doorbell. Do NOT touch the burst-size field on the way --
+	 * see tx_kick_clear_burst above. */
+	if (unlikely(tx_kick_clear_burst))
+		REG32(CPUICR) = REG32(CPUICR) & ~(1u << 29);
 	REG32(CPUICR) |= TXFD;
 	return SUCCESS;
 }
@@ -724,22 +875,29 @@ static int32 _New_swNic_send(void *skb, void *output, uint32 len,
  */
 static int txdiag_set(const char *val, const struct kernel_param *kp)
 {
-	volatile uint32 *tr = TXR();
+	volatile uint32 *tr;
 	unsigned int owned = 0, i;
 
-	if (!tr || !txCnt) {
+	/* TXR() of a freed ring is 0x20000000, not NULL: test the allocation. */
+	if (!txRing.orig || !txCnt) {
 		pr_err("swnic txdiag: tx ring not allocated\n");
 		return 0;
 	}
+	tr = TXR();
 	for (i = 0; i < txCnt; i++)
 		if ((tr[i] & DESC_OWNED_BIT) == DESC_SWCORE_OWNED)
 			owned++;
 
 	pr_err("swnic txdiag: txCurr=%u txDoneIdx=%u txCnt=%u swcore_owned=%u\n",
 	       txCurr, txDoneIdx, txCnt, owned);
-	pr_err("swnic txdiag: CPUICR=%08x CPUIISR=%08x CPUTPDCR0=%08x tr[0..3]=%08x %08x %08x %08x\n",
-	       REG32(CPUICR), REG32(CPUIISR), REG32(CPUTPDCR0),
+	/* CPUICR[29:28] is the bus burst size (expect 2 = 128 words, i.e.
+	 * CPUICR=e4......); DMA_CR0[15:0] the FIFO marks (expect a0ce). */
+	pr_err("swnic txdiag: CPUICR=%08x (burst=%u) DMA_CR0=%08x CPUIISR=%08x CPUTPDCR0=%08x tr[0..3]=%08x %08x %08x %08x\n",
+	       REG32(CPUICR), (REG32(CPUICR) >> 28) & 3, REG32(DMA_CR0),
+	       REG32(CPUIISR), REG32(CPUTPDCR0),
 	       tr[0], tr[1], tr[2], tr[3]);
+	pr_err("swnic txdiag: rx_mbuf_desync=%u rx_mbuf_bad=%u\n",
+	       rx_mbuf_desync, rx_mbuf_bad);
 	return 0;
 }
 
